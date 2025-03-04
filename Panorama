@@ -64,18 +64,55 @@ def connect_to_panorama():
         if prompt_changed:
             print("Successfully entered configuration mode!")
             
+            # Define device groups mapping - you can modify these names later
+            device_groups = {
+                "1": "DEVICE_GROUP_1",  # Replace with actual device group name
+                "2": "DEVICE_GROUP_2",  # Replace with actual device group name
+                "3": "DEVICE_GROUP_3",  # Replace with actual device group name
+                "4": "DEVICE_GROUP_4",  # Replace with actual device group name
+            }
+            
+            # Define rulebase types mapping
+            rulebase_types = {
+                "1": "pre-rulebase",
+                "2": "post-rulebase",
+                "3": "default-rulebase",
+            }
+            
             continue_session = True
             while continue_session:
-                # Get parameters from user
-                device_group = input("Enter device group name: ")
-                rulebase_type = input("Enter rulebase type (pre-rulebase/post-rulebase): ")
+                # Display device group options
+                print("\nSelect Device Group:")
+                for key, name in device_groups.items():
+                    print(f"{key}. {name}")
+                
+                # Get device group selection
+                device_group_choice = input("Enter device group number (1-4): ")
+                if device_group_choice not in device_groups:
+                    print("Invalid choice. Using default (1).")
+                    device_group_choice = "1"
+                device_group = device_groups[device_group_choice]
+                
+                # Display rulebase options
+                print("\nSelect Rulebase Type:")
+                for key, name in rulebase_types.items():
+                    print(f"{key}. {name}")
+                
+                # Get rulebase selection
+                rulebase_choice = input("Enter rulebase type number (1-3): ")
+                if rulebase_choice not in rulebase_types:
+                    print("Invalid choice. Using default (1).")
+                    rulebase_choice = "1"
+                rulebase_type = rulebase_types[rulebase_choice]
+                
+                # Get rule name
                 rule_name = input("Enter rule name (or press Enter for all rules): ")
                 
-                # Construct command
+                # Construct command - no need for 'run' in configuration mode
                 if rule_name:
-                    command = f"run show device-group {device_group} {rulebase_type} security rules {rule_name}\n"
+                    command = f"show device-group {device_group} {rulebase_type} security rules {rule_name}\n"
                 else:
-                    command = f"run show device-group {device_group} {rulebase_type} security rules\n"
+                    command = f"show device-group {device_group} {rulebase_type} security rules\n"
                 
                 print(f"Executing command: {command}")
                 channel.send(command)
