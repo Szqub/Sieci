@@ -23,19 +23,45 @@ def connect_to_panorama():
         # Start an interactive shell
         channel = ssh.invoke_shell()
         
-        # Wait for the shell to initialize
-        time.sleep(1)
-        output = channel.recv(1024).decode('utf-8')
-        print(output)
+        # Wait for the shell to initialize and show the > prompt
+        prompt_ready = False
+        max_init_attempts = 10
+        init_attempts = 0
         
-        # Enter configuration mode
+        while not prompt_ready and init_attempts < max_init_attempts:
+            time.sleep(1)
+            if channel.recv_ready():
+                output = channel.recv(1024).decode('utf-8')
+                print(output)
+                # Check for the > prompt indicating system is ready
+                if '>' in output:
+                    prompt_ready = True
+                    break
+            init_attempts += 1
+            
+        if not prompt_ready:
+            print("Timed out waiting for the initial prompt. Check your connection.")
+            return
+        
+        # Enter configuration mode and wait for prompt to change
         channel.send("configure\n")
-        time.sleep(1)
-        output = channel.recv(1024).decode('utf-8')
-        print(output)
         
-        # Check if we're in configuration mode by looking for # prompt
-        if '#' in output:
+        # Wait for the prompt to change to #
+        prompt_changed = False
+        max_attempts = 10
+        attempts = 0
+        
+        while not prompt_changed and attempts < max_attempts:
+            time.sleep(1)
+            if channel.recv_ready():
+                output = channel.recv(1024).decode('utf-8')
+                print(output)
+                if '#' in output:
+                    prompt_changed = True
+                    break
+            attempts += 1
+            
+        if prompt_changed:
             print("Successfully entered configuration mode!")
             
             continue_session = True
@@ -54,16 +80,32 @@ def connect_to_panorama():
                 print(f"Executing command: {command}")
                 channel.send(command)
                 
-                # Wait for the command to complete (adjust timeout as needed)
-                time.sleep(3)
-                
-                # Get the command output (may need to receive multiple times for large outputs)
-                buffer = ""
-                while channel.recv_ready():
-                    part = channel.recv(4096).decode('utf-8')
-                    buffer += part
-                    # Add small delay to ensure we get everything
+                # Wait for response to start coming
+                wait_time = 0
+                while not channel.recv_ready() and wait_time < 10:
                     time.sleep(0.5)
+                    wait_time += 0.5
+                
+                # Get the command output with patience
+                buffer = ""
+                last_receive_time = time.time()
+                timeout = 30  # seconds to wait for complete output
+                
+                while time.time() - last_receive_time < timeout:
+                    if channel.recv_ready():
+                        part = channel.recv(4096).decode('utf-8')
+                        buffer += part
+                        last_receive_time = time.time()
+                        
+                        # If we see a command prompt, we might be done
+                        if '#' in part.splitlines()[-1:]:
+                            # Wait just a bit more to make sure we got everything
+                            time.sleep(1)
+                            if channel.recv_ready():
+                                buffer += channel.recv(4096).decode('utf-8')
+                            break
+                    else:
+                        time.sleep(0.5)
                 
                 print("\n--- Command Output ---")
                 print(buffer)
