@@ -1,128 +1,101 @@
 import paramiko
-import getpass  # Biblioteka do ukrywania hasła
+import getpass
+import time
+import sys
 
-# Funkcja do łączenia się z urządzeniem i wykonywania poleceń
-def connect_and_execute(hostname, username, password, command, debug=False):
+def connect_to_panorama():
+    """Establish SSH connection to Panorama and execute commands."""
+    # Get connection details from user
+    hostname = input("Enter Panorama IP address: ")
+    username = input("Enter username: ")
+    password = getpass.getpass("Enter password: ")
+    
+    # Create SSH client
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    
     try:
-        # Inicjalizacja klienta SSH
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # Automatycznie akceptuj klucz hosta
-
-        # Łączenie się z urządzeniem
-        client.connect(hostname, username=username, password=password)
-
-        # Debug: Wyświetl wysyłane polecenie
-        if debug:
-            print(f"\n[DEBUG] Wysyłane polecenie: {command}")
-
-        # Wykonanie polecenia
-        stdin, stdout, stderr = client.exec_command(command)
-
-        # Odczytanie wyniku
-        output = stdout.read().decode()
-        error = stderr.read().decode()
-
-        # Debug: Wyświetl odpowiedź
-        if debug:
-            if output:
-                print(f"[DEBUG] Odpowiedź:\n{output}")
-            if error:
-                print(f"[DEBUG] Błąd:\n{error}")
-
-        # Zwrócenie wyniku
-        if output:
-            return output.strip()  # Usuwamy zbędne białe znaki
+        # Attempt connection
+        print(f"Connecting to {hostname}...")
+        ssh.connect(hostname=hostname, username=username, password=password, timeout=10)
+        print("Connection established successfully!")
+        
+        # Start an interactive shell
+        channel = ssh.invoke_shell()
+        
+        # Wait for the shell to initialize
+        time.sleep(1)
+        output = channel.recv(1024).decode('utf-8')
+        print(output)
+        
+        # Enter configuration mode
+        channel.send("configure\n")
+        time.sleep(1)
+        output = channel.recv(1024).decode('utf-8')
+        print(output)
+        
+        # Check if we're in configuration mode by looking for # prompt
+        if '#' in output:
+            print("Successfully entered configuration mode!")
+            
+            continue_session = True
+            while continue_session:
+                # Get parameters from user
+                device_group = input("Enter device group name: ")
+                rulebase_type = input("Enter rulebase type (pre-rulebase/post-rulebase): ")
+                rule_name = input("Enter rule name (or press Enter for all rules): ")
+                
+                # Construct command
+                if rule_name:
+                    command = f"run show device-group {device_group} {rulebase_type} security rules {rule_name}\n"
+                else:
+                    command = f"run show device-group {device_group} {rulebase_type} security rules\n"
+                
+                print(f"Executing command: {command}")
+                channel.send(command)
+                
+                # Wait for the command to complete (adjust timeout as needed)
+                time.sleep(3)
+                
+                # Get the command output (may need to receive multiple times for large outputs)
+                buffer = ""
+                while channel.recv_ready():
+                    part = channel.recv(4096).decode('utf-8')
+                    buffer += part
+                    # Add small delay to ensure we get everything
+                    time.sleep(0.5)
+                
+                print("\n--- Command Output ---")
+                print(buffer)
+                print("--- End of Output ---\n")
+                
+                # Ask if user wants to continue
+                user_choice = input("Do you want to execute another command? (y/n): ").lower()
+                continue_session = user_choice == 'y'
+        
         else:
-            return error.strip()
-
+            print("Failed to enter configuration mode. Current prompt:", output.strip())
+    
+    except paramiko.AuthenticationException:
+        print("Authentication failed. Please check your username and password.")
+    except paramiko.SSHException as e:
+        print(f"SSH error: {e}")
     except Exception as e:
-        return f"Błąd: {e}"
+        print(f"Connection error: {e}")
     finally:
-        # Zamknięcie połączenia
-        client.close()
+        # Close connection
+        if 'ssh' in locals() and ssh.get_transport() is not None:
+            ssh.close()
+            print("Connection closed.")
 
-# Funkcja do pobrania listy device groupów
-def get_device_groups(hostname, username, password, debug=False):
-    # Polecenie do pobrania listy device groupów
-    command = "show devicegroups"
-    output = connect_and_execute(hostname, username, password, command, debug)
-
-    # Przetwarzanie wyniku
-    if output and "error" not in output.lower():
-        device_groups = [line.split()[0] for line in output.splitlines() if line.strip()]
-        return device_groups
-    else:
-        print("Nie udało się pobrać listy device groupów.")
-        return []
-
-# Funkcja do wyświetlania konkretnej polityki
-def show_single_policy(hostname, username, password, device_group, rulebase, policy_name, debug=False):
-    # Polecenie do przełączenia na odpowiednią device group
-    command = f'set device-group {device_group}'
-    connect_and_execute(hostname, username, password, command, debug)  # Przełącz się na odpowiednią device group
-
-    # Polecenie do wyświetlenia konkretnej polityki
-    command = f'show running rulebase {rulebase} security rules "{policy_name}"'
-    policy = connect_and_execute(hostname, username, password, command, debug)
-
-    # Wyświetlenie polityki
-    if policy and "error" not in policy.lower():
-        print(f"\nPolityka '{policy_name}' w {rulebase} (Device Group: {device_group}):\n{policy}")
-    else:
-        print(f"\nPolityka '{policy_name}' nie została znaleziona w {rulebase} (Device Group: {device_group}).")
-
-# Główna funkcja
-def main():
-    # Pobierz dane od użytkownika
-    hostname = input("Podaj IP Panoramy: ")
-    username = input("Podaj nazwę użytkownika: ")
-    password = getpass.getpass("Podaj hasło: ")  # Hasło jest ukryte
-    debug = input("Czy włączyć tryb debugowania? (t/n): ").strip().lower() == 't'  # Pytanie o tryb debugowania
-
-    # Pobierz listę device groupów
-    device_groups = get_device_groups(hostname, username, password, debug)
-    if not device_groups:
-        return  # Zakończ skrypt, jeśli nie udało się pobrać listy
-
-    while True:
-        # Wybierz device group
-        print("\nDostępne Device Groupy:")
-        for i, dg in enumerate(device_groups, start=1):
-            print(f"{i}. {dg}")
-        print(f"{len(device_groups) + 1}. shared (reguły współdzielone)")
-
-        choice = input("\nWybierz numer Device Group: ").strip()
-        try:
-            choice = int(choice)
-            if 1 <= choice <= len(device_groups):
-                device_group = device_groups[choice - 1]
-            elif choice == len(device_groups) + 1:
-                device_group = "shared"
-            else:
-                print("Nieprawidłowy wybór. Spróbuj ponownie.")
-                continue
-        except ValueError:
-            print("Nieprawidłowy wybór. Spróbuj ponownie.")
-            continue
-
-        # Zapytaj użytkownika o rulebase
-        rulebase = input("Podaj rulebase (pre-rulebase, post-rulebase, default): ").strip().lower()
-        while rulebase not in ["pre-rulebase", "post-rulebase", "default"]:
-            print("Nieprawidłowy wybór. Wybierz 'pre-rulebase', 'post-rulebase' lub 'default'.")
-            rulebase = input("Podaj rulebase (pre-rulebase, post-rulebase, default): ").strip().lower()
-
-        # Zapytaj użytkownika o nazwę polityki
-        policy_name = input("Podaj nazwę polityki do wyświetlenia: ").strip()
-
-        # Wyświetl politykę
-        show_single_policy(hostname, username, password, device_group, rulebase, policy_name, debug)
-
-        # Zapytaj, czy użytkownik chce zobaczyć kolejną politykę
-        cont = input("\nCzy chcesz zobaczyć kolejną politykę? (t/n): ").strip().lower()
-        if cont != 't':
-            print("Zamykanie skryptu.")
-            break
-
-# Uruchom skrypt
 if __name__ == "__main__":
-    main()
+    print("Palo Alto Panorama CLI Connection Script")
+    print("-" * 40)
+    
+    try:
+        connect_to_panorama()
+    except KeyboardInterrupt:
+        print("\nProgram interrupted by user. Exiting...")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
