@@ -1,0 +1,579 @@
+#!/usr/bin/env python3
+"""
+Panorama Connection Finder
+
+This script provides a simple console interface to search for all allowed connections
+on Palo Alto Panorama by source or destination IP, showing complete details including
+policy names, ports, applications, and users with support for address groups.
+
+Usage:
+    python panorama_connection_finder.py
+
+The script will prompt for Panorama hostname/IP, username, and password,
+then allow you to search by IP address.
+"""
+
+import paramiko
+import re
+import getpass
+import ipaddress
+import sys
+import time
+import xml.etree.ElementTree as ET
+from collections import defaultdict
+
+class PanoramaConnectionFinder:
+    def __init__(self, host, username, password):
+        self.host = host
+        self.username = username
+        self.password = password
+        self.client = None
+        self.device_groups = []
+        self.rulebases = ["pre-rulebase", "post-rulebase"]
+        self.address_cache = {}  # Cache for address objects
+        self.address_group_cache = {}  # Cache for address groups
+        self.service_cache = {}  # Cache for service objects
+        
+    def connect(self):
+        """Establish SSH connection to Panorama"""
+        try:
+            print(f"Connecting to {self.host}...")
+            self.client = paramiko.SSHClient()
+            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.client.connect(self.host, username=self.username, password=self.password)
+            print(f"Successfully connected to {self.host}")
+            return True
+        except Exception as e:
+            print(f"Connection failed: {str(e)}")
+            return False
+    
+    def disconnect(self):
+        """Close SSH connection"""
+        if self.client:
+            self.client.close()
+            print("Connection closed")
+    
+    def execute_command(self, command, timeout=30):
+        """Execute a command and return the output"""
+        if not self.client:
+            print("Not connected to Panorama")
+            return None
+        
+        try:
+            # Print a dot to show progress for long-running commands
+            sys.stdout.write(f"Executing: {command.split()[0]}... ")
+            sys.stdout.flush()
+            
+            stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+            output = stdout.read().decode('utf-8')
+            
+            # Print completion indicator
+            print("done")
+            return output
+        except Exception as e:
+            print(f"failed: {str(e)}")
+            return None
+    
+    def get_device_groups(self):
+        """Get all device groups configured on Panorama"""
+        print("Retrieving device groups...")
+        output = self.execute_command("show devicegroups")
+        if output:
+            # Extract device group names
+            pattern = r"devicegroup: (.+)"
+            matches = re.findall(pattern, output)
+            self.device_groups = matches
+            return matches
+        return []
+    
+    def get_shared_address_objects(self):
+        """Get all shared address objects"""
+        print("Retrieving shared address objects...")
+        output = self.execute_command("show config shared address", timeout=60)
+        self._parse_address_objects(output, "shared")
+        
+    def get_device_group_address_objects(self, device_group):
+        """Get address objects for a specific device group"""
+        output = self.execute_command(f"show config {device_group}/address", timeout=60)
+        self._parse_address_objects(output, device_group)
+    
+    def _parse_address_objects(self, xml_output, context):
+        """Parse address objects from XML output"""
+        if not xml_output or "<response status='error'" in xml_output:
+            return
+        
+        # Extract entries
+        entries = re.findall(r'<entry name="([^"]+)">(.*?)</entry>', xml_output, re.DOTALL)
+        
+        if not entries:
+            return
+            
+        # Process each address object
+        for name, content in entries:
+            # Check for IP address type
+            ip_match = re.search(r'<ip-netmask>([^<]+)</ip-netmask>', content)
+            if ip_match:
+                self.address_cache[f"{context}/{name}"] = ip_match.group(1)
+                continue
+            
+            # Check for range type
+            range_match = re.search(r'<ip-range>([^<]+)</ip-range>', content)
+            if range_match:
+                self.address_cache[f"{context}/{name}"] = range_match.group(1)
+                continue
+            
+            # For other types (like FQDN), just store as is
+            self.address_cache[f"{context}/{name}"] = name
+    
+    def get_shared_address_groups(self):
+        """Get all shared address groups"""
+        print("Retrieving shared address groups...")
+        output = self.execute_command("show config shared address-group", timeout=60)
+        self._parse_address_groups(output, "shared")
+    
+    def get_device_group_address_groups(self, device_group):
+        """Get address groups for a specific device group"""
+        output = self.execute_command(f"show config {device_group}/address-group", timeout=60)
+        self._parse_address_groups(output, device_group)
+    
+    def _parse_address_groups(self, xml_output, context):
+        """Parse address groups from XML output"""
+        if not xml_output or "<response status='error'" in xml_output:
+            return
+        
+        # Extract entries
+        entries = re.findall(r'<entry name="([^"]+)">(.*?)</entry>', xml_output, re.DOTALL)
+        
+        if not entries:
+            return
+            
+        # Process each address group
+        for name, content in entries:
+            # Extract members
+            members_match = re.findall(r'<member>([^<]+)</member>', content)
+            if members_match:
+                self.address_group_cache[f"{context}/{name}"] = members_match
+    
+    def get_shared_service_objects(self):
+        """Get all shared service objects"""
+        print("Retrieving shared service objects...")
+        output = self.execute_command("show config shared service", timeout=60)
+        self._parse_service_objects(output, "shared")
+    
+    def get_device_group_service_objects(self, device_group):
+        """Get service objects for a specific device group"""
+        output = self.execute_command(f"show config {device_group}/service", timeout=60)
+        self._parse_service_objects(output, device_group)
+    
+    def _parse_service_objects(self, xml_output, context):
+        """Parse service objects from XML output"""
+        if not xml_output or "<response status='error'" in xml_output:
+            return
+        
+        # Extract entries
+        entries = re.findall(r'<entry name="([^"]+)">(.*?)</entry>', xml_output, re.DOTALL)
+        
+        if not entries:
+            return
+            
+        # Process each service object
+        for name, content in entries:
+            # Extract protocol and port
+            protocol = "unknown"
+            port = "unknown"
+            
+            tcp_match = re.search(r'<tcp>(.*?)</tcp>', content, re.DOTALL)
+            if tcp_match:
+                protocol = "tcp"
+                port_match = re.search(r'<port>([^<]+)</port>', tcp_match.group(1))
+                if port_match:
+                    port = port_match.group(1)
+            
+            udp_match = re.search(r'<udp>(.*?)</udp>', content, re.DOTALL)
+            if udp_match:
+                protocol = "udp"
+                port_match = re.search(r'<port>([^<]+)</port>', udp_match.group(1))
+                if port_match:
+                    port = port_match.group(1)
+            
+            self.service_cache[f"{context}/{name}"] = f"{protocol}/{port}"
+    
+    def resolve_address(self, address_name, device_group=None):
+        """Resolve an address object to its IP value"""
+        # Check if it's a direct IP
+        try:
+            ipaddress.IPv4Network(address_name)
+            return address_name
+        except ValueError:
+            pass
+        
+        # First try to find in the device group context
+        if device_group:
+            key = f"{device_group}/{address_name}"
+            if key in self.address_cache:
+                return self.address_cache[key]
+            
+        # Then try in the shared context
+        key = f"shared/{address_name}"
+        if key in self.address_cache:
+            return self.address_cache[key]
+        
+        # If not found, return as is
+        return address_name
+    
+    def resolve_service(self, service_name, device_group=None):
+        """Resolve a service object to its protocol/port value"""
+        # First try to find in the device group context
+        if device_group:
+            key = f"{device_group}/{service_name}"
+            if key in self.service_cache:
+                return self.service_cache[key]
+            
+        # Then try in the shared context
+        key = f"shared/{service_name}"
+        if key in self.service_cache:
+            return self.service_cache[key]
+        
+        # If not found, return as is
+        return service_name
+    
+    def expand_address_group(self, group_name, device_group=None):
+        """Expand an address group to its member addresses"""
+        members = []
+        
+        # First try to find in the device group context
+        if device_group:
+            key = f"{device_group}/{group_name}"
+            if key in self.address_group_cache:
+                group_members = self.address_group_cache[key]
+                for member in group_members:
+                    # Check if the member is another group
+                    if self.is_address_group(member, device_group):
+                        members.extend(self.expand_address_group(member, device_group))
+                    else:
+                        members.append(self.resolve_address(member, device_group))
+                return members
+            
+        # Then try in the shared context
+        key = f"shared/{group_name}"
+        if key in self.address_group_cache:
+            group_members = self.address_group_cache[key]
+            for member in group_members:
+                # Check if the member is another group
+                if self.is_address_group(member, "shared"):
+                    members.extend(self.expand_address_group(member, "shared"))
+                else:
+                    members.append(self.resolve_address(member, "shared"))
+            return members
+        
+        # If not found, return as is
+        return [group_name]
+    
+    def is_address_group(self, name, context):
+        """Check if a name is an address group"""
+        key = f"{context}/{name}"
+        return key in self.address_group_cache
+    
+    def load_address_objects(self):
+        """Load all address objects and groups"""
+        self.get_shared_address_objects()
+        self.get_shared_address_groups()
+        
+        for dg in self.device_groups:
+            self.get_device_group_address_objects(dg)
+            self.get_device_group_address_groups(dg)
+    
+    def load_service_objects(self):
+        """Load all service objects"""
+        self.get_shared_service_objects()
+        
+        for dg in self.device_groups:
+            self.get_device_group_service_objects(dg)
+    
+    def get_rules_xml(self, device_group, rulebase):
+        """Get all security rules in XML format from a specific device group and rulebase"""
+        cmd = f'show config {device_group}/{rulebase}/security/rules'
+        output = self.execute_command(cmd, timeout=120)
+        return output
+    
+    def search_rules_by_ip(self, ip_address, as_source=True):
+        """
+        Search for rules that have the specified IP address as source or destination
+        
+        Args:
+            ip_address: The IP address to search for
+            as_source: If True, search where IP is source, otherwise destination
+        """
+        try:
+            search_ip = ipaddress.IPv4Address(ip_address)
+        except ValueError:
+            print(f"Invalid IP address: {ip_address}")
+            return []
+        
+        results = []
+        
+        print("Searching for security rules...")
+        for dg in self.device_groups:
+            for rb in self.rulebases:
+                # Get all rules in this device group and rulebase
+                xml_output = self.get_rules_xml(dg, rb)
+                if not xml_output or "<response status='error'" in xml_output:
+                    continue
+                
+                # Process the XML output
+                rule_sections = re.findall(r'<entry name="([^"]+)">(.*?)</entry>', xml_output, re.DOTALL)
+                total_rules = len(rule_sections)
+                print(f"Processing {total_rules} rules in {dg}/{rb}...")
+                
+                for i, (rule_name, rule_content) in enumerate(rule_sections):
+                    if i % 20 == 0:  # Print progress every 20 rules
+                        sys.stdout.write(f"\rProgress: {i}/{total_rules}")
+                        sys.stdout.flush()
+                    
+                    # Extract source addresses
+                    src_pattern = r'<source>(.*?)</source>'
+                    src_match = re.search(src_pattern, rule_content, re.DOTALL)
+                    src_addresses = []
+                    if src_match:
+                        src_xml = src_match.group(1)
+                        src_entries = re.findall(r'<member>([^<]+)</member>', src_xml)
+                        src_addresses = src_entries
+                    
+                    # Extract destination addresses
+                    dst_pattern = r'<destination>(.*?)</destination>'
+                    dst_match = re.search(dst_pattern, rule_content, re.DOTALL)
+                    dst_addresses = []
+                    if dst_match:
+                        dst_xml = dst_match.group(1)
+                        dst_entries = re.findall(r'<member>([^<]+)</member>', dst_xml)
+                        dst_addresses = dst_entries
+                    
+                    # Extract services
+                    svc_pattern = r'<service>(.*?)</service>'
+                    svc_match = re.search(svc_pattern, rule_content, re.DOTALL)
+                    services = []
+                    if svc_match:
+                        svc_xml = svc_match.group(1)
+                        svc_entries = re.findall(r'<member>([^<]+)</member>', svc_xml)
+                        services = svc_entries
+                    
+                    # Extract applications
+                    app_pattern = r'<application>(.*?)</application>'
+                    app_match = re.search(app_pattern, rule_content, re.DOTALL)
+                    applications = []
+                    if app_match:
+                        app_xml = app_match.group(1)
+                        app_entries = re.findall(r'<member>([^<]+)</member>', app_xml)
+                        applications = app_entries
+                    
+                    # Extract users
+                    user_pattern = r'<source-user>(.*?)</source-user>'
+                    user_match = re.search(user_pattern, rule_content, re.DOTALL)
+                    users = []
+                    if user_match:
+                        user_xml = user_match.group(1)
+                        user_entries = re.findall(r'<member>([^<]+)</member>', user_xml)
+                        users = user_entries
+                    
+                    # Extract action (allow/deny)
+                    action_pattern = r'<action>([^<]+)</action>'
+                    action_match = re.search(action_pattern, rule_content)
+                    action = action_match.group(1) if action_match else "unknown"
+                    
+                    # Check if the IP matches this rule
+                    matched = False
+                    match_details = {}
+                    
+                    if as_source:
+                        # Check source addresses for match
+                        for src in src_addresses:
+                            if self.is_address_group(src, dg) or self.is_address_group(src, "shared"):
+                                # Expand the group and check each member
+                                expanded_addresses = self.expand_address_group(src, dg)
+                                for addr in expanded_addresses:
+                                    if self._ip_matches_address(search_ip, addr):
+                                        matched = True
+                                        match_details["match_type"] = "source"
+                                        match_details["matched_object"] = src
+                                        match_details["matched_address"] = addr
+                                        break
+                            else:
+                                # Direct address object
+                                addr = self.resolve_address(src, dg)
+                                if self._ip_matches_address(search_ip, addr):
+                                    matched = True
+                                    match_details["match_type"] = "source"
+                                    match_details["matched_object"] = src
+                                    match_details["matched_address"] = addr
+                                    break
+                    else:
+                        # Check destination addresses for match
+                        for dst in dst_addresses:
+                            if self.is_address_group(dst, dg) or self.is_address_group(dst, "shared"):
+                                # Expand the group and check each member
+                                expanded_addresses = self.expand_address_group(dst, dg)
+                                for addr in expanded_addresses:
+                                    if self._ip_matches_address(search_ip, addr):
+                                        matched = True
+                                        match_details["match_type"] = "destination"
+                                        match_details["matched_object"] = dst
+                                        match_details["matched_address"] = addr
+                                        break
+                            else:
+                                # Direct address object
+                                addr = self.resolve_address(dst, dg)
+                                if self._ip_matches_address(search_ip, addr):
+                                    matched = True
+                                    match_details["match_type"] = "destination"
+                                    match_details["matched_object"] = dst
+                                    match_details["matched_address"] = addr
+                                    break
+                    
+                    if matched:
+                        # For each matching rule, resolve services to actual port/protocol
+                        resolved_services = []
+                        for svc in services:
+                            if svc == "any":
+                                resolved_services.append("any")
+                            else:
+                                resolved_services.append(self.resolve_service(svc, dg))
+                        
+                        results.append({
+                            "device_group": dg,
+                            "rulebase": rb,
+                            "rule_name": rule_name,
+                            "sources": src_addresses,
+                            "destinations": dst_addresses,
+                            "services": resolved_services,
+                            "applications": applications,
+                            "users": users,
+                            "action": action,
+                            "match_details": match_details
+                        })
+                
+                sys.stdout.write(f"\rProgress: {total_rules}/{total_rules} - Complete\n")
+                sys.stdout.flush()
+        
+        return results
+    
+    def _ip_matches_address(self, ip, address):
+        """Check if an IP matches an address object value"""
+        # Handle "any"
+        if address == "any":
+            return True
+        
+        try:
+            # Handle IP ranges (format: start-end)
+            if "-" in address:
+                start, end = address.split("-")
+                start_ip = ipaddress.IPv4Address(start.strip())
+                end_ip = ipaddress.IPv4Address(end.strip())
+                return start_ip <= ip <= end_ip
+            
+            # Handle networks (with CIDR)
+            elif "/" in address:
+                network = ipaddress.IPv4Network(address)
+                return ip in network
+            
+            # Handle single IPs
+            else:
+                addr_ip = ipaddress.IPv4Address(address)
+                return ip == addr_ip
+        except ValueError:
+            # Not a valid IP format, could be a hostname or other type
+            return False
+
+def main():
+    """Main function to run the script"""
+    print("Panorama Connection Finder")
+    print("==========================")
+    
+    # Get connection details
+    host = input("Enter Panorama IP or hostname: ")
+    username = input("Enter username: ")
+    password = getpass.getpass("Enter password: ")
+    
+    # Create connection finder instance
+    finder = PanoramaConnectionFinder(host, username, password)
+    
+    # Connect to Panorama
+    if not finder.connect():
+        return
+    
+    try:
+        # Get device groups
+        device_groups = finder.get_device_groups()
+        if not device_groups:
+            print("No device groups found. Exiting.")
+            return
+        
+        print(f"Found {len(device_groups)} device groups: {', '.join(device_groups)}")
+        
+        # Load address and service objects (for resolution)
+        print("\nLoading address objects and groups (this may take some time)...")
+        finder.load_address_objects()
+        
+        print("\nLoading service objects (this may take some time)...")
+        finder.load_service_objects()
+        
+        # Main menu loop
+        while True:
+            print("\n==== Connection Finder Menu ====")
+            print("1. Search for connections by source IP")
+            print("2. Search for connections by destination IP")
+            print("0. Exit")
+            
+            choice = input("\nEnter your choice (0-2): ")
+            
+            if choice == "0":
+                break
+            elif choice in ["1", "2"]:
+                ip_address = input("Enter IP address: ")
+                
+                try:
+                    # Validate IP address
+                    ipaddress.IPv4Address(ip_address)
+                    
+                    # Perform the search
+                    as_source = (choice == "1")
+                    direction = "source" if as_source else "destination"
+                    print(f"\nSearching for connections with {ip_address} as {direction}...")
+                    
+                    results = finder.search_rules_by_ip(ip_address, as_source)
+                    
+                    if results:
+                        print(f"\nFound {len(results)} matching rules:")
+                        for i, res in enumerate(results, 1):
+                            print(f"\n{i}. Rule: {res['rule_name']}")
+                            print(f"   Device Group: {res['device_group']}")
+                            print(f"   Rulebase: {res['rulebase']}")
+                            print(f"   Action: {res['action']}")
+                            print(f"   Sources: {', '.join(res['sources'])}")
+                            print(f"   Destinations: {', '.join(res['destinations'])}")
+                            print(f"   Services: {', '.join(res['services'])}")
+                            if res['applications']:
+                                print(f"   Applications: {', '.join(res['applications'])}")
+                            if res['users']:
+                                print(f"   Users: {', '.join(res['users'])}")
+                            
+                            # Show the specific match details
+                            details = res['match_details']
+                            if details:
+                                print(f"   Match Details:")
+                                print(f"     - Type: {details.get('match_type', 'unknown')}")
+                                print(f"     - Object: {details.get('matched_object', 'unknown')}")
+                                print(f"     - Address: {details.get('matched_address', 'unknown')}")
+                    else:
+                        print(f"No matching rules found for {ip_address} as {direction}")
+                
+                except ValueError:
+                    print(f"Invalid IP address: {ip_address}")
+            else:
+                print("Invalid choice. Please try again.")
+    
+    finally:
+        # Close connection
+        finder.disconnect()
+
+if __name__ == "__main__":
+    main()
