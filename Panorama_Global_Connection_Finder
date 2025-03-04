@@ -421,24 +421,42 @@ class PanoramaConnectionFinder:
     
     def get_rules_xml(self, device_group, rulebase):
         """Get all security rules in XML format from a specific device group and rulebase"""
-        # Special handling for shared policies
-        if device_group == "shared":
-            cmd = f'show config shared/pre-rulebase/security/rules'
-        else:
-            cmd = f'show config {device_group}/{rulebase}/security/rules'
+        # Dodaj informacje diagnostyczne
+        print(f"Pobieranie reguł z {device_group}/{rulebase}...")
+        
+        # Użyj właściwej komendy w trybie konfiguracyjnym
+        cmd = f'show device-group {device_group} {rulebase}/security/rules'
         
         output = self.execute_command(cmd, timeout=120)
         
-        # If command fails, try alternative approaches
-        if not output or "<response status='error'" in output:
-            if device_group == "shared":
-                # Try another approach for shared
-                alt_cmd = 'show config shared/rulebase/security/rules'
-                output = self.execute_command(alt_cmd, timeout=120)
+        # Informacja diagnostyczna
+        if output:
+            print(f"Pobrano dane. Rozmiar: {len(output)} znaków")
+        else:
+            print(f"Brak danych z komendy {cmd}")
+        
+        # Jeśli komenda nie zadziała, próbuj alternatywnych podejść
+        if not output or "<response status='error'" in output or len(output.strip()) == 0:
+            # Spróbuj alternatywnej ścieżki
+            alt_cmd = f'show device-group {device_group} {rulebase}/security rules'
+            print(f"Próbuję alternatywnej komendy: {alt_cmd}")
+            output = self.execute_command(alt_cmd, timeout=120)
+            
+            # Informacja diagnostyczna dla alternatywnej komendy
+            if output:
+                print(f"Alternatywna komenda zwróciła dane. Rozmiar: {len(output)} znaków")
+        
+        # Sprawdźmy format danych
+        if output and len(output) > 0:
+            lines = output.splitlines()
+            print(f"Pierwsze 100 znaków odpowiedzi: {output[:100].replace(chr(10), ' ')}")
+            
+            # Sprawdź, czy są jakiekolwiek reguły
+            rules = re.findall(r'<entry name="([^"]+)">', output)
+            if rules:
+                print(f"Znaleziono {len(rules)} reguł w odpowiedzi.")
             else:
-                # Try without rulebase for device groups
-                alt_cmd = f'show config {device_group}/security/rules'
-                output = self.execute_command(alt_cmd, timeout=120)
+                print("Nie znaleziono żadnych reguł w odpowiedzi.")
         
         return output
     
