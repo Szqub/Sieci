@@ -1,0 +1,70 @@
+from panos.panorama import Panorama, DeviceGroup
+
+# Funkcja do pobrania danych od użytkownika
+def get_user_input():
+    panorama_ip = input("Podaj adres IP Panoramy: ")
+    username = input("Podaj nazwę użytkownika: ")
+    password = input("Podaj hasło: ")
+    rule_name = input("Podaj nazwę reguły do wyszukania: ")
+    return panorama_ip, username, password, rule_name
+
+# Funkcja do wyboru device groupów
+def select_device_groups(device_groups):
+    print("\nDostępne Device Groupy:")
+    for i, dg in enumerate(device_groups, start=1):
+        print(f"{i}. {dg.name}")
+
+    selected = input("\nPodaj numery device groupów do przeszukania (oddzielone spacją, np. '1 2 3'): ")
+    selected_indices = list(map(int, selected.split()))
+    selected_device_groups = [device_groups[i - 1] for i in selected_indices]
+    return selected_device_groups
+
+# Główna funkcja
+def main():
+    # Pobierz dane od użytkownika
+    panorama_ip, username, password, rule_name = get_user_input()
+
+    # Połącz się z Panoramą
+    print("\nŁączenie z Panoramą...")
+    pan = Panorama(panorama_ip, username, password)
+
+    try:
+        # Pobierz listę device groupów
+        print("Pobieranie listy device groupów...")
+        device_groups = pan.refresh_devices()
+
+        # Wybierz device groupy do przeszukania
+        selected_device_groups = select_device_groups(device_groups)
+
+        # Przeszukaj wybrane device groupy
+        print(f"\nPrzeszukuję wybrane device groupy w poszukiwaniu reguły: {rule_name}")
+        for dg in selected_device_groups:
+            print(f"\nSprawdzam Device Group: {dg.name}")
+
+            # Przełącz się do aktualnej device groupy
+            pan.set_devicegroup(dg.name)
+
+            # Znajdź regułę o podanej nazwie
+            rules = pan.find_security_rules(rule_name=rule_name)
+            if rules:
+                for rule in rules:
+                    print(f"\nReguła znaleziona w Device Group: {dg.name}")
+                    print(f"Nazwa reguły: {rule.name}")
+                    print(f"Source: {rule.source}")
+                    print(f"Destination: {rule.destination}")
+                    print(f"Service: {rule.service}")
+                    print(f"Application: {rule.application}")
+                    print(f"From Zone: {rule.fromzone}")
+                    print(f"To Zone: {rule.tozone}")
+                    print(f"Action: {rule.action}")
+            else:
+                print(f"Reguła '{rule_name}' nie znaleziona w Device Group: {dg.name}")
+
+    except Exception as e:
+        print(f"Wystąpił błąd: {e}")
+    finally:
+        print("\nZakończono przeszukiwanie.")
+
+# Uruchom skrypt
+if __name__ == "__main__":
+    main()
