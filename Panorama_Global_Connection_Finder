@@ -37,53 +37,182 @@ class PanoramaConnectionFinder:
     def connect(self):
         """Establish SSH connection to Panorama"""
         try:
-            print(f"Connecting to {self.host}...")
+            print(f"Łączenie z {self.host}...")
             self.client = paramiko.SSHClient()
             self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             self.client.connect(self.host, username=self.username, password=self.password)
-            print(f"Successfully connected to {self.host}")
+            print(f"Połączono z {self.host}")
+            
+            # Wejście do trybu konfiguracyjnego
+            print("Przechodzenie do trybu konfiguracyjnego...")
+            self._enter_configure_mode()
+            
             return True
         except Exception as e:
-            print(f"Connection failed: {str(e)}")
+            print(f"Błąd połączenia: {str(e)}")
             return False
+    
+    def _enter_configure_mode(self):
+        """Enter configuration mode and wait for prompt"""
+        if not self.client:
+            return False
+        
+        try:
+            # Otwórz powłokę
+            self.shell = self.client.invoke_shell()
+            self.shell.settimeout(10)
+            
+            # Czekaj na znak zachęty operacyjnego trybu '>'
+            self._wait_for_prompt('>')
+            
+            # Wpisz komendę 'configure'
+            self.shell.send('configure\n')
+            
+            # Czekaj na znak zachęty konfiguracyjny '#'
+            success = self._wait_for_prompt('#')
+            
+            if success:
+                print("Pomyślnie wejście do trybu konfiguracyjnego.")
+                return True
+            else:
+                print("Nie udało się wejść do trybu konfiguracyjnego.")
+                return False
+                
+        except Exception as e:
+            print(f"Błąd przy wchodzeniu do trybu konfiguracyjnego: {str(e)}")
+            return False
+    
+    def _wait_for_prompt(self, prompt_char, timeout=10):
+        """Wait for a specific prompt character"""
+        buffer = ""
+        start_time = time.time()
+        
+        while True:
+            if time.time() - start_time > timeout:
+                print(f"Timeout czekając na znak zachęty '{prompt_char}'")
+                return False
+                
+            if self.shell.recv_ready():
+                chunk = self.shell.recv(1024).decode('utf-8')
+                buffer += chunk
+                
+                if prompt_char in buffer:
+                    return True
+                    
+            time.sleep(0.1)
     
     def disconnect(self):
         """Close SSH connection"""
+        if hasattr(self, 'shell'):
+            # Wyjście z trybu konfiguracyjnego
+            self.shell.send('exit\n')
+            time.sleep(1)
+            
         if self.client:
             self.client.close()
-            print("Connection closed")
+            print("Połączenie zamknięte")
     
     def execute_command(self, command, timeout=30):
         """Execute a command and return the output"""
-        if not self.client:
-            print("Not connected to Panorama")
+        if not self.client or not hasattr(self, 'shell'):
+            print("Brak połączenia z Panoramą lub powłoka nie została zainicjalizowana")
             return None
         
         try:
-            # Print a dot to show progress for long-running commands
-            sys.stdout.write(f"Executing: {command.split()[0]}... ")
+            # Wyczyść bufor przed wysłaniem komendy
+            while self.shell.recv_ready():
+                self.shell.recv(1024)
+                
+            # Pokaż postęp dla długich komend
+            sys.stdout.write(f"Wykonuję: {command.split()[0]}... ")
             sys.stdout.flush()
             
-            stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
-            output = stdout.read().decode('utf-8')
+            # Wyślij komendę i dodaj nową linię
+            self.shell.send(command + '\n')
             
-            # Print completion indicator
-            print("done")
-            return output
+            # Czekaj na odpowiedź
+            response = self._read_until_prompt('#', timeout)
+            
+            # Usuń echo komendy z odpowiedzi
+            lines = response.splitlines()
+            if len(lines) > 0 and command in lines[0]:
+                response = '\n'.join(lines[1:])
+                
+            # Wyczyść znaki specjalne ANSI
+            response = re.sub(r'\x1b\[([0-9]{1,2}(;[0-9]{1,2})?)?[m|K]', '', response)
+            
+            # Pokaż zakończenie
+            print("gotowe")
+            return response
         except Exception as e:
-            print(f"failed: {str(e)}")
+            print(f"błąd: {str(e)}")
             return None
+    
+    def _read_until_prompt(self, prompt_char, timeout=30):
+        """Read output until the prompt character is found or timeout"""
+        buffer = ""
+        start_time = time.time()
+        
+        while True:
+            if time.time() - start_time > timeout:
+                raise TimeoutError(f"Timeout czekając na zakończenie komendy (prompt: '{prompt_char}')")
+                
+            if self.shell.recv_ready():
+                chunk = self.shell.recv(4096).decode('utf-8', errors='ignore')
+                buffer += chunk
+                
+                if prompt_char in buffer:
+                    return buffer
+                    
+            time.sleep(0.1)
     
     def get_device_groups(self):
         """Get all device groups configured on Panorama"""
-        print("Retrieving device groups...")
-        output = self.execute_command("show devicegroups")
+        print("Pobieranie listy grup urządzeń...")
+        
+        # Najlepsza metoda - użycie 'run show devicegroups | match Group:'
+        output = self.execute_command("run show devicegroups | match Group:")
         if output:
-            # Extract device group names
+            # Wyciągnięcie nazw grup urządzeń
+            pattern = r"Group: (\S+)"
+            matches = re.findall(pattern, output)
+            
+            if matches:
+                # Filtrowanie, aby pominąć wiersze z "Shared policy md5sum"
+                filtered_matches = [m for m in matches if "md5sum" not in m]
+                self.device_groups = filtered_matches
+                return filtered_matches
+        
+        # Alternatywna metoda - bez filtra
+        print("Próbuję alternatywnej metody...")
+        output = self.execute_command("run show devicegroups")
+        if output:
             pattern = r"devicegroup: (.+)"
             matches = re.findall(pattern, output)
-            self.device_groups = matches
-            return matches
+            
+            if matches:
+                self.device_groups = matches
+                return matches
+        
+        # Inna alternatywa - lista nagłówków bez pełnej konfiguracji
+        output = self.execute_command("show device-group | match entry")
+        if output:
+            pattern = r'<entry name="([^"]+)">'
+            matches = re.findall(pattern, output)
+            
+            if matches:
+                self.device_groups = matches
+                return matches
+        
+        # Jeśli wszystkie próby nie powiodły się, użyj ręcznego wprowadzania
+        print("UWAGA: Nie udało się automatycznie wykryć grup urządzeń.")
+        dg_input = input("Wprowadź nazwy grup urządzeń oddzielone przecinkami: ")
+        user_dgs = [dg.strip() for dg in dg_input.split(',') if dg.strip()]
+        
+        if user_dgs:
+            self.device_groups = user_dgs
+            return user_dgs
+        
         return []
     
     def get_shared_address_objects(self):
@@ -292,8 +421,25 @@ class PanoramaConnectionFinder:
     
     def get_rules_xml(self, device_group, rulebase):
         """Get all security rules in XML format from a specific device group and rulebase"""
-        cmd = f'show config {device_group}/{rulebase}/security/rules'
+        # Special handling for shared policies
+        if device_group == "shared":
+            cmd = f'show config shared/pre-rulebase/security/rules'
+        else:
+            cmd = f'show config {device_group}/{rulebase}/security/rules'
+        
         output = self.execute_command(cmd, timeout=120)
+        
+        # If command fails, try alternative approaches
+        if not output or "<response status='error'" in output:
+            if device_group == "shared":
+                # Try another approach for shared
+                alt_cmd = 'show config shared/rulebase/security/rules'
+                output = self.execute_command(alt_cmd, timeout=120)
+            else:
+                # Try without rulebase for device groups
+                alt_cmd = f'show config {device_group}/security/rules'
+                output = self.execute_command(alt_cmd, timeout=120)
+        
         return output
     
     def search_rules_by_ip(self, ip_address, as_source=True):
@@ -304,6 +450,10 @@ class PanoramaConnectionFinder:
             ip_address: The IP address to search for
             as_source: If True, search where IP is source, otherwise destination
         """
+        # Add check for any predefined device groups or shared policies
+        if not self.device_groups:
+            # Search shared policies
+            self.device_groups = ["shared"]
         try:
             search_ip = ipaddress.IPv4Address(ip_address)
         except ValueError:
@@ -436,7 +586,12 @@ class PanoramaConnectionFinder:
                             if svc == "any":
                                 resolved_services.append("any")
                             else:
-                                resolved_services.append(self.resolve_service(svc, dg))
+                                resolved_svc = self.resolve_service(svc, dg)
+                                # If resolution failed, just use the original name
+                                if resolved_svc == svc:
+                                    resolved_services.append(f"{svc} (unresolved)")
+                                else:
+                                    resolved_services.append(resolved_svc)
                         
                         results.append({
                             "device_group": dg,
@@ -504,8 +659,8 @@ def main():
         # Get device groups
         device_groups = finder.get_device_groups()
         if not device_groups:
-            print("No device groups found. Exiting.")
-            return
+            print("WARNING: No device groups specified. Using shared policies only.")
+            # Continue execution but with empty device groups list
         
         print(f"Found {len(device_groups)} device groups: {', '.join(device_groups)}")
         
