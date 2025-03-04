@@ -1,7 +1,8 @@
 import paramiko
+import getpass  # Biblioteka do ukrywania hasła
 
 # Funkcja do łączenia się z urządzeniem i wykonywania poleceń
-def connect_and_execute(hostname, username, password, command):
+def connect_and_execute(hostname, username, password, command, debug=False):
     try:
         # Inicjalizacja klienta SSH
         client = paramiko.SSHClient()
@@ -10,12 +11,23 @@ def connect_and_execute(hostname, username, password, command):
         # Łączenie się z urządzeniem
         client.connect(hostname, username=username, password=password)
 
+        # Debug: Wyświetl wysyłane polecenie
+        if debug:
+            print(f"\n[DEBUG] Wysyłane polecenie: {command}")
+
         # Wykonanie polecenia
         stdin, stdout, stderr = client.exec_command(command)
 
         # Odczytanie wyniku
         output = stdout.read().decode()
         error = stderr.read().decode()
+
+        # Debug: Wyświetl odpowiedź
+        if debug:
+            if output:
+                print(f"[DEBUG] Odpowiedź:\n{output}")
+            if error:
+                print(f"[DEBUG] Błąd:\n{error}")
 
         # Zwrócenie wyniku
         if output:
@@ -30,10 +42,10 @@ def connect_and_execute(hostname, username, password, command):
         client.close()
 
 # Funkcja do pobrania listy device groupów
-def get_device_groups(hostname, username, password):
+def get_device_groups(hostname, username, password, debug=False):
     # Polecenie do pobrania listy device groupów
     command = "show devicegroups"
-    output = connect_and_execute(hostname, username, password, command)
+    output = connect_and_execute(hostname, username, password, command, debug)
 
     # Przetwarzanie wyniku
     if output and "error" not in output.lower():
@@ -44,13 +56,14 @@ def get_device_groups(hostname, username, password):
         return []
 
 # Funkcja do wyświetlania konkretnej polityki
-def show_single_policy(hostname, username, password, device_group, rulebase, policy_name):
-    # Polecenie do wyświetlenia konkretnej polityki
+def show_single_policy(hostname, username, password, device_group, rulebase, policy_name, debug=False):
+    # Polecenie do przełączenia na odpowiednią device group
     command = f'set device-group {device_group}'
-    connect_and_execute(hostname, username, password, command)  # Przełącz się na odpowiednią device group
+    connect_and_execute(hostname, username, password, command, debug)  # Przełącz się na odpowiednią device group
 
+    # Polecenie do wyświetlenia konkretnej polityki
     command = f'show running rulebase {rulebase} security rules "{policy_name}"'
-    policy = connect_and_execute(hostname, username, password, command)
+    policy = connect_and_execute(hostname, username, password, command, debug)
 
     # Wyświetlenie polityki
     if policy and "error" not in policy.lower():
@@ -63,10 +76,11 @@ def main():
     # Pobierz dane od użytkownika
     hostname = input("Podaj IP Panoramy: ")
     username = input("Podaj nazwę użytkownika: ")
-    password = input("Podaj hasło: ")
+    password = getpass.getpass("Podaj hasło: ")  # Hasło jest ukryte
+    debug = input("Czy włączyć tryb debugowania? (t/n): ").strip().lower() == 't'  # Pytanie o tryb debugowania
 
     # Pobierz listę device groupów
-    device_groups = get_device_groups(hostname, username, password)
+    device_groups = get_device_groups(hostname, username, password, debug)
     if not device_groups:
         return  # Zakończ skrypt, jeśli nie udało się pobrać listy
 
@@ -101,7 +115,7 @@ def main():
         policy_name = input("Podaj nazwę polityki do wyświetlenia: ").strip()
 
         # Wyświetl politykę
-        show_single_policy(hostname, username, password, device_group, rulebase, policy_name)
+        show_single_policy(hostname, username, password, device_group, rulebase, policy_name, debug)
 
         # Zapytaj, czy użytkownik chce zobaczyć kolejną politykę
         cont = input("\nCzy chcesz zobaczyć kolejną politykę? (t/n): ").strip().lower()
