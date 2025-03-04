@@ -1,4 +1,114 @@
-  File "\\krakowfs.fortisbank.com.pl\profiles$\ZOLNIERCZYK2\My Documents\VS Projects\Panorama_Rules.py", line 1, in <module>
-    from panos.panorama import Panorama, DeviceGroup
-  File "C:\Users\ZOLNIERCZYK2\AppData\Roaming\Python\Python312\site-packages\panos\__init__.py", line 35, in <module>
-    from distutils.version import LooseVersion  # Used by PanOSVersion class
+import paramiko
+
+# Funkcja do łączenia się z urządzeniem i wykonywania poleceń
+def connect_and_execute(hostname, username, password, command):
+    try:
+        # Inicjalizacja klienta SSH
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # Automatycznie akceptuj klucz hosta
+
+        # Łączenie się z urządzeniem
+        client.connect(hostname, username=username, password=password)
+
+        # Wykonanie polecenia
+        stdin, stdout, stderr = client.exec_command(command)
+
+        # Odczytanie wyniku
+        output = stdout.read().decode()
+        error = stderr.read().decode()
+
+        # Zwrócenie wyniku
+        if output:
+            return output.strip()  # Usuwamy zbędne białe znaki
+        else:
+            return error.strip()
+
+    except Exception as e:
+        return f"Błąd: {e}"
+    finally:
+        # Zamknięcie połączenia
+        client.close()
+
+# Funkcja do pobrania listy device groupów
+def get_device_groups(hostname, username, password):
+    # Polecenie do pobrania listy device groupów
+    command = "show devicegroups"
+    output = connect_and_execute(hostname, username, password, command)
+
+    # Przetwarzanie wyniku
+    if output and "error" not in output.lower():
+        device_groups = [line.split()[0] for line in output.splitlines() if line.strip()]
+        return device_groups
+    else:
+        print("Nie udało się pobrać listy device groupów.")
+        return []
+
+# Funkcja do wyświetlania konkretnej polityki
+def show_single_policy(hostname, username, password, device_group, rulebase, policy_name):
+    # Polecenie do wyświetlenia konkretnej polityki
+    command = f'set device-group {device_group}'
+    connect_and_execute(hostname, username, password, command)  # Przełącz się na odpowiednią device group
+
+    command = f'show running rulebase {rulebase} security rules "{policy_name}"'
+    policy = connect_and_execute(hostname, username, password, command)
+
+    # Wyświetlenie polityki
+    if policy and "error" not in policy.lower():
+        print(f"\nPolityka '{policy_name}' w {rulebase} (Device Group: {device_group}):\n{policy}")
+    else:
+        print(f"\nPolityka '{policy_name}' nie została znaleziona w {rulebase} (Device Group: {device_group}).")
+
+# Główna funkcja
+def main():
+    # Pobierz dane od użytkownika
+    hostname = input("Podaj IP Panoramy: ")
+    username = input("Podaj nazwę użytkownika: ")
+    password = input("Podaj hasło: ")
+
+    # Pobierz listę device groupów
+    device_groups = get_device_groups(hostname, username, password)
+    if not device_groups:
+        return  # Zakończ skrypt, jeśli nie udało się pobrać listy
+
+    while True:
+        # Wybierz device group
+        print("\nDostępne Device Groupy:")
+        for i, dg in enumerate(device_groups, start=1):
+            print(f"{i}. {dg}")
+        print(f"{len(device_groups) + 1}. shared (reguły współdzielone)")
+
+        choice = input("\nWybierz numer Device Group: ").strip()
+        try:
+            choice = int(choice)
+            if 1 <= choice <= len(device_groups):
+                device_group = device_groups[choice - 1]
+            elif choice == len(device_groups) + 1:
+                device_group = "shared"
+            else:
+                print("Nieprawidłowy wybór. Spróbuj ponownie.")
+                continue
+        except ValueError:
+            print("Nieprawidłowy wybór. Spróbuj ponownie.")
+            continue
+
+        # Zapytaj użytkownika o rulebase
+        rulebase = input("Podaj rulebase (pre-rulebase, post-rulebase, default): ").strip().lower()
+        while rulebase not in ["pre-rulebase", "post-rulebase", "default"]:
+            print("Nieprawidłowy wybór. Wybierz 'pre-rulebase', 'post-rulebase' lub 'default'.")
+            rulebase = input("Podaj rulebase (pre-rulebase, post-rulebase, default): ").strip().lower()
+
+        # Zapytaj użytkownika o nazwę polityki
+        policy_name = input("Podaj nazwę polityki do wyświetlenia: ").strip()
+
+        # Wyświetl politykę
+        show_single_policy(hostname, username, password, device_group, rulebase, policy_name)
+
+        # Zapytaj, czy użytkownik chce zobaczyć kolejną politykę
+        cont = input("\nCzy chcesz zobaczyć kolejną politykę? (t/n): ").strip().lower()
+        if cont != 't':
+            print("Zamykanie skryptu.")
+            break
+
+# Uruchom skrypt
+if __name__ == "__main__":
+    main()
