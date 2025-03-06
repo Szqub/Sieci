@@ -14,7 +14,7 @@ def debug(msg):
 def connect_panorama():
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    debug("Łączę się z Panoramą...")  # Startujemy, jak rakieta!
+    debug("Łączę się z Panoramą...")  # Startujemy jak rakieta!
     client.connect(PANORAMA_IP, username=USER, password=PASS)
     shell = client.invoke_shell()
 
@@ -75,7 +75,6 @@ def send_command(shell, cmd):
 def parse_rule_details(output):
     attributes = {}
     pattern = r"set device-group \S+ \S+ security rules \S+ (\S+) (.+)"
-
     for line in output.splitlines():
         line = line.strip()
         match = re.match(pattern, line)
@@ -90,16 +89,17 @@ def parse_rule_details(output):
 
 def find_rules(shell, ip, direction):
     result = send_command(shell, f"show | match {ip}")
-    rules_found = set()
+    rules_found = []  # Zmienione z set() na listę, by zebrać wszystkie trafienia!
     pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{ip}"
     for line in result.splitlines():
         if match := re.search(pattern, line):
-            rules_found.add((match.group(1), match.group(2), match.group(3)))
-    return list(rules_found)
+            rule = (match.group(1), match.group(2), match.group(3))
+            rules_found.append(rule)
+    debug(f"Znalezione reguły: {rules_found}")
+    return rules_found
 
 def main():
     client, shell = connect_panorama()
-
     try:
         ip = input("Podaj adres IP: ").strip()
         direction_choice = input("Wybierz opcję wyszukiwania (1 - destination, 2 - source): ").strip()
@@ -115,7 +115,6 @@ def main():
             sys.exit()
 
         rules_found = find_rules(shell, ip, direction)
-
         if not rules_found:
             print(f"Brak reguł zawierających IP {ip}")
             shell.close()
@@ -123,19 +122,16 @@ def main():
             sys.exit()
 
         print(f"\nZnaleziono {len(rules_found)} reguł(e) zawierających IP {ip} jako {direction}.\n")
-
-        # Iteracja przez znalezione reguły
+        # Iterujemy przez znalezione reguły
         for idx, (dg, rulebase, rule_name) in enumerate(rules_found, start=1):
             details = send_command(shell, f"show device-group {dg} {rulebase} security rules {rule_name}")
             print(f"\nReguła {idx}: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
             attributes = parse_rule_details(details)
-
             if attributes:
                 for attr, val in attributes.items():
                     print(f"  {attr}: {val}")
             else:
                 print("  Brak szczegółowych informacji do wyświetlenia.")
-
             # Jeśli to nie była ostatnia reguła, pytamy, czy szukać kolejnej
             if idx < len(rules_found):
                 next_search = input("\nSzukamy kolejnej reguły? (y/n): ").strip().lower()
