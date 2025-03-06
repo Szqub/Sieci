@@ -14,33 +14,43 @@ def debug(msg):
 def connect_panorama():
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    debug("Łączę się z Panoramą...")  # Startujemy, jak rakieta!
     client.connect(PANORAMA_IP, username=USER, password=PASS)
     shell = client.invoke_shell()
     time.sleep(1)
     output = shell.recv(1000).decode()
-    debug(f"Connected: {output}")
+    debug(f"Połączenie nawiązane. Otrzymano: {output}")
 
     if ">" in output:
         shell.send("set cli config-output-format set\n")
-        debug("Sent: set cli config-output-format set")
+        debug("Wysyłam: set cli config-output-format set")
         time.sleep(0.5)
         shell.send("set cli pager off\n")
-        debug("Sent: set cli pager off")
+        debug("Wysyłam: set cli pager off")
         time.sleep(0.5)
         shell.send("configure\n")
-        debug("Sent: configure")
+        debug("Wysyłam: configure")
+        # Czekamy, aż prompt zmieni się na "#"
         time.sleep(1)
         output = shell.recv(5000).decode()
-        debug(f"Prompt after configure: {output}")
+        debug(f"Output po wejściu do trybu konfiguracji: {output}")
+        if "#" not in output:
+            debug("Uwaga: Nie wykryto prompta konfiguracji (#). Czekam jeszcze chwilkę...")
+            time.sleep(1)
+            output += shell.recv(5000).decode()
+            if "#" not in output:
+                debug("Błąd: Nie udało się przejść do trybu konfiguracji. Kończę działanie.")
+                client.close()
+                sys.exit(1)
 
     return client, shell
 
 def send_command(shell, cmd):
     shell.send(cmd + "\n")
-    debug(f"Sent command: {cmd}")
+    debug(f"Wysłano komendę: {cmd}")
     time.sleep(2)
     output = shell.recv(100000).decode()
-    debug(f"Received output: {output}")
+    debug(f"Otrzymano output: {output}")
     return output
 
 def parse_rule_details(output):
@@ -61,13 +71,11 @@ def parse_rule_details(output):
 
 def find_rules(shell, ip, direction):
     result = send_command(shell, f"show | match {ip}")
-
     rules_found = set()
     pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{ip}"
     for line in result.splitlines():
         if match := re.search(pattern, line):
             rules_found.add((match.group(1), match.group(2), match.group(3)))
-
     return list(rules_found)
 
 def main():
@@ -83,46 +91,47 @@ def main():
             direction = "source"
         else:
             print("Niepoprawny wybór. Wybierz 1 lub 2.")
+            shell.close()
+            client.close()
             sys.exit()
 
-        rules_found = set()
-        result = send_command(shell, f"show | match {ip}")
-
-        pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{ip}"
-        for line in result.splitlines():
-            if match := re.search(pattern, line):
-                rules_found.add((match.group(1), match.group(2), match.group(3)))
+        rules_found = find_rules(shell, ip, direction)
 
         if not rules_found:
             print(f"Brak reguł zawierających IP {ip}")
+            shell.close()
+            client.close()
             sys.exit()
 
-        idx = 0
-        rules_found = list(rules_found)
-        while idx < len(rules_found):
-            dg, rulebase, rule_name = rules_found[idx]
-            details = send_command(shell, f"show device-group {dg} {rulebase} security rules {rule_name}")
+        print(f"\nZnaleziono {len(rules_found)} reguł(e) zawierających IP {ip} jako {direction}.\n")
 
-            print(f"\nReguła: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
+        # Iterujemy przez znalezione reguły
+        for idx, (dg, rulebase, rule_name) in enumerate(rules_found, start=1):
+            details = send_command(shell, f"show device-group {dg} {rulebase} security rules {rule_name}")
+            print(f"\nReguła {idx}: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
             attributes = parse_rule_details(details)
 
-            for attr, val in attributes.items():
-                print(f"  {attr}: {val}")
+            if attributes:
+                for attr, val in attributes.items():
+                    print(f"  {attr}: {val}")
+            else:
+                print("  Brak szczegółowych informacji do wyświetlenia.")
 
-            next_search = input("\nSzukamy kolejnej reguły? (y/n): ").strip().lower()
-            if next_search != "y":
-                break
+            # Jeśli to nie była ostatnia reguła, pytamy, czy szukać kolejnej
+            if idx < len(rules_found):
+                next_search = input("\nSzukamy kolejnej reguły? (y/n): ").strip().lower()
+                if next_search != "y":
+                    break
 
         print("\nRobota zakończona. Trzymaj się!")
         shell.close()
         client.close()
 
     except KeyboardInterrupt:
-        print("\nPrzerwano przez użytkownika.")
+        print("\nPrzerwano przez użytkownika (Ctrl+C).")
         shell.close()
         client.close()
         sys.exit()
 
 if __name__ == "__main__":
-    client, shell = connect_panorama()
     main()
