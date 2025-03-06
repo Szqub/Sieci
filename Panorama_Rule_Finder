@@ -1,0 +1,88 @@
+import paramiko
+import re
+import sys
+import getpass
+
+PANORAMA_IP = "IP_PANORAMY"
+USER = input("Podaj username do Panoramy: ").strip()
+PASS = getpass.getpass("Podaj hasło: ")
+
+def send_command(cmd):
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(PANORAMA_IP, username=USER, password=PASS)
+        stdin, stdout, stderr = client.exec_command(cmd)
+        result = stdout.read().decode()
+        client.close()
+        return result
+    except KeyboardInterrupt:
+        print("\nPrzerwano przez użytkownika.")
+        sys.exit()
+
+def parse_rule_details(output):
+    attributes = {}
+    pattern = r"set device-group \S+ \S+ security rules \S+ (\S+) (.+)"
+
+    for line in output.splitlines():
+        line = line.strip()
+        match = re.match(pattern, line)
+        if match:
+            attr, values = match.groups()
+            values = values.replace("[", "").replace("]", "")
+            if attr in attributes:
+                attributes[attr] += f", {values}"
+            else:
+                attributes[attr] = values
+    return attributes
+
+def find_rules(ip, direction):
+    result = send_command(f"show | match {ip}")
+
+    rules_found = set()
+    pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{ip}"
+    for line in result.splitlines():
+        if match := re.search(pattern, line):
+            rules_found.add((match.group(1), match.group(2), match.group(3)))
+
+    return list(rules_found)
+
+def main():
+    ip = input("Podaj adres IP: ").strip()
+    direction_choice = input("Wybierz opcję wyszukiwania (1 - destination, 2 - source): ").strip()
+
+    if direction_choice == "1":
+        direction = "destination"
+    elif direction_choice == "2":
+        direction = "source"
+    else:
+        print("Niepoprawny wybór. Wybierz 1 lub 2.")
+        sys.exit()
+
+    rules_found = find_rules(ip, direction)
+
+    if not rules_found:
+        print(f"Brak reguł zawierających IP {ip} jako {direction}")
+        sys.exit()
+
+    idx = 0
+    while idx < len(rules_found):
+        dg, rulebase, rule_name = rules_found[idx]
+        details = send_command(f"show device-group {dg} {rulebase} security rules {rule_name}")
+
+        print(f"\nReguła: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
+        attributes = parse_rule_details(details)
+
+        for attr, val in attributes.items():
+            print(f"  {attr}: {val}")
+
+        idx += 1
+        if idx < len(rules_found):
+            next_search = input("\nSzukamy kolejnej reguły? (y/n): ").strip().lower()
+            if next_search != "y":
+                break
+
+    print("\nRobota zakończona. Trzymaj się!")
+
+if __name__ == "__main__":
+    main()
