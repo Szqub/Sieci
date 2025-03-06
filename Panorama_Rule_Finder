@@ -17,32 +17,51 @@ def connect_panorama():
     debug("Łączę się z Panoramą...")  # Startujemy, jak rakieta!
     client.connect(PANORAMA_IP, username=USER, password=PASS)
     shell = client.invoke_shell()
-    time.sleep(1)
-    output = shell.recv(1000).decode()
-    debug(f"Połączenie nawiązane. Otrzymano: {output}")
 
-    if ">" in output:
-        shell.send("set cli config-output-format set\n")
-        debug("Wysyłam: set cli config-output-format set")
+    # Czekamy na prompt operacyjny ">"
+    buff = ""
+    timeout = 10
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if shell.recv_ready():
+            buff += shell.recv(1024).decode()
+            if buff.strip().endswith(">"):
+                debug(f"Otrzymano prompt operacyjny: {buff.strip()}")
+                break
         time.sleep(0.5)
-        shell.send("set cli pager off\n")
-        debug("Wysyłam: set cli pager off")
-        time.sleep(0.5)
-        shell.send("configure\n")
-        debug("Wysyłam: configure")
-        # Czekamy, aż prompt zmieni się na "#"
-        time.sleep(1)
-        output = shell.recv(5000).decode()
-        debug(f"Output po wejściu do trybu konfiguracji: {output}")
-        if "#" not in output:
-            debug("Uwaga: Nie wykryto prompta konfiguracji (#). Czekam jeszcze chwilkę...")
-            time.sleep(1)
-            output += shell.recv(5000).decode()
-            if "#" not in output:
-                debug("Błąd: Nie udało się przejść do trybu konfiguracji. Kończę działanie.")
-                client.close()
-                sys.exit(1)
+    else:
+        debug("Błąd: Nie udało się otrzymać prompta '>'")
+        client.close()
+        sys.exit(1)
 
+    # Ustawienie CLI
+    shell.send("set cli config-output-format set\n")
+    debug("Wysyłam: set cli config-output-format set")
+    time.sleep(0.5)
+    shell.send("set cli pager off\n")
+    debug("Wysyłam: set cli pager off")
+    time.sleep(0.5)
+
+    # Przejście do trybu konfiguracji
+    shell.send("configure\n")
+    debug("Wysyłam: configure")
+    
+    # Czekamy na prompt konfiguracji "#"
+    buff = ""
+    timeout = 10
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if shell.recv_ready():
+            buff += shell.recv(1024).decode()
+            if "#" in buff:
+                debug(f"We wszedłem do trybu konfiguracji: {buff.strip()}")
+                break
+        time.sleep(0.5)
+    else:
+        debug("Błąd: Nie udało się przejść do trybu konfiguracji (#)")
+        client.close()
+        sys.exit(1)
+    
     return client, shell
 
 def send_command(shell, cmd):
@@ -50,7 +69,7 @@ def send_command(shell, cmd):
     debug(f"Wysłano komendę: {cmd}")
     time.sleep(2)
     output = shell.recv(100000).decode()
-    debug(f"Otrzymano output: {output}")
+    debug(f"Otrzymano output: {output.strip()}")
     return output
 
 def parse_rule_details(output):
@@ -105,7 +124,7 @@ def main():
 
         print(f"\nZnaleziono {len(rules_found)} reguł(e) zawierających IP {ip} jako {direction}.\n")
 
-        # Iterujemy przez znalezione reguły
+        # Iteracja przez znalezione reguły
         for idx, (dg, rulebase, rule_name) in enumerate(rules_found, start=1):
             details = send_command(shell, f"show device-group {dg} {rulebase} security rules {rule_name}")
             print(f"\nReguła {idx}: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
