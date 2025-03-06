@@ -2,23 +2,46 @@ import paramiko
 import re
 import sys
 import getpass
+import time
 
 PANORAMA_IP = "IP_PANORAMY"
 USER = input("Podaj username do Panoramy: ").strip()
 PASS = getpass.getpass("Podaj hasło: ")
 
-def send_command(cmd):
+def debug(msg):
+    print(f"[DEBUG] {msg}")
+
+def connect_panorama():
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(PANORAMA_IP, username=USER, password=PASS)
-        stdin, stdout, stderr = client.exec_command(cmd)
-        result = stdout.read().decode()
-        client.close()
-        return result
-    except KeyboardInterrupt:
-        print("\nPrzerwano przez użytkownika.")
-        sys.exit()
+    client.connect(PANORAMA_IP, username=USER, password=PASS)
+    shell = client.invoke_shell()
+    time.sleep(1)
+    output = shell.recv(1000).decode()
+    debug(f"Connected: {output}")
+
+    if ">" in output:
+        shell.send("set cli config-output-format set\n")
+        debug("Sent: set cli config-output-format set")
+        time.sleep(0.5)
+        shell.send("set cli pager off\n")
+        debug("Sent: set cli pager off")
+        time.sleep(0.5)
+        shell.send("configure\n")
+        debug("Sent: configure")
+        time.sleep(1)
+        output = shell.recv(5000).decode()
+        debug(f"Prompt after configure: {output}")
+
+    return client, shell
+
+def send_command(shell, cmd):
+    shell.send(cmd + "\n")
+    debug(f"Sent command: {cmd}")
+    time.sleep(2)
+    output = shell.recv(100000).decode()
+    debug(f"Received output: {output}")
+    return output
 
 def parse_rule_details(output):
     attributes = {}
@@ -36,8 +59,8 @@ def parse_rule_details(output):
                 attributes[attr] = values
     return attributes
 
-def find_rules(ip, direction):
-    result = send_command(f"show | match {ip}")
+def find_rules(shell, ip, direction):
+    result = send_command(shell, f"show | match {ip}")
 
     rules_found = set()
     pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{ip}"
@@ -48,41 +71,58 @@ def find_rules(ip, direction):
     return list(rules_found)
 
 def main():
-    ip = input("Podaj adres IP: ").strip()
-    direction_choice = input("Wybierz opcję wyszukiwania (1 - destination, 2 - source): ").strip()
+    client, shell = connect_panorama()
 
-    if direction_choice == "1":
-        direction = "destination"
-    elif direction_choice == "2":
-        direction = "source"
-    else:
-        print("Niepoprawny wybór. Wybierz 1 lub 2.")
-        sys.exit()
+    try:
+        ip = input("Podaj adres IP: ").strip()
+        direction_choice = input("Wybierz opcję wyszukiwania (1 - destination, 2 - source): ").strip()
 
-    rules_found = find_rules(ip, direction)
+        if direction_choice == "1":
+            direction = "destination"
+        elif direction_choice == "2":
+            direction = "source"
+        else:
+            print("Niepoprawny wybór. Wybierz 1 lub 2.")
+            sys.exit()
 
-    if not rules_found:
-        print(f"Brak reguł zawierających IP {ip} jako {direction}")
-        sys.exit()
+        rules_found = set()
+        result = send_command(shell, f"show | match {ip}")
 
-    idx = 0
-    while idx < len(rules_found):
-        dg, rulebase, rule_name = rules_found[idx]
-        details = send_command(f"show device-group {dg} {rulebase} security rules {rule_name}")
+        pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{ip}"
+        for line in result.splitlines():
+            if match := re.search(pattern, line):
+                rules_found.add((match.group(1), match.group(2), match.group(3)))
 
-        print(f"\nReguła: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
-        attributes = parse_rule_details(details)
+        if not rules_found:
+            print(f"Brak reguł zawierających IP {ip}")
+            sys.exit()
 
-        for attr, val in attributes.items():
-            print(f"  {attr}: {val}")
+        idx = 0
+        rules_found = list(rules_found)
+        while idx < len(rules_found):
+            dg, rulebase, rule_name = rules_found[idx]
+            details = send_command(shell, f"show device-group {dg} {rulebase} security rules {rule_name}")
 
-        idx += 1
-        if idx < len(rules_found):
+            print(f"\nReguła: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
+            attributes = parse_rule_details(details)
+
+            for attr, val in attributes.items():
+                print(f"  {attr}: {val}")
+
             next_search = input("\nSzukamy kolejnej reguły? (y/n): ").strip().lower()
             if next_search != "y":
                 break
 
-    print("\nRobota zakończona. Trzymaj się!")
+        print("\nRobota zakończona. Trzymaj się!")
+        shell.close()
+        client.close()
+
+    except KeyboardInterrupt:
+        print("\nPrzerwano przez użytkownika.")
+        shell.close()
+        client.close()
+        sys.exit()
 
 if __name__ == "__main__":
+    client, shell = connect_panorama()
     main()
