@@ -476,6 +476,39 @@ def find_unique_group_prefixes(entries):
     return sorted(list(unique_prefixes))
 
 
+def check_if_ip_in_range_in_group(ip, group_name, address_objects, address_groups):
+    """
+    Sprawdź, czy adres IP mieści się w zakresie range, który należy do wskazanej grupy.
+    
+    Args:
+        ip (str): Adres IP do sprawdzenia
+        group_name (str): Nazwa grupy
+        address_objects (dict): Słownik z obiektami adresowymi
+        address_groups (dict): Słownik z grupami adresowymi
+        
+    Returns:
+        tuple: (nazwa obiektu range, wartość zakresu) lub None jeśli nie znaleziono
+    """
+    # Znajdź grupę
+    group_info = None
+    for g_name, g_info in address_groups.items():
+        if g_name.lower() == group_name.lower():
+            group_info = g_info
+            break
+    
+    if not group_info:
+        return None
+    
+    # Sprawdź obiekty range w grupie
+    for member in group_info['members']:
+        if member in address_objects and address_objects[member]['type'] == 'ip-range':
+            range_value = address_objects[member]['value']
+            if is_ip_in_range(ip, range_value):
+                return (member, range_value)
+    
+    return None
+
+
 def process_host_entry(entry, address_objects, address_groups, group_mapping=None):
     """
     Przetwórz pojedynczy wpis hosta i sprawdź jego konfigurację w Panoramie.
@@ -531,7 +564,13 @@ def process_host_entry(entry, address_objects, address_groups, group_mapping=Non
             if in_correct_group:
                 return f"{hostname_with_group} {ip} jest hostem {host_object_name} i znajduje się w grupie {actual_group_name}"
             else:
-                return f"{hostname_with_group} {ip} jest hostem {host_object_name}, ale NIE znajduje się w grupie {actual_group_name}"
+                # Sprawdź, czy adres jest w zakresie range należącym do tej grupy
+                range_in_group = check_if_ip_in_range_in_group(ip, actual_group_name, address_objects, address_groups)
+                if range_in_group:
+                    range_name, range_value = range_in_group
+                    return f"{hostname_with_group} {ip} jest hostem {host_object_name}, nie jest bezpośrednio w grupie {actual_group_name}, ale mieści się w zakresie {range_name} ({range_value}) należącym do tej grupy"
+                else:
+                    return f"{hostname_with_group} {ip} jest hostem {host_object_name}, ale NIE znajduje się w grupie {actual_group_name}"
         else:
             print(f"DEBUG: Nie znaleziono bezpośredniego obiektu hosta {host_object_name}")
         
@@ -540,7 +579,8 @@ def process_host_entry(entry, address_objects, address_groups, group_mapping=Non
             if obj_info['type'] == 'ip-range':
                 if is_ip_in_range(ip, obj_info['value']):
                     range_found = obj_name
-                    print(f"DEBUG: IP {ip} znaleziono w zakresie {obj_name} ({obj_info['value']})")
+                    range_value = obj_info['value']
+                    print(f"DEBUG: IP {ip} znaleziono w zakresie {obj_name} ({range_value})")
                     
                     # Sprawdź, czy zakres jest w odpowiedniej grupie
                     in_correct_group = False
@@ -551,12 +591,12 @@ def process_host_entry(entry, address_objects, address_groups, group_mapping=Non
                             break
                     
                     if in_correct_group:
-                        return f"{hostname_with_group} {ip} jest w zakresie {range_found} i znajduje się w grupie {actual_group_name}"
+                        return f"{hostname_with_group} {ip} jest w zakresie {range_found} ({range_value}) i znajduje się w grupie {actual_group_name}"
                     else:
-                        return f"{hostname_with_group} {ip} jest w zakresie {range_found}, ale NIE znajduje się w grupie {actual_group_name}"
+                        return f"{hostname_with_group} {ip} jest w zakresie {range_found} ({range_value}), ale NIE znajduje się w grupie {actual_group_name}"
         
         if range_found:
-            return f"{hostname_with_group} {ip} jest w zakresie {range_found}, ale nie ma przypisanej grupy {actual_group_name}"
+            return f"{hostname_with_group} {ip} jest w zakresie {range_found} ({range_value}), ale nie ma przypisanej grupy {actual_group_name}"
         else:
             return f"{hostname_with_group} {ip} - nie znaleziono odpowiadającego obiektu na PA"
     
