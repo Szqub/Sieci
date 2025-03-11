@@ -4,7 +4,7 @@
 """
 Skrypt do weryfikacji konfiguracji hostów w Palo Alto Networks Panorama
 
-Autor: Szymon
+Autor: Claude
 Data: 11.03.2025
 
 Opis:
@@ -702,10 +702,29 @@ def main():
     print("\nWyniki weryfikacji:")
     print("===================")
     
-    for entry in entries:
-        if entry.strip():
-            result = process_host_entry(entry, address_objects, address_groups, group_mapping)
-            print(result)
+    # Przygotuj plik do zapisu wyników
+    output_filename = "wyniki_weryfikacji.txt"
+    try:
+        with open(output_filename, 'w') as output_file:
+            # Zapisz nagłówek do pliku
+            output_file.write("Wyniki weryfikacji hostów w Palo Alto Panorama\n")
+            output_file.write("===========================================\n\n")
+            
+            # Przetwórz każdy wpis i zapisz wynik
+            for entry in entries:
+                if entry.strip():
+                    result = process_host_entry(entry, address_objects, address_groups, group_mapping)
+                    print(result)
+                    output_file.write(result + "\n")
+        
+        print(f"\nWyniki zostały zapisane do pliku: {output_filename}")
+    except Exception as e:
+        print(f"BŁĄD: Nie udało się zapisać wyników do pliku: {e}")
+        # Kontynuuj przetwarzanie bez zapisywania do pliku
+        for entry in entries:
+            if entry.strip():
+                result = process_host_entry(entry, address_objects, address_groups, group_mapping)
+                print(result)
 
 
 if __name__ == "__main__":
