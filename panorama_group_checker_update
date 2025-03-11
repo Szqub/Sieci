@@ -744,13 +744,38 @@ def main():
     
     # Lista na wyniki do zapisania
     all_results = []
+    direct_match_results = []  # Hosty bezpośrednio w grupie
+    range_match_results = []   # Hosty w zakresie należącym do grupy
+    no_match_results = []      # Hosty bez dopasowania do grupy
     
     # Przetwórz każdy wpis
     for entry in entries:
         if entry.strip():
             result = process_host_entry(entry, address_objects, address_groups, group_mapping)
-            print(result)
-            all_results.append(result)
+            
+            # Klasyfikuj wynik
+            if " i znajduje się w grupie " in result:
+                direct_match_results.append(result)
+            elif ", nie jest bezpośrednio w grupie " in result and " ale mieści się w zakresie " in result:
+                range_match_results.append(result)
+            else:
+                no_match_results.append(result)
+    
+    # Połącz wyniki w odpowiedniej kolejności
+    print("\n--- Hosty bezpośrednio w grupie ---")
+    for result in direct_match_results:
+        print(result)
+        all_results.append(result)
+    
+    print("\n--- Hosty w zakresie należącym do grupy ---")
+    for result in range_match_results:
+        print(result)
+        all_results.append(result)
+    
+    print("\n--- Hosty bez dopasowania do grupy ---")
+    for result in no_match_results:
+        print(result)
+        all_results.append(result)
     
     # Zapisz wyniki do pliku
     output_filename = "wyniki_weryfikacji.txt"
@@ -762,7 +787,16 @@ def main():
             f.write("Wyniki weryfikacji hostów w Palo Alto Panorama\n")
             f.write("===========================================\n\n")
             
-            for result in all_results:
+            f.write("--- Hosty bezpośrednio w grupie ---\n")
+            for result in direct_match_results:
+                f.write(str(result) + "\n")
+            
+            f.write("\n--- Hosty w zakresie należącym do grupy ---\n")
+            for result in range_match_results:
+                f.write(str(result) + "\n")
+            
+            f.write("\n--- Hosty bez dopasowania do grupy ---\n")
+            for result in no_match_results:
                 f.write(str(result) + "\n")
             
         print(f"Wyniki zostały zapisane do pliku: {output_filename}")
