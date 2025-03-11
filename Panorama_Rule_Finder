@@ -4,7 +4,7 @@ import sys
 import getpass
 import time
 
-PANORAMA_IP = "IP_PANORAMY"
+PANORAMA_IP = "IP PANORAMY"
 USER = input("Podaj username do Panoramy: ").strip()
 PASS = getpass.getpass("Podaj hasło: ")
 
