@@ -445,12 +445,15 @@ def process_host_entry(entry, address_objects, address_groups):
         
         hostname_with_group, ip = parts
         
-        # Ekstrakcja nazwy grupy
-        match = re.search(r'-([^-]+)$', hostname_with_group)
-        if not match:
+        # Ekstrakcja nazwy grupy - teraz bierzemy wszystko po pierwszym myślniku
+        parts = hostname_with_group.split('-', 1)  # Dzielimy tylko przy pierwszym '-'
+        if len(parts) < 2:
             return f"Brak określonej grupy dla wpisu: {entry}"
         
-        group_name = match.group(1)
+        hostname = parts[0]
+        group_name = parts[1]  # Wszystko po pierwszym myślniku to nazwa grupy
+        
+        print(f"DEBUG: Przetwarzanie wpisu: hostname={hostname}, group={group_name}, IP={ip}")
         
         # Sprawdź, czy istnieje obiekt hosta H-IP-32
         host_object_name = f"H-{ip}-32"
@@ -459,30 +462,36 @@ def process_host_entry(entry, address_objects, address_groups):
         # Sprawdź, czy host istnieje bezpośrednio
         if host_object_name in address_objects:
             host_value = address_objects[host_object_name]['value']
+            print(f"DEBUG: Znaleziono obiekt hosta {host_object_name} z wartością {host_value}")
             
             # Sprawdź, czy host jest w odpowiedniej grupie
             in_correct_group = False
             for g_name, g_info in address_groups.items():
                 if g_name.lower() == group_name.lower() and host_object_name in g_info['members']:
                     in_correct_group = True
+                    print(f"DEBUG: Host {host_object_name} jest w grupie {g_name}")
                     break
             
             if in_correct_group:
                 return f"{hostname_with_group} {ip} to obiekt {host_object_name} na PA z wartością {host_value} i znajduje się w grupie {group_name}"
             else:
                 return f"{hostname_with_group} {ip} to obiekt {host_object_name} na PA z wartością {host_value}, ale NIE znajduje się w grupie {group_name}"
+        else:
+            print(f"DEBUG: Nie znaleziono bezpośredniego obiektu hosta {host_object_name}")
         
         # Sprawdź, czy IP jest w zakresie
         for obj_name, obj_info in address_objects.items():
             if obj_info['type'] == 'ip-range':
                 if is_ip_in_range(ip, obj_info['value']):
                     range_found = obj_name
+                    print(f"DEBUG: IP {ip} znaleziono w zakresie {obj_name} ({obj_info['value']})")
                     
                     # Sprawdź, czy zakres jest w odpowiedniej grupie
                     in_correct_group = False
                     for g_name, g_info in address_groups.items():
                         if g_name.lower() == group_name.lower() and range_found in g_info['members']:
                             in_correct_group = True
+                            print(f"DEBUG: Zakres {range_found} jest w grupie {g_name}")
                             break
                     
                     if in_correct_group:
@@ -496,6 +505,9 @@ def process_host_entry(entry, address_objects, address_groups):
             return f"{hostname_with_group} {ip} - nie znaleziono odpowiadającego obiektu na PA"
     
     except Exception as e:
+        print(f"BŁĄD: Podczas przetwarzania wpisu {entry}: {e}")
+        import traceback
+        traceback.print_exc()
         return f"Błąd podczas przetwarzania wpisu {entry}: {e}"
 
 
