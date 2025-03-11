@@ -76,40 +76,29 @@ class PanoramaAPI:
         }
         
         try:
-            print(f"DEBUG: Próba uwierzytelnienia użytkownika {self.username} na {self.panorama_ip}")
             response = requests.get(self.base_url, params=params, verify=False)
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
             response.raise_for_status()
-            
-            # Zapisz odpowiedź XML do pliku dla debugowania (maskujemy klucz API)
-            debug_response = response.text.replace('<key>', '<key>MASKED-FOR-SECURITY').replace('</key>', '</key>')
-            with open('debug_keygen_response.xml', 'w') as f:
-                f.write(debug_response)
-            print("DEBUG: Zapisano odpowiedź uwierzytelniania do pliku debug_keygen_response.xml")
             
             root = ET.fromstring(response.text)
             status = root.get('status')
-            print(f"DEBUG: Status uwierzytelniania: {status}")
             
             if status == 'success':
                 key_element = root.find('.//key')
                 if key_element is not None:
                     self.api_key = key_element.text
-                    print("DEBUG: Pomyślnie pobrano klucz API")
                     return True
                 else:
-                    print("BŁĄD: Brak elementu <key> w odpowiedzi")
+                    print("Brak elementu <key> w odpowiedzi")
                     return False
             else:
                 error_msg = root.find('.//msg')
                 if error_msg is not None:
-                    print(f"BŁĄD: Uwierzytelnianie nie powiodło się: {error_msg.text}")
+                    print(f"Uwierzytelnianie nie powiodło się: {error_msg.text}")
                 else:
-                    print("BŁĄD: Uwierzytelnianie nie powiodło się bez szczegółowej wiadomości")
+                    print("Uwierzytelnianie nie powiodło się bez szczegółowej wiadomości")
                 return False
         except Exception as e:
-            print(f"BŁĄD: Podczas uzyskiwania klucza API: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            print(f"Błąd podczas uzyskiwania klucza API: {e}")
             return False
 
     def get_address_objects(self):
@@ -235,36 +224,20 @@ def parse_address_objects(xml_data):
         xml_data (str): Dane XML pobrane z API Panoramy
         
     Returns:
-        dict: Słownik z obiektami adresowymi w formacie:
-              {
-                  'H-10.10.10.10-32': {
-                      'type': 'ip-netmask',
-                      'value': '10.10.10.10/32',
-                      'device_group': 'nazwa_device_group'
-                  },
-                  'R-10.10.10.30-50': {
-                      'type': 'ip-range',
-                      'value': '10.10.10.30-10.10.10.50',
-                      'device_group': 'nazwa_device_group'
-                  }
-              }
+        dict: Słownik z obiektami adresowymi
     """
     if xml_data is None:
-        print("DEBUG: Brak danych XML do parsowania obiektów adresowych")
         return {}
     
     try:
-        print("DEBUG: Rozpoczynanie parsowania XML obiektów adresowych")
         root = ET.fromstring(xml_data)
         objects = {}
         
         # Parsowanie obiektów z device-group
-        print("DEBUG: Parsowanie obiektów z device-group...")
         device_group_section = root.find('.//device-group-objects')
         if device_group_section is not None:
             for device_group in device_group_section.findall('.//entry'):
                 device_group_name = device_group.get('name')
-                print(f"DEBUG: Przetwarzanie device-group: {device_group_name}")
                 
                 for address_entry in device_group.findall('.//address/entry'):
                     address_name = address_entry.get('name')
@@ -278,7 +251,6 @@ def parse_address_objects(xml_data):
                             'value': value,
                             'device_group': device_group_name
                         }
-                        print(f"DEBUG: Dodano obiekt netmask {address_name} z wartością {value}")
                     elif address_entry.find('./ip-range') is not None:
                         # Zakres adresów IP
                         value = address_entry.find('./ip-range').text
@@ -287,12 +259,8 @@ def parse_address_objects(xml_data):
                             'value': value,
                             'device_group': device_group_name
                         }
-                        print(f"DEBUG: Dodano obiekt range {address_name} z wartością {value}")
-        else:
-            print("DEBUG: Nie znaleziono sekcji device-group-objects")
             
         # Parsowanie obiektów shared
-        print("DEBUG: Parsowanie obiektów shared...")
         shared_section = root.find('.//shared-objects')
         if shared_section is not None:
             for address_entry in shared_section.findall('.//address/entry'):
@@ -307,7 +275,6 @@ def parse_address_objects(xml_data):
                         'value': value,
                         'device_group': 'shared'
                     }
-                    print(f"DEBUG: Dodano obiekt shared netmask {address_name} z wartością {value}")
                 elif address_entry.find('./ip-range') is not None:
                     # Zakres adresów IP
                     value = address_entry.find('./ip-range').text
@@ -316,15 +283,10 @@ def parse_address_objects(xml_data):
                         'value': value,
                         'device_group': 'shared'
                     }
-                    print(f"DEBUG: Dodano obiekt shared range {address_name} z wartością {value}")
-        else:
-            print("DEBUG: Nie znaleziono sekcji shared-objects")
             
-        print(f"DEBUG: Łącznie znaleziono {len(objects)} obiektów adresowych")
         return objects
     except Exception as e:
-        print(f"BŁĄD: Podczas parsowania obiektów adresowych: {e}")
-        print(f"DEBUG: Surowy XML obiektów adresowych (pierwsze 200 znaków): {xml_data[:200]}")
+        print(f"Błąd podczas parsowania obiektów adresowych: {e}")
         return {}
 
 
@@ -336,14 +298,48 @@ def parse_address_groups(xml_data):
         xml_data (str): Dane XML pobrane z API Panoramy
         
     Returns:
-        dict: Słownik z grupami adresowymi w formacie:
-              {
-                  'gr1': {
-                      'members': ['H-10.10.10.10-32', 'H-10.10.10.11-32'],
-                      'device_group': 'nazwa_device_group'
-                  },
-                  'gr2': {
-                      'members': ['R-10.10.10.30-50'],
+        dict: Słownik z grupami adresowymi
+    """
+    if xml_data is None:
+        return {}
+    
+    try:
+        root = ET.fromstring(xml_data)
+        groups = {}
+        
+        # Parsowanie grup z device-group
+        device_group_section = root.find('.//device-group-groups')
+        if device_group_section is not None:
+            for device_group in device_group_section.findall('.//entry'):
+                device_group_name = device_group.get('name')
+                
+                for group_entry in device_group.findall('.//address-group/entry'):
+                    group_name = group_entry.get('name')
+                    member_elements = group_entry.findall('./static/member')
+                    members = [member.text for member in member_elements]
+                    
+                    groups[group_name] = {
+                        'members': members,
+                        'device_group': device_group_name
+                    }
+            
+        # Parsowanie grup shared
+        shared_section = root.find('.//shared-groups')
+        if shared_section is not None:
+            for group_entry in shared_section.findall('.//address-group/entry'):
+                group_name = group_entry.get('name')
+                member_elements = group_entry.findall('./static/member')
+                members = [member.text for member in member_elements]
+                
+                groups[group_name] = {
+                    'members': members,
+                    'device_group': 'shared'
+                }
+            
+        return groups
+    except Exception as e:
+        print(f"Błąd podczas parsowania grup adresowych: {e}")
+        return {}50'],
                       'device_group': 'nazwa_device_group'
                   }
               }
@@ -616,8 +612,15 @@ def main():
     print("Skrypt weryfikacji hostów w Palo Alto Panorama")
     print("==============================================")
     
+    # Domyślny adres Panoramy
+    panorama_ip = "10.10.10.25"  # Zaszyte w kodzie
+    
     # Pobierz dane logowania
-    panorama_ip = input("Podaj adres IP Panoramy: ")
+    print(f"Adres IP Panoramy: {panorama_ip} [domyślny]")
+    custom_ip = input("Podaj inny adres lub naciśnij Enter, aby użyć domyślnego: ")
+    if custom_ip.strip():
+        panorama_ip = custom_ip
+    
     username = input("Podaj nazwę użytkownika: ")
     password = getpass.getpass("Podaj hasło: ")
     
@@ -633,30 +636,9 @@ def main():
     address_xml = panorama.get_address_objects()
     groups_xml = panorama.get_address_groups()
     
-    # Zapisz surowe XML do plików dla debugowania
-    try:
-        with open('debug_address_objects.xml', 'w') as f:
-            f.write(address_xml if address_xml else "Brak danych")
-        with open('debug_address_groups.xml', 'w') as f:
-            f.write(groups_xml if groups_xml else "Brak danych")
-        print("DEBUG: Zapisano surowe dane XML do plików debug_*.xml")
-    except Exception as e:
-        print(f"DEBUG: Nie udało się zapisać plików debugowania: {e}")
-    
     # Parsowanie danych
     address_objects = parse_address_objects(address_xml)
     address_groups = parse_address_groups(groups_xml)
-    
-    # Zapisz sparsowane dane do plików dla debugowania
-    try:
-        import json
-        with open('debug_address_objects.json', 'w') as f:
-            json.dump(address_objects, f, indent=2)
-        with open('debug_address_groups.json', 'w') as f:
-            json.dump(address_groups, f, indent=2)
-        print("DEBUG: Zapisano sparsowane dane do plików debug_*.json")
-    except Exception as e:
-        print(f"DEBUG: Nie udało się zapisać plików JSON: {e}")
     
     if not address_objects and not address_groups:
         print("BŁĄD: Nie udało się pobrać ani obiektów, ani grup. Sprawdź połączenie i uprawnienia.")
