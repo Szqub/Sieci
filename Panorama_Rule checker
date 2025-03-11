@@ -4,7 +4,7 @@
 """
 Skrypt do weryfikacji konfiguracji hostów w Palo Alto Networks Panorama
 
-Autor: Szymon
+Autor: Claude
 Data: 11.03.2025
 
 Opis:
@@ -76,14 +76,40 @@ class PanoramaAPI:
         }
         
         try:
+            print(f"DEBUG: Próba uwierzytelnienia użytkownika {self.username} na {self.panorama_ip}")
             response = requests.get(self.base_url, params=params, verify=False)
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
             response.raise_for_status()
             
+            # Zapisz odpowiedź XML do pliku dla debugowania (maskujemy klucz API)
+            debug_response = response.text.replace('<key>', '<key>MASKED-FOR-SECURITY').replace('</key>', '</key>')
+            with open('debug_keygen_response.xml', 'w') as f:
+                f.write(debug_response)
+            print("DEBUG: Zapisano odpowiedź uwierzytelniania do pliku debug_keygen_response.xml")
+            
             root = ET.fromstring(response.text)
-            self.api_key = root.find('.//key').text
-            return True
+            status = root.get('status')
+            print(f"DEBUG: Status uwierzytelniania: {status}")
+            
+            if status == 'success':
+                key_element = root.find('.//key')
+                if key_element is not None:
+                    self.api_key = key_element.text
+                    print("DEBUG: Pomyślnie pobrano klucz API")
+                    return True
+                else:
+                    print("BŁĄD: Brak elementu <key> w odpowiedzi")
+                    return False
+            else:
+                error_msg = root.find('.//msg')
+                if error_msg is not None:
+                    print(f"BŁĄD: Uwierzytelnianie nie powiodło się: {error_msg.text}")
+                else:
+                    print("BŁĄD: Uwierzytelnianie nie powiodło się bez szczegółowej wiadomości")
+                return False
         except Exception as e:
-            print(f"Błąd podczas uzyskiwania kluczu API: {e}")
+            print(f"BŁĄD: Podczas uzyskiwania klucza API: {e}")
+            print(f"DEBUG: Pełna treść błędu: {str(e)}")
             return False
 
     def get_address_objects(self):
@@ -97,19 +123,50 @@ class PanoramaAPI:
             print("Brak klucza API. Najpierw należy wywołać get_api_key().")
             return None
         
-        params = {
+        # Pobieranie obiektów z device-group
+        device_params = {
             'type': 'config',
             'action': 'get',
             'xpath': "/config/devices/entry/device-group/entry/address",
             'key': self.api_key
         }
         
+        # Pobieranie obiektów shared
+        shared_params = {
+            'type': 'config',
+            'action': 'get',
+            'xpath': "/config/shared/address",
+            'key': self.api_key
+        }
+        
         try:
-            response = requests.get(self.base_url, params=params, verify=False)
-            response.raise_for_status()
-            return response.text
+            print("DEBUG: Pobieranie obiektów adresowych z device-group...")
+            device_response = requests.get(self.base_url, params=device_params, verify=False)
+            device_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {device_response.status_code}")
+            
+            print("DEBUG: Pobieranie obiektów adresowych shared...")
+            shared_response = requests.get(self.base_url, params=shared_params, verify=False)
+            shared_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {shared_response.status_code}")
+            
+            # Łączymy XML z obiektami device-group i shared
+            combined_xml = f"""<response>
+                <result>
+                    <device-group-objects>
+                        {device_response.text}
+                    </device-group-objects>
+                    <shared-objects>
+                        {shared_response.text}
+                    </shared-objects>
+                </result>
+            </response>"""
+            
+            print("DEBUG: Pomyślnie połączono obiekty device-group i shared")
+            return combined_xml
         except Exception as e:
-            print(f"Błąd podczas pobierania obiektów adresowych: {e}")
+            print(f"BŁĄD: Podczas pobierania obiektów adresowych: {e}")
+            print(f"DEBUG: Pełna treść błędu: {str(e)}")
             return None
     
     def get_address_groups(self):
@@ -123,19 +180,50 @@ class PanoramaAPI:
             print("Brak klucza API. Najpierw należy wywołać get_api_key().")
             return None
         
-        params = {
+        # Pobieranie grup z device-group
+        device_params = {
             'type': 'config',
             'action': 'get',
             'xpath': "/config/devices/entry/device-group/entry/address-group",
             'key': self.api_key
         }
         
+        # Pobieranie grup shared
+        shared_params = {
+            'type': 'config',
+            'action': 'get',
+            'xpath': "/config/shared/address-group",
+            'key': self.api_key
+        }
+        
         try:
-            response = requests.get(self.base_url, params=params, verify=False)
-            response.raise_for_status()
-            return response.text
+            print("DEBUG: Pobieranie grup adresowych z device-group...")
+            device_response = requests.get(self.base_url, params=device_params, verify=False)
+            device_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {device_response.status_code}")
+            
+            print("DEBUG: Pobieranie grup adresowych shared...")
+            shared_response = requests.get(self.base_url, params=shared_params, verify=False)
+            shared_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {shared_response.status_code}")
+            
+            # Łączymy XML z grupami device-group i shared
+            combined_xml = f"""<response>
+                <r>
+                    <device-group-groups>
+                        {device_response.text}
+                    </device-group-groups>
+                    <shared-groups>
+                        {shared_response.text}
+                    </shared-groups>
+                </r>
+            </response>"""
+            
+            print("DEBUG: Pomyślnie połączono grupy device-group i shared")
+            return combined_xml
         except Exception as e:
-            print(f"Błąd podczas pobierania grup adresowych: {e}")
+            print(f"BŁĄD: Podczas pobierania grup adresowych: {e}")
+            print(f"DEBUG: Pełna treść błędu: {str(e)}")
             return None
 
 
@@ -162,37 +250,82 @@ def parse_address_objects(xml_data):
               }
     """
     if xml_data is None:
+        print("DEBUG: Brak danych XML do parsowania obiektów adresowych")
         return {}
     
-    root = ET.fromstring(xml_data)
-    objects = {}
-    
-    # Przetwarzanie dla device-group
-    for device_group in root.findall('.//entry'):
-        device_group_name = device_group.get('name')
+    try:
+        print("DEBUG: Rozpoczynanie parsowania XML obiektów adresowych")
+        root = ET.fromstring(xml_data)
+        objects = {}
         
-        for address_entry in device_group.findall('.//address/entry'):
-            address_name = address_entry.get('name')
+        # Parsowanie obiektów z device-group
+        print("DEBUG: Parsowanie obiektów z device-group...")
+        device_group_section = root.find('.//device-group-objects')
+        if device_group_section is not None:
+            for device_group in device_group_section.findall('.//entry'):
+                device_group_name = device_group.get('name')
+                print(f"DEBUG: Przetwarzanie device-group: {device_group_name}")
+                
+                for address_entry in device_group.findall('.//address/entry'):
+                    address_name = address_entry.get('name')
+                    
+                    # Sprawdź typ obiektu adresowego
+                    if address_entry.find('./ip-netmask') is not None:
+                        # Host lub podsieć
+                        value = address_entry.find('./ip-netmask').text
+                        objects[address_name] = {
+                            'type': 'ip-netmask',
+                            'value': value,
+                            'device_group': device_group_name
+                        }
+                        print(f"DEBUG: Dodano obiekt netmask {address_name} z wartością {value}")
+                    elif address_entry.find('./ip-range') is not None:
+                        # Zakres adresów IP
+                        value = address_entry.find('./ip-range').text
+                        objects[address_name] = {
+                            'type': 'ip-range',
+                            'value': value,
+                            'device_group': device_group_name
+                        }
+                        print(f"DEBUG: Dodano obiekt range {address_name} z wartością {value}")
+        else:
+            print("DEBUG: Nie znaleziono sekcji device-group-objects")
             
-            # Sprawdź typ obiektu adresowego
-            if address_entry.find('./ip-netmask') is not None:
-                # Host lub podsieć
-                value = address_entry.find('./ip-netmask').text
-                objects[address_name] = {
-                    'type': 'ip-netmask',
-                    'value': value,
-                    'device_group': device_group_name
-                }
-            elif address_entry.find('./ip-range') is not None:
-                # Zakres adresów IP
-                value = address_entry.find('./ip-range').text
-                objects[address_name] = {
-                    'type': 'ip-range',
-                    'value': value,
-                    'device_group': device_group_name
-                }
-    
-    return objects
+        # Parsowanie obiektów shared
+        print("DEBUG: Parsowanie obiektów shared...")
+        shared_section = root.find('.//shared-objects')
+        if shared_section is not None:
+            for address_entry in shared_section.findall('.//address/entry'):
+                address_name = address_entry.get('name')
+                
+                # Sprawdź typ obiektu adresowego
+                if address_entry.find('./ip-netmask') is not None:
+                    # Host lub podsieć
+                    value = address_entry.find('./ip-netmask').text
+                    objects[address_name] = {
+                        'type': 'ip-netmask',
+                        'value': value,
+                        'device_group': 'shared'
+                    }
+                    print(f"DEBUG: Dodano obiekt shared netmask {address_name} z wartością {value}")
+                elif address_entry.find('./ip-range') is not None:
+                    # Zakres adresów IP
+                    value = address_entry.find('./ip-range').text
+                    objects[address_name] = {
+                        'type': 'ip-range',
+                        'value': value,
+                        'device_group': 'shared'
+                    }
+                    print(f"DEBUG: Dodano obiekt shared range {address_name} z wartością {value}")
+        else:
+            print("DEBUG: Nie znaleziono sekcji shared-objects")
+            
+        print(f"DEBUG: Łącznie znaleziono {len(objects)} obiektów adresowych")
+        return objects
+    except Exception as e:
+        print(f"BŁĄD: Podczas parsowania obiektów adresowych: {e}")
+        print(f"DEBUG: Surowy XML obiektów adresowych (pierwsze 200 znaków): {xml_data[:200]}")
+        return {}
 
 
 def parse_address_groups(xml_data):
@@ -216,26 +349,58 @@ def parse_address_groups(xml_data):
               }
     """
     if xml_data is None:
+        print("DEBUG: Brak danych XML do parsowania grup adresowych")
         return {}
     
-    root = ET.fromstring(xml_data)
-    groups = {}
-    
-    # Przetwarzanie dla device-group
-    for device_group in root.findall('.//entry'):
-        device_group_name = device_group.get('name')
+    try:
+        print("DEBUG: Rozpoczynanie parsowania XML grup adresowych")
+        root = ET.fromstring(xml_data)
+        groups = {}
         
-        for group_entry in device_group.findall('.//address-group/entry'):
-            group_name = group_entry.get('name')
-            member_elements = group_entry.findall('./static/member')
-            members = [member.text for member in member_elements]
+        # Parsowanie grup z device-group
+        print("DEBUG: Parsowanie grup z device-group...")
+        device_group_section = root.find('.//device-group-groups')
+        if device_group_section is not None:
+            for device_group in device_group_section.findall('.//entry'):
+                device_group_name = device_group.get('name')
+                print(f"DEBUG: Przetwarzanie device-group: {device_group_name}")
+                
+                for group_entry in device_group.findall('.//address-group/entry'):
+                    group_name = group_entry.get('name')
+                    member_elements = group_entry.findall('./static/member')
+                    members = [member.text for member in member_elements]
+                    
+                    groups[group_name] = {
+                        'members': members,
+                        'device_group': device_group_name
+                    }
+                    print(f"DEBUG: Dodano grupę {group_name} z {len(members)} członkami")
+        else:
+            print("DEBUG: Nie znaleziono sekcji device-group-groups")
             
-            groups[group_name] = {
-                'members': members,
-                'device_group': device_group_name
-            }
-    
-    return groups
+        # Parsowanie grup shared
+        print("DEBUG: Parsowanie grup shared...")
+        shared_section = root.find('.//shared-groups')
+        if shared_section is not None:
+            for group_entry in shared_section.findall('.//address-group/entry'):
+                group_name = group_entry.get('name')
+                member_elements = group_entry.findall('./static/member')
+                members = [member.text for member in member_elements]
+                
+                groups[group_name] = {
+                    'members': members,
+                    'device_group': 'shared'
+                }
+                print(f"DEBUG: Dodano grupę shared {group_name} z {len(members)} członkami")
+        else:
+            print("DEBUG: Nie znaleziono sekcji shared-groups")
+            
+        print(f"DEBUG: Łącznie znaleziono {len(groups)} grup adresowych")
+        return groups
+    except Exception as e:
+        print(f"BŁĄD: Podczas parsowania grup adresowych: {e}")
+        print(f"DEBUG: Surowy XML grup adresowych (pierwsze 200 znaków): {xml_data[:200]}")
+        return {}
 
 
 def is_ip_in_range(ip, range_str):
@@ -360,13 +525,38 @@ def main():
     address_xml = panorama.get_address_objects()
     groups_xml = panorama.get_address_groups()
     
+    # Zapisz surowe XML do plików dla debugowania
+    try:
+        with open('debug_address_objects.xml', 'w') as f:
+            f.write(address_xml if address_xml else "Brak danych")
+        with open('debug_address_groups.xml', 'w') as f:
+            f.write(groups_xml if groups_xml else "Brak danych")
+        print("DEBUG: Zapisano surowe dane XML do plików debug_*.xml")
+    except Exception as e:
+        print(f"DEBUG: Nie udało się zapisać plików debugowania: {e}")
+    
     # Parsowanie danych
     address_objects = parse_address_objects(address_xml)
     address_groups = parse_address_groups(groups_xml)
     
-    if not address_objects or not address_groups:
-        print("Nie udało się pobrać obiektów lub grup. Sprawdź połączenie.")
+    # Zapisz sparsowane dane do plików dla debugowania
+    try:
+        import json
+        with open('debug_address_objects.json', 'w') as f:
+            json.dump(address_objects, f, indent=2)
+        with open('debug_address_groups.json', 'w') as f:
+            json.dump(address_groups, f, indent=2)
+        print("DEBUG: Zapisano sparsowane dane do plików debug_*.json")
+    except Exception as e:
+        print(f"DEBUG: Nie udało się zapisać plików JSON: {e}")
+    
+    if not address_objects and not address_groups:
+        print("BŁĄD: Nie udało się pobrać ani obiektów, ani grup. Sprawdź połączenie i uprawnienia.")
         sys.exit(1)
+    elif not address_objects:
+        print("OSTRZEŻENIE: Nie udało się pobrać obiektów adresowych, ale pobrano grupy. Kontynuuję z ograniczoną funkcjonalnością.")
+    elif not address_groups:
+        print("OSTRZEŻENIE: Nie udało się pobrać grup adresowych, ale pobrano obiekty. Kontynuuję z ograniczoną funkcjonalnością.")
     
     print(f"Pobrano {len(address_objects)} obiektów adresowych i {len(address_groups)} grup.")
     
