@@ -4,7 +4,7 @@
 """
 Skrypt do weryfikacji konfiguracji hostów w Palo Alto Networks Panorama
 
-Autor: Claude
+Autor: Szymon
 Data: 11.03.2025
 
 Opis:
@@ -209,14 +209,14 @@ class PanoramaAPI:
             
             # Łączymy XML z grupami device-group i shared
             combined_xml = f"""<response>
-                <r>
+                <result>
                     <device-group-groups>
                         {device_response.text}
                     </device-group-groups>
                     <shared-groups>
                         {shared_response.text}
                     </shared-groups>
-                </r>
+                </result>
             </response>"""
             
             print("DEBUG: Pomyślnie połączono grupy device-group i shared")
@@ -425,18 +425,15 @@ def is_ip_in_range(ip, range_str):
         return False
 
 
-def process_host_entry(entry, address_objects, address_groups, group_mapping=None):
+def parse_group_prefix(hostname_with_group):
     """
-    Przetwórz pojedynczy wpis hosta i sprawdź jego konfigurację w Panoramie.
+    Wyodrębnij prefiks grupy z nazwy hosta (pierwsze 3 znaki po myślniku).
     
     Args:
-        entry (str): Wpis w formacie 'nazwahosta-grX IP'
-        address_objects (dict): Słownik z obiektami adresowymi z Panoramy
-        address_groups (dict): Słownik z grupami adresowymi z Panoramy
-        group_mapping (dict): Mapowanie prefiksów grup na rzeczywiste nazwy grup w Panoramie
+        hostname_with_group (str): Nazwa hosta z prefiksem grupy, np. "nazwahosta-gr134"
         
     Returns:
-        str: Informacja o konfiguracji hosta w Panoramie
+        tuple: (nazwa hosta, prefiks grupy, pełna część po myślniku)
     """
     parts = hostname_with_group.split('-', 1)
     if len(parts) < 2:
@@ -477,6 +474,21 @@ def find_unique_group_prefixes(entries):
             unique_prefixes.add(group_prefix)
     
     return sorted(list(unique_prefixes))
+
+
+def process_host_entry(entry, address_objects, address_groups, group_mapping=None):
+    """
+    Przetwórz pojedynczy wpis hosta i sprawdź jego konfigurację w Panoramie.
+    
+    Args:
+        entry (str): Wpis w formacie 'nazwahosta-grX IP'
+        address_objects (dict): Słownik z obiektami adresowymi z Panoramy
+        address_groups (dict): Słownik z grupami adresowymi z Panoramy
+        group_mapping (dict): Mapowanie prefiksów grup na rzeczywiste nazwy grup w Panoramie
+        
+    Returns:
+        str: Informacja o konfiguracji hosta w Panoramie
+    """
     try:
         # Parsowanie wpisu
         parts = entry.strip().split()
