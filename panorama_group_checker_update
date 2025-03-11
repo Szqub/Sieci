@@ -4,7 +4,7 @@
 """
 Skrypt do weryfikacji konfiguracji hostów w Palo Alto Networks Panorama
 
-Autor: Szymon ZSSIT
+Autor: Claude
 Data: 11.03.2025
 
 Opis:
@@ -702,29 +702,36 @@ def main():
     print("\nWyniki weryfikacji:")
     print("===================")
     
-    # Przygotuj plik do zapisu wyników
+    # Lista na wyniki do zapisania
+    all_results = []
+    
+    # Przetwórz każdy wpis
+    for entry in entries:
+        if entry.strip():
+            result = process_host_entry(entry, address_objects, address_groups, group_mapping)
+            print(result)
+            all_results.append(result)
+    
+    # Zapisz wyniki do pliku
     output_filename = "wyniki_weryfikacji.txt"
+    
+    # Bezpośredni zapis do pliku, bez dodatkowych funkcji
     try:
-        with open(output_filename, 'w') as output_file:
-            # Zapisz nagłówek do pliku
-            output_file.write("Wyniki weryfikacji hostów w Palo Alto Panorama\n")
-            output_file.write("===========================================\n\n")
+        print(f"\nZapisuję wyniki do pliku {output_filename}...")
+        with open(output_filename, 'w', encoding='utf-8') as f:
+            f.write("Wyniki weryfikacji hostów w Palo Alto Panorama\n")
+            f.write("===========================================\n\n")
             
-            # Przetwórz każdy wpis i zapisz wynik
-            for entry in entries:
-                if entry.strip():
-                    result = process_host_entry(entry, address_objects, address_groups, group_mapping)
-                    print(result)
-                    output_file.write(result + "\n")
+            for result in all_results:
+                f.write(str(result) + "\n")
+            
+        print(f"Wyniki zostały zapisane do pliku: {output_filename}")
         
-        print(f"\nWyniki zostały zapisane do pliku: {output_filename}")
     except Exception as e:
         print(f"BŁĄD: Nie udało się zapisać wyników do pliku: {e}")
-        # Kontynuuj przetwarzanie bez zapisywania do pliku
-        for entry in entries:
-            if entry.strip():
-                result = process_host_entry(entry, address_objects, address_groups, group_mapping)
-                print(result)
+        print("Wyświetlam wszystkie wyniki na ekranie jeszcze raz do ręcznego skopiowania:")
+        for i, result in enumerate(all_results, 1):
+            print(f"{i}. {result}")
 
 
 if __name__ == "__main__":
