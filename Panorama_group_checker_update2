@@ -1,0 +1,687 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Skrypt do weryfikacji konfiguracji hostów w Palo Alto Networks Panorama
+
+Autor: Szymon
+Data: 11.03.2025
+
+Opis:
+Skrypt służy do weryfikacji, czy hosty zdefiniowane w pliku wejściowym są poprawnie skonfigurowane 
+w systemie Palo Alto Networks Panorama. Dla każdego hosta weryfikowane są następujące elementy:
+1. Czy istnieje odpowiedni obiekt adresowy typu H-IP-32 w Panoramie
+2. Jeśli nie, czy adres IP znajduje się w zakresie jakiegoś obiektu typu R-IP-range
+3. Czy obiekt adresowy jest przypisany do odpowiedniej grupy adresowej
+
+Dodatkowo:
+- Po weryfikacji, skrypt wypisuje nadmiarowe adresy – czyli te, które znajdują się w konfiguracji PA,
+  ale nie zostały uwzględnione w danych wejściowych. W przypadku obiektów typu range, sprawdzamy, które
+  adresy z zakresu nie pojawiły się w inputach.
+
+Format danych wejściowych:
+nazwahosta-grX 10.10.10.10
+gdzie:
+- nazwahosta - nazwa hosta
+- grX - nazwa grupy, do której powinien być przypisany host (np. gr1, gr2)
+- 10.10.10.10 - adres IP hosta
+
+Format danych wyjściowych:
+nazwahosta-grX 10.10.10.10 to obiekt H-10.10.10.10-32 na PA i znajduje się w grupie grX
+lub
+nazwahosta-grX 10.10.10.40 to obiekt R-10.10.10.30-50 na PA i znajduje się w grupie grX
+
+Wymagania:
+- Python 3.6+
+- Moduły: requests, xml.etree.ElementTree, ipaddress, getpass
+"""
+
+import requests
+import getpass
+import xml.etree.ElementTree as ET
+import ipaddress
+import sys
+import re
+from urllib3.exceptions import InsecureRequestWarning
+
+# Wyłączenie ostrzeżeń o niezweryfikowanym certyfikacie SSL
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+class PanoramaAPI:
+    """
+    Klasa do obsługi API Palo Alto Networks Panorama.
+    Udostępnia metody do uwierzytelniania oraz pobierania danych o obiektach adresowych i grupach.
+    """
+    def __init__(self, panorama_ip, username, password):
+        self.panorama_ip = panorama_ip
+        self.username = username
+        self.password = password
+        self.api_key = None
+        self.base_url = f"https://{self.panorama_ip}/api/"
+
+    def get_api_key(self):
+        params = {
+            'type': 'keygen',
+            'user': self.username,
+            'password': self.password
+        }
+        
+        try:
+            print(f"DEBUG: Próba uwierzytelnienia użytkownika {self.username} na {self.panorama_ip}")
+            response = requests.get(self.base_url, params=params, verify=False)
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
+            response.raise_for_status()
+            
+            debug_response = response.text.replace('<key>', '<key>MASKED-FOR-SECURITY').replace('</key>', '</key>')
+            with open('debug_keygen_response.xml', 'w') as f:
+                f.write(debug_response)
+            print("DEBUG: Zapisano odpowiedź uwierzytelniania do pliku debug_keygen_response.xml")
+            
+            root = ET.fromstring(response.text)
+            status = root.get('status')
+            print(f"DEBUG: Status uwierzytelniania: {status}")
+            
+            if status == 'success':
+                key_element = root.find('.//key')
+                if key_element is not None:
+                    self.api_key = key_element.text
+                    print("DEBUG: Pomyślnie pobrano klucz API")
+                    return True
+                else:
+                    print("BŁĄD: Brak elementu <key> w odpowiedzi")
+                    return False
+            else:
+                error_msg = root.find('.//msg')
+                if error_msg is not None:
+                    print(f"BŁĄD: Uwierzytelnianie nie powiodło się: {error_msg.text}")
+                else:
+                    print("BŁĄD: Uwierzytelnianie nie powiodło się bez szczegółowej wiadomości")
+                return False
+        except Exception as e:
+            print(f"BŁĄD: Podczas uzyskiwania klucza API: {e}")
+            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            return False
+
+    def get_address_objects(self):
+        if not self.api_key:
+            print("Brak klucza API. Najpierw należy wywołać get_api_key().")
+            return None
+        
+        device_params = {
+            'type': 'config',
+            'action': 'get',
+            'xpath': "/config/devices/entry/device-group/entry/address",
+            'key': self.api_key
+        }
+        
+        shared_params = {
+            'type': 'config',
+            'action': 'get',
+            'xpath': "/config/shared/address",
+            'key': self.api_key
+        }
+        
+        try:
+            print("DEBUG: Pobieranie obiektów adresowych z device-group...")
+            device_response = requests.get(self.base_url, params=device_params, verify=False)
+            device_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {device_response.status_code}")
+            
+            print("DEBUG: Pobieranie obiektów adresowych shared...")
+            shared_response = requests.get(self.base_url, params=shared_params, verify=False)
+            shared_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {shared_response.status_code}")
+            
+            combined_xml = f"""<response>
+                <result>
+                    <device-group-objects>
+                        {device_response.text}
+                    </device-group-objects>
+                    <shared-objects>
+                        {shared_response.text}
+                    </shared-objects>
+                </result>
+            </response>"""
+            
+            print("DEBUG: Pomyślnie połączono obiekty device-group i shared")
+            return combined_xml
+        except Exception as e:
+            print(f"BŁĄD: Podczas pobierania obiektów adresowych: {e}")
+            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            return None
+    
+    def get_address_groups(self):
+        if not self.api_key:
+            print("Brak klucza API. Najpierw należy wywołać get_api_key().")
+            return None
+        
+        device_params = {
+            'type': 'config',
+            'action': 'get',
+            'xpath': "/config/devices/entry/device-group/entry/address-group",
+            'key': self.api_key
+        }
+        
+        shared_params = {
+            'type': 'config',
+            'action': 'get',
+            'xpath': "/config/shared/address-group",
+            'key': self.api_key
+        }
+        
+        try:
+            print("DEBUG: Pobieranie grup adresowych z device-group...")
+            device_response = requests.get(self.base_url, params=device_params, verify=False)
+            device_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {device_response.status_code}")
+            
+            print("DEBUG: Pobieranie grup adresowych shared...")
+            shared_response = requests.get(self.base_url, params=shared_params, verify=False)
+            shared_response.raise_for_status()
+            print(f"DEBUG: Otrzymano odpowiedź HTTP {shared_response.status_code}")
+            
+            combined_xml = f"""<response>
+                <result>
+                    <device-group-groups>
+                        {device_response.text}
+                    </device-group-groups>
+                    <shared-groups>
+                        {shared_response.text}
+                    </shared-groups>
+                </result>
+            </response>"""
+            
+            print("DEBUG: Pomyślnie połączono grupy device-group i shared")
+            return combined_xml
+        except Exception as e:
+            print(f"BŁĄD: Podczas pobierania grup adresowych: {e}")
+            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            return None
+
+def parse_address_objects(xml_data):
+    if xml_data is None:
+        print("DEBUG: Brak danych XML do parsowania obiektów adresowych")
+        return {}
+    
+    try:
+        print("DEBUG: Rozpoczynanie parsowania XML obiektów adresowych")
+        root = ET.fromstring(xml_data)
+        objects = {}
+        
+        print("DEBUG: Parsowanie obiektów z device-group...")
+        device_group_section = root.find('.//device-group-objects')
+        if device_group_section is not None:
+            for device_group in device_group_section.findall('.//entry'):
+                device_group_name = device_group.get('name')
+                print(f"DEBUG: Przetwarzanie device-group: {device_group_name}")
+                
+                for address_entry in device_group.findall('.//address/entry'):
+                    address_name = address_entry.get('name')
+                    if address_entry.find('./ip-netmask') is not None:
+                        value = address_entry.find('./ip-netmask').text
+                        objects[address_name] = {
+                            'type': 'ip-netmask',
+                            'value': value,
+                            'device_group': device_group_name
+                        }
+                        print(f"DEBUG: Dodano obiekt netmask {address_name} z wartością {value}")
+                    elif address_entry.find('./ip-range') is not None:
+                        value = address_entry.find('./ip-range').text
+                        objects[address_name] = {
+                            'type': 'ip-range',
+                            'value': value,
+                            'device_group': device_group_name
+                        }
+                        print(f"DEBUG: Dodano obiekt range {address_name} z wartością {value}")
+        else:
+            print("DEBUG: Nie znaleziono sekcji device-group-objects")
+            
+        print("DEBUG: Parsowanie obiektów shared...")
+        shared_section = root.find('.//shared-objects')
+        if shared_section is not None:
+            for address_entry in shared_section.findall('.//address/entry'):
+                address_name = address_entry.get('name')
+                if address_entry.find('./ip-netmask') is not None:
+                    value = address_entry.find('./ip-netmask').text
+                    objects[address_name] = {
+                        'type': 'ip-netmask',
+                        'value': value,
+                        'device_group': 'shared'
+                    }
+                    print(f"DEBUG: Dodano obiekt shared netmask {address_name} z wartością {value}")
+                elif address_entry.find('./ip-range') is not None:
+                    value = address_entry.find('./ip-range').text
+                    objects[address_name] = {
+                        'type': 'ip-range',
+                        'value': value,
+                        'device_group': 'shared'
+                    }
+                    print(f"DEBUG: Dodano obiekt shared range {address_name} z wartością {value}")
+        else:
+            print("DEBUG: Nie znaleziono sekcji shared-objects")
+            
+        print(f"DEBUG: Łącznie znaleziono {len(objects)} obiektów adresowych")
+        return objects
+    except Exception as e:
+        print(f"BŁĄD: Podczas parsowania obiektów adresowych: {e}")
+        print(f"DEBUG: Surowy XML obiektów adresowych (pierwsze 200 znaków): {xml_data[:200]}")
+        return {}
+
+def parse_address_groups(xml_data):
+    if xml_data is None:
+        print("DEBUG: Brak danych XML do parsowania grup adresowych")
+        return {}
+    
+    try:
+        print("DEBUG: Rozpoczynanie parsowania XML grup adresowych")
+        root = ET.fromstring(xml_data)
+        groups = {}
+        
+        print("DEBUG: Parsowanie grup z device-group...")
+        device_group_section = root.find('.//device-group-groups')
+        if device_group_section is not None:
+            for device_group in device_group_section.findall('.//entry'):
+                device_group_name = device_group.get('name')
+                print(f"DEBUG: Przetwarzanie device-group: {device_group_name}")
+                
+                for group_entry in device_group.findall('.//address-group/entry'):
+                    group_name = group_entry.get('name')
+                    member_elements = group_entry.findall('./static/member')
+                    members = [member.text for member in member_elements]
+                    
+                    groups[group_name] = {
+                        'members': members,
+                        'device_group': device_group_name
+                    }
+                    print(f"DEBUG: Dodano grupę {group_name} z {len(members)} członkami")
+        else:
+            print("DEBUG: Nie znaleziono sekcji device-group-groups")
+            
+        print("DEBUG: Parsowanie grup shared...")
+        shared_section = root.find('.//shared-groups')
+        if shared_section is not None:
+            for group_entry in shared_section.findall('.//address-group/entry'):
+                group_name = group_entry.get('name')
+                member_elements = group_entry.findall('./static/member')
+                members = [member.text for member in member_elements]
+                
+                groups[group_name] = {
+                    'members': members,
+                    'device_group': 'shared'
+                }
+                print(f"DEBUG: Dodano grupę shared {group_name} z {len(members)} członkami")
+        else:
+            print("DEBUG: Nie znaleziono sekcji shared-groups")
+            
+        print(f"DEBUG: Łącznie znaleziono {len(groups)} grup adresowych")
+        return groups
+    except Exception as e:
+        print(f"BŁĄD: Podczas parsowania grup adresowych: {e}")
+        print(f"DEBUG: Surowy XML grup adresowych (pierwsze 200 znaków): {xml_data[:200]}")
+        return {}
+
+def is_ip_in_range(ip, range_str):
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        start_ip, end_ip = range_str.split('-')
+        start_ip = ipaddress.ip_address(start_ip.strip())
+        end_ip = ipaddress.ip_address(end_ip.strip())
+        return start_ip <= ip_obj <= end_ip
+    except Exception:
+        return False
+
+def parse_group_prefix(hostname_with_group):
+    parts = hostname_with_group.split('-', 1)
+    if len(parts) < 2:
+        return hostname_with_group, None, None
+    hostname = parts[0]
+    group_part = parts[1]
+    if len(group_part) >= 3:
+        group_prefix = group_part[:3]
+        return hostname, group_prefix, group_part
+    return hostname, group_part, group_part
+
+def find_unique_group_prefixes(entries):
+    unique_prefixes = set()
+    for entry in entries:
+        parts = entry.strip().split()
+        if len(parts) < 2:
+            continue
+        hostname_with_group = parts[0]
+        _, group_prefix, _ = parse_group_prefix(hostname_with_group)
+        if group_prefix:
+            unique_prefixes.add(group_prefix)
+    return sorted(list(unique_prefixes))
+
+def check_if_ip_in_range_in_group(ip, group_name, address_objects, address_groups):
+    group_info = None
+    for g_name, g_info in address_groups.items():
+        if g_name.lower() == group_name.lower():
+            group_info = g_info
+            break
+    if not group_info:
+        return None
+    for member in group_info['members']:
+        if member in address_objects and address_objects[member]['type'] == 'ip-range':
+            range_value = address_objects[member]['value']
+            if is_ip_in_range(ip, range_value):
+                return (member, range_value)
+    return None
+
+def process_host_entry(entry, address_objects, address_groups, group_mapping=None):
+    try:
+        parts = entry.strip().split()
+        if len(parts) != 2:
+            return f"Błędny format wpisu: {entry}"
+        
+        hostname_with_group, ip = parts
+        hostname, group_prefix, full_group_part = parse_group_prefix(hostname_with_group)
+        if not group_prefix:
+            return f"Brak określonej grupy dla wpisu: {entry}"
+        
+        actual_group_name = group_mapping.get(group_prefix) if group_mapping else group_prefix
+        if not actual_group_name:
+            return f"Brak mapowania dla prefiksu grupy '{group_prefix}' w: {entry}"
+        
+        print(f"DEBUG: Przetwarzanie wpisu: hostname={hostname}, prefix={group_prefix}, actual_group={actual_group_name}, IP={ip}")
+        host_object_name = f"H-{ip}-32"
+        range_found = None
+        
+        if host_object_name in address_objects:
+            host_value = address_objects[host_object_name]['value']
+            print(f"DEBUG: Znaleziono obiekt hosta {host_object_name} z wartością {host_value}")
+            in_correct_group = False
+            for g_name, g_info in address_groups.items():
+                if g_name.lower() == actual_group_name.lower() and host_object_name in g_info['members']:
+                    in_correct_group = True
+                    print(f"DEBUG: Host {host_object_name} jest w grupie {g_name}")
+                    break
+            if in_correct_group:
+                return f"{hostname_with_group} {ip} jest hostem {host_object_name} i znajduje się w grupie {actual_group_name}"
+            else:
+                range_in_group = check_if_ip_in_range_in_group(ip, actual_group_name, address_objects, address_groups)
+                if range_in_group:
+                    range_name, range_value = range_in_group
+                    return f"{hostname_with_group} {ip} jest hostem {host_object_name}, nie jest bezpośrednio w grupie {actual_group_name}, ale mieści się w zakresie {range_name} ({range_value}) należącym do tej grupy"
+                else:
+                    return f"{hostname_with_group} {ip} jest hostem {host_object_name}, ale NIE znajduje się w grupie {actual_group_name}"
+        else:
+            print(f"DEBUG: Nie znaleziono bezpośredniego obiektu hosta {host_object_name}")
+        
+        for obj_name, obj_info in address_objects.items():
+            if obj_info['type'] == 'ip-range':
+                if is_ip_in_range(ip, obj_info['value']):
+                    range_found = obj_name
+                    range_value = obj_info['value']
+                    print(f"DEBUG: IP {ip} znaleziono w zakresie {obj_name} ({range_value})")
+                    in_correct_group = False
+                    for g_name, g_info in address_groups.items():
+                        if g_name.lower() == actual_group_name.lower() and range_found in g_info['members']:
+                            in_correct_group = True
+                            print(f"DEBUG: Zakres {range_found} jest w grupie {g_name}")
+                            break
+                    if in_correct_group:
+                        return f"{hostname_with_group} {ip} jest w zakresie {range_found} ({range_value}) i znajduje się w grupie {actual_group_name}"
+                    else:
+                        return f"{hostname_with_group} {ip} jest w zakresie {range_found} ({range_value}), ale NIE znajduje się w grupie {actual_group_name}"
+        
+        if range_found:
+            return f"{hostname_with_group} {ip} jest w zakresie {range_found} ({range_value}), ale nie ma przypisanej grupy {actual_group_name}"
+        else:
+            return f"{hostname_with_group} {ip} - nie znaleziono odpowiadającego obiektu na PA"
+    
+    except Exception as e:
+        print(f"BŁĄD: Podczas przetwarzania wpisu {entry}: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"Błąd podczas przetwarzania wpisu {entry}: {e}"
+
+# NOWA FUNKCJA: Znajdź nadmiarowe adresy w konfiguracji PA, które nie zostały uwzględnione w inputach
+def find_excess_addresses(address_groups, address_objects, input_group_ips):
+    """
+    Dla każdej grupy z PA sprawdza, które obiekty (host lub range) mają adresy nieobecne w danych wejściowych.
+    Zwraca słownik w formacie:
+      { 
+         'grupa1': [opis_nadmiarowego_obiektu1, opis_nadmiarowego_obiektu2, ...],
+         ...
+      }
+    """
+    excess_info = {}
+    for group_name, group_info in address_groups.items():
+        group_excess = []
+        for member in group_info['members']:
+            if member in address_objects:
+                obj = address_objects[member]
+                if obj['type'] == 'ip-netmask':
+                    # Obiekt hosta, wartość np. "10.10.10.10/32"
+                    host_ip = obj['value'].split('/')[0]
+                    if group_name not in input_group_ips or host_ip not in input_group_ips[group_name]:
+                        group_excess.append(f"{member} (host {host_ip})")
+                elif obj['type'] == 'ip-range':
+                    range_value = obj['value']  # np. "10.10.10.30-10.10.10.50"
+                    start_ip_str, end_ip_str = range_value.split('-')
+                    start_ip = ipaddress.ip_address(start_ip_str.strip())
+                    end_ip = ipaddress.ip_address(end_ip_str.strip())
+                    # Budujemy zbiór adresów z zakresu
+                    ip_set = set()
+                    current_ip = start_ip
+                    while current_ip <= end_ip:
+                        ip_set.add(str(current_ip))
+                        current_ip += 1
+                    input_ips = input_group_ips.get(group_name, set())
+                    extra_ips = sorted(ip_set - input_ips, key=lambda ip: ipaddress.ip_address(ip))
+                    if extra_ips:
+                        group_excess.append(f"{member} (range {range_value}), nadmiarowe adresy: {', '.join(extra_ips)}")
+            else:
+                group_excess.append(f"{member} (brak obiektu w konfiguracji)")
+        if group_excess:
+            excess_info[group_name] = group_excess
+    return excess_info
+
+def main():
+    print("Skrypt weryfikacji hostów w Palo Alto Panorama")
+    print("==============================================")
+    
+    # Pobierz dane logowania
+    panorama_ip = "IP PANORAMY"
+    username = input("Podaj nazwę użytkownika: ")
+    password = getpass.getpass("Podaj hasło: ")
+    
+    panorama = PanoramaAPI(panorama_ip, username, password)
+    
+    print("\nŁączenie z Panoramą...")
+    if not panorama.get_api_key():
+        print("Nie udało się uzyskać klucza API. Sprawdź dane logowania.")
+        sys.exit(1)
+    
+    print("Pobieranie danych z Panoramy...")
+    address_xml = panorama.get_address_objects()
+    groups_xml = panorama.get_address_groups()
+    
+    try:
+        with open('debug_address_objects.xml', 'w') as f:
+            f.write(address_xml if address_xml else "Brak danych")
+        with open('debug_address_groups.xml', 'w') as f:
+            f.write(groups_xml if groups_xml else "Brak danych")
+        print("DEBUG: Zapisano surowe dane XML do plików debug_*.xml")
+    except Exception as e:
+        print(f"DEBUG: Nie udało się zapisać plików debugowania: {e}")
+    
+    address_objects = parse_address_objects(address_xml)
+    address_groups = parse_address_groups(groups_xml)
+    
+    try:
+        import json
+        with open('debug_address_objects.json', 'w') as f:
+            json.dump(address_objects, f, indent=2)
+        with open('debug_address_groups.json', 'w') as f:
+            json.dump(address_groups, f, indent=2)
+        print("DEBUG: Zapisano sparsowane dane do plików debug_*.json")
+    except Exception as e:
+        print(f"DEBUG: Nie udało się zapisać plików JSON: {e}")
+    
+    if not address_objects and not address_groups:
+        print("BŁĄD: Nie udało się pobrać ani obiektów, ani grup. Sprawdź połączenie i uprawnienia.")
+        sys.exit(1)
+    elif not address_objects:
+        print("OSTRZEŻENIE: Nie udało się pobrać obiektów adresowych, ale pobrano grupy. Kontynuuję z ograniczoną funkcjonalnością.")
+    elif not address_groups:
+        print("OSTRZEŻENIE: Nie udało się pobrać grup adresowych, ale pobrano obiekty. Kontynuuję z ograniczoną funkcjonalnością.")
+    
+    print(f"Pobrano {len(address_objects)} obiektów adresowych i {len(address_groups)} grup.")
+    
+    print("\nWybierz źródło danych wejściowych:")
+    print("1. Plik tekstowy")
+    print("2. Ręczne wprowadzanie wpisów")
+    choice = input("Wybór (1/2): ")
+    
+    if choice == "1":
+        file_path = input("Podaj ścieżkę do pliku: ")
+        try:
+            with open(file_path, 'r') as file:
+                entries = file.readlines()
+        except Exception as e:
+            print(f"Błąd podczas wczytywania pliku: {e}")
+            sys.exit(1)
+    else:
+        print("\nWprowadź wpisy w formacie 'nazwahosta-grupa IP'.")
+        print("Wprowadź pustą linię, aby zakończyć.")
+        entries = []
+        while True:
+            entry = input("> ")
+            if not entry.strip():
+                break
+            entries.append(entry)
+    
+    unique_prefixes = find_unique_group_prefixes(entries)
+    
+    if not unique_prefixes:
+        print("BŁĄD: Nie znaleziono prefiksów grup w podanych wpisach.")
+        sys.exit(1)
+    
+    print("\nZnaleziono następujące prefiksy grup:")
+    for i, prefix in enumerate(unique_prefixes, 1):
+        print(f"{i}. {prefix}")
+    
+    print("\nDostępne grupy adresowe w Panoramie:")
+    group_names = list(address_groups.keys())
+    for i, name in enumerate(group_names, 1):
+        print(f"{i}. {name}")
+    
+    group_mapping = {}
+    print("\nPrzypisz prefiksy grup do rzeczywistych grup w Panoramie:")
+    for prefix in unique_prefixes:
+        while True:
+            print(f"\nPrefiks: {prefix}")
+            mapping = input(f"Podaj numer lub nazwę grupy z Panoramy dla prefiksu '{prefix}': ")
+            try:
+                index = int(mapping)
+                if 1 <= index <= len(group_names):
+                    group_mapping[prefix] = group_names[index-1]
+                    print(f"Przypisano prefiks '{prefix}' do grupy '{group_mapping[prefix]}'")
+                    break
+                else:
+                    print(f"Błędny numer grupy. Podaj wartość od 1 do {len(group_names)}.")
+            except ValueError:
+                if mapping in group_names:
+                    group_mapping[prefix] = mapping
+                    print(f"Przypisano prefiks '{prefix}' do grupy '{mapping}'")
+                    break
+                else:
+                    print("Podana nazwa grupy nie istnieje w Panoramie. Spróbuj ponownie.")
+    
+    print("\nWyniki weryfikacji:")
+    print("===================")
+    
+    all_results = []
+    direct_match_results = []
+    range_match_results = []
+    no_match_results = []
+    
+    # Przy okazji budujemy słownik IP z inputów dla każdej grupy (klucz = rzeczywista nazwa grupy)
+    input_group_ips = {}
+    for entry in entries:
+        parts = entry.strip().split()
+        if len(parts) != 2:
+            continue
+        hostname_with_group, ip = parts
+        hostname, group_prefix, _ = parse_group_prefix(hostname_with_group)
+        if not group_prefix:
+            continue
+        actual_group_name = group_mapping.get(group_prefix, group_prefix)
+        if actual_group_name not in input_group_ips:
+            input_group_ips[actual_group_name] = set()
+        input_group_ips[actual_group_name].add(ip)
+    
+    for entry in entries:
+        if entry.strip():
+            result = process_host_entry(entry, address_objects, address_groups, group_mapping)
+            if " i znajduje się w grupie " in result:
+                direct_match_results.append(result)
+            elif ", nie jest bezpośrednio w grupie " in result and " ale mieści się w zakresie " in result:
+                range_match_results.append(result)
+            else:
+                no_match_results.append(result)
+    
+    print("\n--- Hosty bezpośrednio w grupie ---")
+    for result in direct_match_results:
+        print(result)
+        all_results.append(result)
+    
+    print("\n--- Hosty w zakresie należącym do grupy ---")
+    for result in range_match_results:
+        print(result)
+        all_results.append(result)
+    
+    print("\n--- Hosty bez dopasowania do grupy ---")
+    for result in no_match_results:
+        print(result)
+        all_results.append(result)
+    
+    # Nowa funkcjonalność: wykrywanie nadmiarowych adresów w konfiguracji PA, które nie pokrywają się z danymi wejściowymi
+    excess_addresses = find_excess_addresses(address_groups, address_objects, input_group_ips)
+    if excess_addresses:
+        print("\n--- Nadmiarowe adresy w konfiguracji PA ---")
+        for group, extras in excess_addresses.items():
+            print(f"W grupie '{group}':")
+            for extra in extras:
+                print(f"  - {extra}")
+    else:
+        print("\nBrak nadmiarowych adresów w konfiguracji PA.")
+    
+    output_filename = "wyniki_weryfikacji.txt"
+    try:
+        print(f"\nZapisuję wyniki do pliku {output_filename}...")
+        with open(output_filename, 'w', encoding='utf-8') as f:
+            f.write("Wyniki weryfikacji hostów w Palo Alto Panorama\n")
+            f.write("===========================================\n\n")
+            
+            f.write("--- Hosty bezpośrednio w grupie ---\n")
+            for result in direct_match_results:
+                f.write(str(result) + "\n")
+            
+            f.write("\n--- Hosty w zakresie należącym do grupy ---\n")
+            for result in range_match_results:
+                f.write(str(result) + "\n")
+            
+            f.write("\n--- Hosty bez dopasowania do grupy ---\n")
+            for result in no_match_results:
+                f.write(str(result) + "\n")
+            
+            f.write("\n--- Nadmiarowe adresy w konfiguracji PA ---\n")
+            if excess_addresses:
+                for group, extras in excess_addresses.items():
+                    f.write(f"W grupie '{group}':\n")
+                    for extra in extras:
+                        f.write(f"  - {extra}\n")
+            else:
+                f.write("Brak nadmiarowych adresów w konfiguracji PA.\n")
+            
+        print(f"Wyniki zostały zapisane do pliku: {output_filename}")
+    except Exception as e:
+        print(f"BŁĄD: Nie udało się zapisać wyników do pliku: {e}")
+        print("Wyświetlam wszystkie wyniki na ekranie jeszcze raz do ręcznego skopiowania:")
+        for i, result in enumerate(all_results, 1):
+            print(f"{i}. {result}")
+
+if __name__ == "__main__":
+    main()
