@@ -438,7 +438,8 @@ def process_host_entry(entry, address_objects, address_groups, group_mapping=Non
 # NOWA FUNKCJA: Znajdź nadmiarowe adresy w konfiguracji PA, które nie zostały uwzględnione w inputach
 def find_excess_addresses(address_groups, address_objects, input_group_ips):
     """
-    Dla każdej grupy z PA sprawdza, które obiekty (host lub range) mają adresy nieobecne w danych wejściowych.
+    Dla każdej grupy (tylko tych wybranych przez użytkownika) sprawdza, które obiekty 
+    (host lub range) mają adresy nieobecne w danych wejściowych.
     Zwraca słownik w formacie:
       { 
          'grupa1': [opis_nadmiarowego_obiektu1, opis_nadmiarowego_obiektu2, ...],
@@ -446,29 +447,32 @@ def find_excess_addresses(address_groups, address_objects, input_group_ips):
       }
     """
     excess_info = {}
-    for group_name, group_info in address_groups.items():
+    # Iterujemy tylko przez grupy, które występują w input_group_ips (czyli te, gdzie działamy)
+    for group_name in input_group_ips:
+        if group_name not in address_groups:
+            continue  # pomijamy, jeśli taka grupa nie istnieje w PA
+        group_info = address_groups[group_name]
         group_excess = []
         for member in group_info['members']:
             if member in address_objects:
                 obj = address_objects[member]
                 if obj['type'] == 'ip-netmask':
-                    # Obiekt hosta, wartość np. "10.10.10.10/32"
+                    # Obiekt hosta: sprawdzamy czy adres nie występuje w danych wejściowych
                     host_ip = obj['value'].split('/')[0]
-                    if group_name not in input_group_ips or host_ip not in input_group_ips[group_name]:
+                    if host_ip not in input_group_ips[group_name]:
                         group_excess.append(f"{member} (host {host_ip})")
                 elif obj['type'] == 'ip-range':
+                    # Obiekt range: budujemy zbiór adresów z zakresu
                     range_value = obj['value']  # np. "10.10.10.30-10.10.10.50"
                     start_ip_str, end_ip_str = range_value.split('-')
                     start_ip = ipaddress.ip_address(start_ip_str.strip())
                     end_ip = ipaddress.ip_address(end_ip_str.strip())
-                    # Budujemy zbiór adresów z zakresu
                     ip_set = set()
                     current_ip = start_ip
                     while current_ip <= end_ip:
                         ip_set.add(str(current_ip))
                         current_ip += 1
-                    input_ips = input_group_ips.get(group_name, set())
-                    extra_ips = sorted(ip_set - input_ips, key=lambda ip: ipaddress.ip_address(ip))
+                    extra_ips = sorted(ip_set - input_group_ips[group_name], key=lambda ip: ipaddress.ip_address(ip))
                     if extra_ips:
                         group_excess.append(f"{member} (range {range_value}), nadmiarowe adresy: {', '.join(extra_ips)}")
             else:
