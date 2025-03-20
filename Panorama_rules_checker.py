@@ -161,11 +161,49 @@ class PanoramaAPI:
             response.raise_for_status()
             print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
             
+            # Zapisz odpowiedź do pliku dla debugowania
+            with open('debug_hit_count_response.xml', 'w') as f:
+                f.write(response.text)
+            print("DEBUG: Zapisano odpowiedź do pliku debug_hit_count_response.xml")
+            
             root = ET.fromstring(response.text)
-            hit_count = root.find('.//hit-count')
-            if hit_count is not None:
-                return int(hit_count.text)
-            return 0
+            
+            # Sprawdź status odpowiedzi
+            status = root.get('status')
+            print(f"DEBUG: Status odpowiedzi: {status}")
+            
+            if status == 'error':
+                error_msg = root.find('.//msg')
+                if error_msg is not None:
+                    print(f"BŁĄD: API zwróciło błąd: {error_msg.text}")
+                return None
+            
+            # Szukaj hit count w różnych możliwych lokalizacjach
+            hit_count = None
+            possible_paths = [
+                './/hit-count',
+                './/rule-hit-count/hit-count',
+                './/rule-hit-count/rule/entry/hit-count',
+                './/rule-hit-count/rule-list/entry/hit-count'
+            ]
+            
+            for path in possible_paths:
+                element = root.find(path)
+                if element is not None and element.text:
+                    try:
+                        hit_count = int(element.text)
+                        print(f"DEBUG: Znaleziono hit count {hit_count} w ścieżce {path}")
+                        break
+                    except ValueError:
+                        print(f"DEBUG: Nie udało się przekonwertować wartości {element.text} na liczbę")
+            
+            if hit_count is None:
+                print("DEBUG: Nie znaleziono hit count w odpowiedzi")
+                print("DEBUG: Pełna odpowiedź XML:")
+                print(response.text)
+                return 0
+            
+            return hit_count
         except Exception as e:
             print(f"BŁĄD: Podczas pobierania hit count dla reguły {rule_name}: {e}")
             print(f"DEBUG: Pełna treść błędu: {str(e)}")
