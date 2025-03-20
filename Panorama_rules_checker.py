@@ -115,30 +115,34 @@ class PanoramaAPI:
             print("Brak klucza API. Najpierw należy wywołać get_api_key().")
             return None
         
+        # Zwracamy tylko pre i post rulebase
+        return ['pre-rulebase', 'post-rulebase']
+
+    def check_rule_exists(self, device_group, rulebase, rule_name):
+        if not self.api_key:
+            print("Brak klucza API. Najpierw należy wywołać get_api_key().")
+            return False
+        
         params = {
             'type': 'config',
             'action': 'get',
-            'xpath': f"/config/devices/entry/device-group/entry[@name='{device_group}']/pre-rulebase/security/rules",
+            'xpath': f"/config/devices/entry/device-group/entry[@name='{device_group}']/{rulebase}/security/rules/entry[@name='{rule_name}']",
             'key': self.api_key
         }
         
         try:
-            print(f"DEBUG: Pobieranie rulebases dla device group {device_group}...")
+            print(f"DEBUG: Sprawdzanie czy reguła {rule_name} istnieje w {rulebase}...")
             response = requests.get(self.base_url, params=params, verify=False)
             response.raise_for_status()
             print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
             
             root = ET.fromstring(response.text)
-            rulebases = []
-            for entry in root.findall('.//entry'):
-                rulebases.append(entry.get('name'))
-            
-            print(f"DEBUG: Znaleziono {len(rulebases)} rulebases")
-            return rulebases
+            # Jeśli znajdziemy element entry z odpowiednią nazwą, reguła istnieje
+            return root.find('.//entry') is not None
         except Exception as e:
-            print(f"BŁĄD: Podczas pobierania rulebases: {e}")
+            print(f"BŁĄD: Podczas sprawdzania istnienia reguły {rule_name}: {e}")
             print(f"DEBUG: Pełna treść błędu: {str(e)}")
-            return None
+            return False
 
     def get_rule_hit_count(self, device_group, rulebase, rule_name):
         if not self.api_key:
@@ -248,19 +252,25 @@ def main():
     # Sprawdź hit count dla każdej reguły
     rules_0hit = []
     rules_hit = []
+    rules_not_found = []
     
     for rule in rules:
         print(f"\nSprawdzanie reguły: {rule}")
-        hit_count = panorama.get_rule_hit_count(selected_device_group, selected_rulebase, rule)
-        if hit_count is not None:
-            if hit_count == 0:
-                rules_0hit.append(rule)
-                print(f"Hit count = 0")
+        # Najpierw sprawdź czy reguła istnieje w wybranej rulebase
+        if panorama.check_rule_exists(selected_device_group, selected_rulebase, rule):
+            hit_count = panorama.get_rule_hit_count(selected_device_group, selected_rulebase, rule)
+            if hit_count is not None:
+                if hit_count == 0:
+                    rules_0hit.append(rule)
+                    print(f"Hit count = 0")
+                else:
+                    rules_hit.append(rule)
+                    print(f"Hit count = {hit_count}")
             else:
-                rules_hit.append(rule)
-                print(f"Hit count = {hit_count}")
+                print(f"Nie udało się pobrać hit count dla reguły {rule}")
         else:
-            print(f"Nie udało się pobrać hit count dla reguły {rule}")
+            rules_not_found.append(rule)
+            print(f"Reguła nie istnieje w wybranej rulebase")
     
     # Zapisz wyniki do plików
     try:
@@ -273,6 +283,12 @@ def main():
             for rule in rules_hit:
                 f.write(f"{rule}\n")
         print(f"Zapisano {len(rules_hit)} reguł z hit count > 0 do pliku rules_hit")
+        
+        if rules_not_found:
+            with open('rules_not_found', 'w') as f:
+                for rule in rules_not_found:
+                    f.write(f"{rule}\n")
+            print(f"Zapisano {len(rules_not_found)} reguł, których nie znaleziono w rulebase do pliku rules_not_found")
     except Exception as e:
         print(f"BŁĄD podczas zapisywania wyników: {e}")
         print("\nWyniki do ręcznego skopiowania:")
@@ -282,6 +298,10 @@ def main():
         print("\nReguły z hit count > 0:")
         for rule in rules_hit:
             print(rule)
+        if rules_not_found:
+            print("\nReguły, których nie znaleziono w rulebase:")
+            for rule in rules_not_found:
+                print(rule)
 
 if __name__ == "__main__":
     main() 
