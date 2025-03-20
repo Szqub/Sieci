@@ -117,17 +117,14 @@ class PanoramaSSH:
             # Szukaj hit count dla każdego urządzenia
             total_hit_count = 0
             for line in output.splitlines():
-                if 'vsys' in line.lower():  # Pomijamy nagłówek
-                    continue
                 if line.strip() and not line.startswith('---'):  # Pomijamy puste linie i separatory
-                    # Szukamy wszystkich wystąpień liczby między vsys a -
-                    hit_count_matches = re.finditer(r'vsys\d+\s+(\d+)\s+-', line)
-                    line_hit_count = 0
-                    for match in hit_count_matches:
-                        device_hit_count = int(match.group(1))
-                        line_hit_count += device_hit_count
-                        print(f"DEBUG: Znaleziono hit count {device_hit_count} dla urządzenia w linii: {line}")
-                    total_hit_count += line_hit_count
+                    # Szukamy hit countu używając nowego wyrażenia regularnego
+                    hit_count_match = re.search(r'^\s*([\w-]+)\s+\w+\s+(\d+)', line)
+                    if hit_count_match:
+                        device_name = hit_count_match.group(1)
+                        device_hit_count = int(hit_count_match.group(2))
+                        total_hit_count += device_hit_count
+                        print(f"DEBUG: Znaleziono hit count {device_hit_count} dla urządzenia {device_name} w linii: {line}")
             
             print(f"DEBUG: Sumaryczny hit count dla wszystkich urządzeń: {total_hit_count}")
             return total_hit_count
