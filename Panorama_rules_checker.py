@@ -151,7 +151,7 @@ class PanoramaAPI:
         
         params = {
             'type': 'op',
-            'cmd': f'<show><rule-hit-count><vsys><vsys-name><entry name="vsys1"><rule-base><entry name="{rulebase}"><rules><list><member>{rule_name}</member></list></rules></entry></rule-base></entry></vsys-name></vsys></rule-hit-count></show>',
+            'cmd': f'<show><rule-hit-count><device-group><entry name="{device_group}"/></device-group><rulebase><entry name="{rulebase}"/></rulebase><security><rules><rule-name>{rule_name}</rule-name></rules></security></rule-hit-count></show>',
             'key': self.api_key
         }
         
