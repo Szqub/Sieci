@@ -98,6 +98,11 @@ class PanoramaAPI:
             response.raise_for_status()
             print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
             
+            # Zapisz odpowiedź do pliku dla debugowania
+            with open('debug_device_groups.xml', 'w') as f:
+                f.write(response.text)
+            print("DEBUG: Zapisano odpowiedź do pliku debug_device_groups.xml")
+            
             root = ET.fromstring(response.text)
             device_groups = []
             for entry in root.findall('.//device-group/entry'):
