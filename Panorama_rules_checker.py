@@ -83,11 +83,13 @@ class PanoramaSSH:
                 f.write(output)
             print("DEBUG: Zapisano odpowiedź do pliku debug_device_groups.txt")
             
-            # Parsowanie outputu CLI
+            # Parsowanie outputu CLI - szukamy tylko linii z "Group:"
             device_groups = []
             for line in output.splitlines():
-                if line.strip() and not line.startswith('---'):
-                    device_groups.append(line.strip())
+                if 'Group:' in line:
+                    # Wyciągamy nazwę grupy po "Group:"
+                    group_name = line.split('Group:')[1].strip()
+                    device_groups.append(group_name)
             
             print(f"DEBUG: Znaleziono {len(device_groups)} device groups")
             return device_groups
