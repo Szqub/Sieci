@@ -21,197 +21,99 @@ rules_0hit - zawiera reguły z hit count = 0
 rules_hit - zawiera reguły z hit count > 0
 """
 
-import requests
 import getpass
-import xml.etree.ElementTree as ET
 import sys
-from urllib3.exceptions import InsecureRequestWarning
+from netmiko import ConnectHandler
+import re
 
-# Wyłączenie ostrzeżeń o niezweryfikowanym certyfikacie SSL
-requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
-
-class PanoramaAPI:
+class PanoramaSSH:
     """
-    Klasa do obsługi API Palo Alto Networks Panorama.
-    Udostępnia metody do uwierzytelniania oraz pobierania danych o regułach.
+    Klasa do obsługi połączenia SSH z Palo Alto Networks Panorama.
+    Udostępnia metody do pobierania danych o regułach.
     """
     def __init__(self, panorama_ip, username, password):
         self.panorama_ip = panorama_ip
         self.username = username
         self.password = password
-        self.api_key = None
-        self.base_url = f"https://{self.panorama_ip}/api/"
-
-    def get_api_key(self):
-        params = {
-            'type': 'keygen',
-            'user': self.username,
-            'password': self.password
+        self.device = {
+            'device_type': 'paloalto_panos',
+            'ip': panorama_ip,
+            'username': username,
+            'password': password,
+            'port': 22,
+            'verbose': True,
+            'global_delay_factor': 2
         }
-        
+        self.connection = None
+
+    def connect(self):
         try:
-            print(f"DEBUG: Próba uwierzytelnienia użytkownika {self.username} na {self.panorama_ip}")
-            response = requests.get(self.base_url, params=params, verify=False)
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
-            response.raise_for_status()
-            
-            root = ET.fromstring(response.text)
-            status = root.get('status')
-            print(f"DEBUG: Status uwierzytelniania: {status}")
-            
-            if status == 'success':
-                key_element = root.find('.//key')
-                if key_element is not None:
-                    self.api_key = key_element.text
-                    print("DEBUG: Pomyślnie pobrano klucz API")
-                    return True
-                else:
-                    print("BŁĄD: Brak elementu <key> w odpowiedzi")
-                    return False
-            else:
-                error_msg = root.find('.//msg')
-                if error_msg is not None:
-                    print(f"BŁĄD: Uwierzytelnianie nie powiodło się: {error_msg.text}")
-                else:
-                    print("BŁĄD: Uwierzytelnianie nie powiodło się bez szczegółowej wiadomości")
-                return False
+            print(f"DEBUG: Próba połączenia SSH z {self.panorama_ip}")
+            self.connection = ConnectHandler(**self.device)
+            print("DEBUG: Pomyślnie nawiązano połączenie SSH")
+            return True
         except Exception as e:
-            print(f"BŁĄD: Podczas uzyskiwania klucza API: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            print(f"BŁĄD: Podczas łączenia z Panoramą: {e}")
             return False
 
+    def disconnect(self):
+        if self.connection:
+            try:
+                self.connection.disconnect()
+                print("DEBUG: Pomyślnie zamknięto połączenie SSH")
+            except Exception as e:
+                print(f"BŁĄD: Podczas zamykania połączenia: {e}")
+
     def get_device_groups(self):
-        if not self.api_key:
-            print("Brak klucza API. Najpierw należy wywołać get_api_key().")
-            return None
-        
-        params = {
-            'type': 'config',
-            'action': 'get',
-            'xpath': "/config/devices/entry/device-group",
-            'key': self.api_key
-        }
-        
         try:
             print("DEBUG: Pobieranie listy device groups...")
-            response = requests.get(self.base_url, params=params, verify=False)
-            response.raise_for_status()
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
+            output = self.connection.send_command('show devicegroups')
             
             # Zapisz odpowiedź do pliku dla debugowania
-            with open('debug_device_groups.xml', 'w') as f:
-                f.write(response.text)
-            print("DEBUG: Zapisano odpowiedź do pliku debug_device_groups.xml")
+            with open('debug_device_groups.txt', 'w') as f:
+                f.write(output)
+            print("DEBUG: Zapisano odpowiedź do pliku debug_device_groups.txt")
             
-            root = ET.fromstring(response.text)
+            # Parsowanie outputu CLI
             device_groups = []
-            for entry in root.findall('.//device-group/entry'):
-                device_groups.append(entry.get('name'))
+            for line in output.splitlines():
+                if line.strip() and not line.startswith('---'):
+                    device_groups.append(line.strip())
             
             print(f"DEBUG: Znaleziono {len(device_groups)} device groups")
             return device_groups
         except Exception as e:
             print(f"BŁĄD: Podczas pobierania device groups: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
             return None
 
     def get_rulebases(self, device_group):
-        if not self.api_key:
-            print("Brak klucza API. Najpierw należy wywołać get_api_key().")
-            return None
-        
         # Zwracamy tylko pre i post rulebase
         return ['pre-rulebase', 'post-rulebase']
 
-    def check_rule_exists(self, device_group, rulebase, rule_name):
-        if not self.api_key:
-            print("Brak klucza API. Najpierw należy wywołać get_api_key().")
-            return False
-        
-        params = {
-            'type': 'config',
-            'action': 'get',
-            'xpath': f"/config/devices/entry/device-group/entry[@name='{device_group}']/{rulebase}/security/rules/entry[@name='{rule_name}']",
-            'key': self.api_key
-        }
-        
-        try:
-            print(f"DEBUG: Sprawdzanie czy reguła {rule_name} istnieje w {rulebase}...")
-            response = requests.get(self.base_url, params=params, verify=False)
-            response.raise_for_status()
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
-            
-            root = ET.fromstring(response.text)
-            # Jeśli znajdziemy element entry z odpowiednią nazwą, reguła istnieje
-            return root.find('.//entry') is not None
-        except Exception as e:
-            print(f"BŁĄD: Podczas sprawdzania istnienia reguły {rule_name}: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
-            return False
-
     def get_rule_hit_count(self, device_group, rulebase, rule_name):
-        if not self.api_key:
-            print("Brak klucza API. Najpierw należy wywołać get_api_key().")
-            return None
-        
-        params = {
-            'type': 'op',
-            'cmd': f'<show><rule-hit-count><device-group><entry name="{device_group}"/></device-group><rulebase><entry name="{rulebase}"/></rulebase><security><rules><rule-name>{rule_name}</rule-name></rules></security></rule-hit-count></show>',
-            'key': self.api_key
-        }
-        
         try:
             print(f"DEBUG: Pobieranie hit count dla reguły {rule_name}...")
-            response = requests.get(self.base_url, params=params, verify=False)
-            response.raise_for_status()
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
+            command = f'show rule-hit-count device-group {device_group} {rulebase} security rules rule-name {rule_name}'
+            output = self.connection.send_command(command)
             
             # Zapisz odpowiedź do pliku dla debugowania
-            with open('debug_hit_count_response.xml', 'w') as f:
-                f.write(response.text)
-            print("DEBUG: Zapisano odpowiedź do pliku debug_hit_count_response.xml")
+            with open('debug_hit_count_response.txt', 'w') as f:
+                f.write(output)
+            print("DEBUG: Zapisano odpowiedź do pliku debug_hit_count_response.txt")
             
-            root = ET.fromstring(response.text)
-            
-            # Sprawdź status odpowiedzi
-            status = root.get('status')
-            print(f"DEBUG: Status odpowiedzi: {status}")
-            
-            if status == 'error':
-                error_msg = root.find('.//msg')
-                if error_msg is not None:
-                    print(f"BŁĄD: API zwróciło błąd: {error_msg.text}")
-                return None
-            
-            # Szukaj hit count w różnych możliwych lokalizacjach
-            hit_count = None
-            possible_paths = [
-                './/hit-count',
-                './/rule-hit-count/hit-count',
-                './/rule-hit-count/rule/entry/hit-count',
-                './/rule-hit-count/rule-list/entry/hit-count'
-            ]
-            
-            for path in possible_paths:
-                element = root.find(path)
-                if element is not None and element.text:
-                    try:
-                        hit_count = int(element.text)
-                        print(f"DEBUG: Znaleziono hit count {hit_count} w ścieżce {path}")
-                        break
-                    except ValueError:
-                        print(f"DEBUG: Nie udało się przekonwertować wartości {element.text} na liczbę")
-            
-            if hit_count is None:
+            # Szukaj hit count w outputcie
+            hit_count_match = re.search(r'hit-count:\s*(\d+)', output)
+            if hit_count_match:
+                hit_count = int(hit_count_match.group(1))
+                print(f"DEBUG: Znaleziono hit count {hit_count}")
+                return hit_count
+            else:
                 print("DEBUG: Nie znaleziono hit count w odpowiedzi")
-                print("DEBUG: Pełna odpowiedź XML:")
-                print(response.text)
+                print("DEBUG: Pełna odpowiedź:")
+                print(output)
                 return 0
-            
-            return hit_count
         except Exception as e:
             print(f"BŁĄD: Podczas pobierania hit count dla reguły {rule_name}: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
             return None
 
 def main():
@@ -223,84 +125,83 @@ def main():
     username = input("Podaj nazwę użytkownika: ")
     password = getpass.getpass("Podaj hasło: ")
     
-    # Inicjalizacja API
-    panorama = PanoramaAPI(panorama_ip, username, password)
+    # Inicjalizacja połączenia SSH
+    panorama = PanoramaSSH(panorama_ip, username, password)
     
     print("\nŁączenie z Panoramą...")
-    if not panorama.get_api_key():
-        print("Nie udało się uzyskać klucza API. Sprawdź dane logowania.")
+    if not panorama.connect():
+        print("Nie udało się połączyć z Panoramą. Sprawdź dane logowania.")
         sys.exit(1)
     
-    # Pobierz listę device groups
-    print("\nPobieranie listy device groups...")
-    device_groups = panorama.get_device_groups()
-    if not device_groups:
-        print("Nie udało się pobrać listy device groups.")
-        sys.exit(1)
-    
-    print("\nDostępne device groups:")
-    for i, group in enumerate(device_groups, 1):
-        print(f"{i}. {group}")
-    
-    # Wybór device group
-    while True:
-        try:
-            choice = int(input("\nWybierz numer device group: "))
-            if 1 <= choice <= len(device_groups):
-                selected_device_group = device_groups[choice-1]
-                break
-            else:
-                print(f"Błędny numer. Podaj wartość od 1 do {len(device_groups)}.")
-        except ValueError:
-            print("Podaj poprawny numer.")
-    
-    # Pobierz listę rulebases
-    print(f"\nPobieranie listy rulebases dla device group {selected_device_group}...")
-    rulebases = panorama.get_rulebases(selected_device_group)
-    if not rulebases:
-        print("Nie udało się pobrać listy rulebases.")
-        sys.exit(1)
-    
-    print("\nDostępne rulebases:")
-    for i, rulebase in enumerate(rulebases, 1):
-        print(f"{i}. {rulebase}")
-    
-    # Wybór rulebase
-    while True:
-        try:
-            choice = int(input("\nWybierz numer rulebase: "))
-            if 1 <= choice <= len(rulebases):
-                selected_rulebase = rulebases[choice-1]
-                break
-            else:
-                print(f"Błędny numer. Podaj wartość od 1 do {len(rulebases)}.")
-        except ValueError:
-            print("Podaj poprawny numer.")
-    
-    # Wczytaj nazwy reguł z pliku
-    input_file = input("\nPodaj ścieżkę do pliku z nazwami reguł: ")
     try:
-        with open(input_file, 'r') as file:
-            rules = [line.strip() for line in file if line.strip()]
-    except Exception as e:
-        print(f"Błąd podczas wczytywania pliku: {e}")
-        sys.exit(1)
-    
-    if not rules:
-        print("Plik jest pusty lub nie zawiera reguł.")
-        sys.exit(1)
-    
-    print(f"\nZnaleziono {len(rules)} reguł do sprawdzenia.")
-    
-    # Sprawdź hit count dla każdej reguły
-    rules_0hit = []
-    rules_hit = []
-    rules_not_found = []
-    
-    for rule in rules:
-        print(f"\nSprawdzanie reguły: {rule}")
-        # Najpierw sprawdź czy reguła istnieje w wybranej rulebase
-        if panorama.check_rule_exists(selected_device_group, selected_rulebase, rule):
+        # Pobierz listę device groups
+        print("\nPobieranie listy device groups...")
+        device_groups = panorama.get_device_groups()
+        if not device_groups:
+            print("Nie udało się pobrać listy device groups.")
+            sys.exit(1)
+        
+        print("\nDostępne device groups:")
+        for i, group in enumerate(device_groups, 1):
+            print(f"{i}. {group}")
+        
+        # Wybór device group
+        while True:
+            try:
+                choice = int(input("\nWybierz numer device group: "))
+                if 1 <= choice <= len(device_groups):
+                    selected_device_group = device_groups[choice-1]
+                    break
+                else:
+                    print(f"Błędny numer. Podaj wartość od 1 do {len(device_groups)}.")
+            except ValueError:
+                print("Podaj poprawny numer.")
+        
+        # Pobierz listę rulebases
+        print(f"\nPobieranie listy rulebases dla device group {selected_device_group}...")
+        rulebases = panorama.get_rulebases(selected_device_group)
+        if not rulebases:
+            print("Nie udało się pobrać listy rulebases.")
+            sys.exit(1)
+        
+        print("\nDostępne rulebases:")
+        for i, rulebase in enumerate(rulebases, 1):
+            print(f"{i}. {rulebase}")
+        
+        # Wybór rulebase
+        while True:
+            try:
+                choice = int(input("\nWybierz numer rulebase: "))
+                if 1 <= choice <= len(rulebases):
+                    selected_rulebase = rulebases[choice-1]
+                    break
+                else:
+                    print(f"Błędny numer. Podaj wartość od 1 do {len(rulebases)}.")
+            except ValueError:
+                print("Podaj poprawny numer.")
+        
+        # Wczytaj nazwy reguł z pliku
+        input_file = input("\nPodaj ścieżkę do pliku z nazwami reguł: ")
+        try:
+            with open(input_file, 'r') as file:
+                rules = [line.strip() for line in file if line.strip()]
+        except Exception as e:
+            print(f"Błąd podczas wczytywania pliku: {e}")
+            sys.exit(1)
+        
+        if not rules:
+            print("Plik jest pusty lub nie zawiera reguł.")
+            sys.exit(1)
+        
+        print(f"\nZnaleziono {len(rules)} reguł do sprawdzenia.")
+        
+        # Sprawdź hit count dla każdej reguły
+        rules_0hit = []
+        rules_hit = []
+        rules_not_found = []
+        
+        for rule in rules:
+            print(f"\nSprawdzanie reguły: {rule}")
             hit_count = panorama.get_rule_hit_count(selected_device_group, selected_rulebase, rule)
             if hit_count is not None:
                 if hit_count == 0:
@@ -310,41 +211,42 @@ def main():
                     rules_hit.append(rule)
                     print(f"Hit count = {hit_count}")
             else:
+                rules_not_found.append(rule)
                 print(f"Nie udało się pobrać hit count dla reguły {rule}")
-        else:
-            rules_not_found.append(rule)
-            print(f"Reguła nie istnieje w wybranej rulebase")
-    
-    # Zapisz wyniki do plików
-    try:
-        with open('rules_0hit', 'w') as f:
-            for rule in rules_0hit:
-                f.write(f"{rule}\n")
-        print(f"\nZapisano {len(rules_0hit)} reguł z hit count = 0 do pliku rules_0hit")
         
-        with open('rules_hit', 'w') as f:
-            for rule in rules_hit:
-                f.write(f"{rule}\n")
-        print(f"Zapisano {len(rules_hit)} reguł z hit count > 0 do pliku rules_hit")
-        
-        if rules_not_found:
-            with open('rules_not_found', 'w') as f:
-                for rule in rules_not_found:
+        # Zapisz wyniki do plików
+        try:
+            with open('rules_0hit', 'w') as f:
+                for rule in rules_0hit:
                     f.write(f"{rule}\n")
-            print(f"Zapisano {len(rules_not_found)} reguł, których nie znaleziono w rulebase do pliku rules_not_found")
-    except Exception as e:
-        print(f"BŁĄD podczas zapisywania wyników: {e}")
-        print("\nWyniki do ręcznego skopiowania:")
-        print("\nReguły z hit count = 0:")
-        for rule in rules_0hit:
-            print(rule)
-        print("\nReguły z hit count > 0:")
-        for rule in rules_hit:
-            print(rule)
-        if rules_not_found:
-            print("\nReguły, których nie znaleziono w rulebase:")
-            for rule in rules_not_found:
+            print(f"\nZapisano {len(rules_0hit)} reguł z hit count = 0 do pliku rules_0hit")
+            
+            with open('rules_hit', 'w') as f:
+                for rule in rules_hit:
+                    f.write(f"{rule}\n")
+            print(f"Zapisano {len(rules_hit)} reguł z hit count > 0 do pliku rules_hit")
+            
+            if rules_not_found:
+                with open('rules_not_found', 'w') as f:
+                    for rule in rules_not_found:
+                        f.write(f"{rule}\n")
+                print(f"Zapisano {len(rules_not_found)} reguł, których nie znaleziono w rulebase do pliku rules_not_found")
+        except Exception as e:
+            print(f"BŁĄD podczas zapisywania wyników: {e}")
+            print("\nWyniki do ręcznego skopiowania:")
+            print("\nReguły z hit count = 0:")
+            for rule in rules_0hit:
                 print(rule)
+            print("\nReguły z hit count > 0:")
+            for rule in rules_hit:
+                print(rule)
+            if rules_not_found:
+                print("\nReguły, których nie znaleziono w rulebase:")
+                for rule in rules_not_found:
+                    print(rule)
+    finally:
+        # Zawsze zamykamy połączenie
+        panorama.disconnect()
 
 if __name__ == "__main__":
     main() 
