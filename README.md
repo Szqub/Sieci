@@ -1,10 +1,6 @@
-# Panorama Rules Checker
+# Skrypty do zarządzania Palo Alto Networks Panorama
 
-Skrypt do sprawdzania hit count dla reguł w Palo Alto Networks Panorama.
-
-## Opis
-
-Skrypt służy do weryfikacji hit count dla reguł zdefiniowanych w pliku wejściowym w systemie Palo Alto Networks Panorama. Dla każdej reguły sprawdzany jest hit count i w zależności od wyniku, reguła jest zapisywana do odpowiedniego pliku wyjściowego.
+Kolekcja skryptów do zarządzania i weryfikacji konfiguracji w systemie Palo Alto Networks Panorama.
 
 ## Wymagania
 
@@ -13,13 +9,14 @@ Skrypt służy do weryfikacji hit count dla reguł zdefiniowanych w pliku wejśc
   - requests
   - xml.etree.ElementTree
   - getpass
+  - ipaddress
 
 ## Instalacja
 
 1. Sklonuj repozytorium:
 ```bash
-git clone https://github.com/twoj-username/panorama-rules-checker.git
-cd panorama-rules-checker
+git clone https://github.com/twoj-username/panorama-scripts.git
+cd panorama-scripts
 ```
 
 2. Zainstaluj wymagane moduły:
@@ -27,8 +24,15 @@ cd panorama-rules-checker
 pip install -r requirements.txt
 ```
 
-## Użycie
+## Dostępne skrypty
 
+### 1. Panorama Rules Checker
+Skrypt do sprawdzania hit count dla reguł w Palo Alto Networks Panorama.
+
+#### Opis
+Skrypt służy do weryfikacji hit count dla reguł zdefiniowanych w pliku wejściowym w systemie Palo Alto Networks Panorama. Dla każdej reguły sprawdzany jest hit count i w zależności od wyniku, reguła jest zapisywana do odpowiedniego pliku wyjściowego.
+
+#### Użycie
 1. Zmień wartość `panorama_ip` w skrypcie na właściwy adres IP Panoramy
 2. Przygotuj plik wejściowy z nazwami reguł (jedna nazwa na linię)
 3. Uruchom skrypt:
@@ -41,19 +45,58 @@ python Panorama_rules_checker.py
    - Wybierz rulebase
    - Podaj ścieżkę do pliku z nazwami reguł
 
-## Format danych
+#### Format danych
+- **Wejściowy**: plik tekstowy z nazwami reguł (jedna na linię)
+- **Wyjściowy**: dwa pliki:
+  - `rules_0hit` - reguły z zerowym hit count
+  - `rules_hit` - reguły z hit count > 0
 
-### Wejściowy
+### 2. Panorama Group Checker
+Skrypt do weryfikacji konfiguracji hostów w grupach adresowych.
+
+#### Opis
+Skrypt służy do weryfikacji, czy hosty zdefiniowane w pliku wejściowym są poprawnie skonfigurowane w systemie Palo Alto Networks Panorama. Dla każdego hosta weryfikowane są:
+1. Czy istnieje odpowiedni obiekt adresowy typu H-IP-32 w Panoramie
+2. Jeśli nie, czy adres IP znajduje się w zakresie jakiegoś obiektu typu R-IP-range
+3. Czy obiekt adresowy jest przypisany do odpowiedniej grupy adresowej
+
+#### Użycie
+1. Zmień wartość `panorama_ip` w skrypcie na właściwy adres IP Panoramy
+2. Przygotuj plik wejściowy w formacie:
 ```
-nazwa_reguly
+nazwahosta-grX 10.10.10.10
 ```
 gdzie:
-- nazwa_reguly - pełna nazwa reguły w Panoramie
+- nazwahosta - nazwa hosta
+- grX - nazwa grupy, do której powinien być przypisany host (np. gr1, gr2)
+- 10.10.10.10 - adres IP hosta
+3. Uruchom skrypt:
+```bash
+python Panorama_group_checker_v2
+```
 
-### Wyjściowy
-Skrypt tworzy dwa pliki:
-- `rules_0hit` - zawierający reguły z zerowym hit count
-- `rules_hit` - zawierający reguły z hit count większym od zera
+#### Format danych wyjściowych
+```
+nazwahosta-grX 10.10.10.10 to obiekt H-10.10.10.10-32 na PA i znajduje się w grupie grX
+```
+lub
+```
+nazwahosta-grX 10.10.10.40 to obiekt R-10.10.10.30-50 na PA i znajduje się w grupie grX
+```
+
+### 3. Panorama Rule Finder
+Skrypt do wyszukiwania reguł w konfiguracji Panoramy.
+
+#### Opis
+Skrypt służy do wyszukiwania reguł w konfiguracji Palo Alto Networks Panorama na podstawie różnych kryteriów (nazwa, źródło, cel, aplikacja, itp.).
+
+#### Użycie
+1. Zmień wartość `panorama_ip` w skrypcie na właściwy adres IP Panoramy
+2. Uruchom skrypt:
+```bash
+python Panorama_Rule_Finder
+```
+3. Postępuj zgodnie z instrukcjami na ekranie, wprowadzając kryteria wyszukiwania
 
 ## Autor
 
