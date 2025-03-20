@@ -120,8 +120,8 @@ class PanoramaSSH:
                 if 'vsys' in line.lower():  # Pomijamy nagłówek
                     continue
                 if line.strip() and not line.startswith('---'):  # Pomijamy puste linie i separatory
-                    # Szukamy liczby po nazwie vsys
-                    hit_count_match = re.search(r'vsys\d+\s+(\d+)', line)
+                    # Szukamy liczby między vsys7 a pierwszym "-"
+                    hit_count_match = re.search(r'vsys\d+\s+(\d+)\s+-', line)
                     if hit_count_match:
                         device_hit_count = int(hit_count_match.group(1))
                         total_hit_count += device_hit_count
