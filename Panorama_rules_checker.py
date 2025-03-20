@@ -112,17 +112,22 @@ class PanoramaSSH:
                 f.write(output)
             print("DEBUG: Zapisano odpowiedź do pliku debug_hit_count_response.txt")
             
-            # Szukaj hit count w outputcie
-            hit_count_match = re.search(r'hit-count:\s*(\d+)', output)
-            if hit_count_match:
-                hit_count = int(hit_count_match.group(1))
-                print(f"DEBUG: Znaleziono hit count {hit_count}")
-                return hit_count
-            else:
-                print("DEBUG: Nie znaleziono hit count w odpowiedzi")
-                print("DEBUG: Pełna odpowiedź:")
-                print(output)
-                return 0
+            # Szukaj hit count dla każdego urządzenia
+            total_hit_count = 0
+            for line in output.splitlines():
+                if 'vsys' in line.lower():  # Pomijamy nagłówek
+                    continue
+                if line.strip() and not line.startswith('---'):  # Pomijamy puste linie i separatory
+                    # Szukamy hit count w linii
+                    hit_count_match = re.search(r'\s+(\d+)\s+', line)
+                    if hit_count_match:
+                        device_hit_count = int(hit_count_match.group(1))
+                        total_hit_count += device_hit_count
+                        print(f"DEBUG: Znaleziono hit count {device_hit_count} dla urządzenia w linii: {line}")
+            
+            print(f"DEBUG: Sumaryczny hit count dla wszystkich urządzeń: {total_hit_count}")
+            return total_hit_count
+            
         except Exception as e:
             print(f"BŁĄD: Podczas pobierania hit count dla reguły {rule_name}: {e}")
             return None
