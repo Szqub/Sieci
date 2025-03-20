@@ -1,0 +1,1 @@
+curl -k -X GET "https://<PANORAMA-IP>/api/?type=op&cmd=<show><rule-hit-count><device-group>DG-LAN</device-group><post-rulebase><security><rules><rule-name>MY-RULE</rule-name></rules></security></post-rulebase></rule-hit-count></show>&key=<API_KEY>"
