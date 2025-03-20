@@ -100,7 +100,7 @@ class PanoramaAPI:
             
             root = ET.fromstring(response.text)
             device_groups = []
-            for entry in root.findall('.//entry'):
+            for entry in root.findall('.//device-group/entry'):
                 device_groups.append(entry.get('name'))
             
             print(f"DEBUG: Znaleziono {len(device_groups)} device groups")
