@@ -51,6 +51,15 @@ class PanoramaSSH:
             print(f"DEBUG: Próba połączenia SSH z {self.panorama_ip}")
             self.connection = ConnectHandler(**self.device)
             print("DEBUG: Pomyślnie nawiązano połączenie SSH")
+            
+            # Wyłącz pager
+            print("DEBUG: Wyłączanie pagera...")
+            self.connection.send_command('set cli pager off')
+            
+            # Poczekaj na znak zachęty
+            print("DEBUG: Oczekiwanie na znak zachęty...")
+            self.connection.send_command('', expect_string='>')
+            
             return True
         except Exception as e:
             print(f"BŁĄD: Podczas łączenia z Panoramą: {e}")
