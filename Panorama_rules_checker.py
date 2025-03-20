@@ -111,6 +111,8 @@ class PanoramaSSH:
             with open('debug_hit_count_response.txt', 'w') as f:
                 f.write(output)
             print("DEBUG: Zapisano odpowiedź do pliku debug_hit_count_response.txt")
+            print("DEBUG: Pełna odpowiedź:")
+            print(output)
             
             # Szukaj hit count dla każdego urządzenia
             total_hit_count = 0
@@ -118,8 +120,8 @@ class PanoramaSSH:
                 if 'vsys' in line.lower():  # Pomijamy nagłówek
                     continue
                 if line.strip() and not line.startswith('---'):  # Pomijamy puste linie i separatory
-                    # Szukamy hit count w linii
-                    hit_count_match = re.search(r'\s+(\d+)\s+', line)
+                    # Szukamy hit count w linii - szukamy liczby po "Hit Count"
+                    hit_count_match = re.search(r'Hit Count\s+(\d+)', line)
                     if hit_count_match:
                         device_hit_count = int(hit_count_match.group(1))
                         total_hit_count += device_hit_count
