@@ -87,8 +87,8 @@ class PanoramaSSH:
             device_groups = []
             for line in output.splitlines():
                 if 'Group:' in line:
-                    # Wyciągamy nazwę grupy po "Group:"
-                    group_name = line.split('Group:')[1].strip()
+                    # Wyciągamy nazwę grupy po "Group:" i przed "Shared"
+                    group_name = line.split('Group:')[1].split('Shared')[0].strip()
                     device_groups.append(group_name)
             
             print(f"DEBUG: Znaleziono {len(device_groups)} device groups")
