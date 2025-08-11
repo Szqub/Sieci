@@ -1,0 +1,114 @@
+# === UTWÓRZ PLIK ===
+cat <<'EOF' > illumio_probe.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ====== KONFIG ======
+BASE="https://illumio-tst:8443"
+ORG="1"
+
+# Uzupełnij przed uruchomieniem:
+: "${KEY:=}"    # API Key ID
+: "${TOKEN:=}"  # API Key Secret
+
+# Alternatywnie możesz użyć Bearer:
+# export AUTH_HEADER="Bearer XXXXXX"
+
+# ====== WYMAGANIA ======
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Brak jq. Zainstaluj: apt install jq / yum install jq / brew install jq" >&2
+  exit 2
+fi
+
+# ====== AUTH/CURL ======
+declare -a AUTH_CURL
+if [[ -n "${AUTH_HEADER:-}" ]]; then
+  AUTH_CURL=(-H "Authorization: ${AUTH_HEADER}")
+else
+  if [[ -z "$KEY" || -z "$TOKEN" ]]; then
+    echo "Ustaw KEY i TOKEN (eksportuj zmienne) albo AUTH_HEADER (Bearer)." >&2
+    exit 3
+  fi
+  AUTH_CURL=(-u "$KEY:$TOKEN")
+fi
+
+CURL=(curl -k -sS "${AUTH_CURL[@]}" -H "Accept: application/json")
+
+get() { "${CURL[@]}" "$BASE$1"; }
+
+println() { printf "%b\n" "$*"; }
+
+hr() { printf "%*s\n" 80 | tr ' ' '-'; }
+
+# ====== START ======
+hr
+println "Illumio quick probe → $BASE (org=$ORG)"
+hr
+
+# 0) Liveness / wersja
+ver="$(get "/api/v2/product_version" | jq -r 'try .product_version.long_display catch empty')"
+if [[ -z "$ver" ]]; then
+  ver="$(get "/api/v2/noop" | jq -r 'try .status catch empty')"
+fi
+println "PCE alive: ${ver:-unknown}"
+hr
+
+# 1) LABELS
+labels_json="$(get "/api/v2/orgs/$ORG/labels?max_results=5000")"
+labels_count="$(jq 'if type=="array" then length else 0 end' <<<"$labels_json")"
+println "Labels total: $labels_count"
+if (( labels_count > 0 )); then
+  println "Sample (max 10):"
+  jq -r '.[0:10] | .[] | "\(.key)=\(.value) (href:\(.href))"' <<<"$labels_json" || true
+else
+  println "(brak labeli)"
+fi
+hr
+
+# 2) WORKLOADS
+workloads_json="$(get "/api/v2/orgs/$ORG/workloads?max_results=10000")"
+workloads_count="$(jq 'if type=="array" then length else 0 end' <<<"$workloads_json")"
+println "Workloads total: $workloads_count"
+if (( workloads_count > 0 )); then
+  println "Sample (max 5):"
+  jq -r '.[0:5] | .[] | "\(.hostname // .name) | managed=\(try .managed catch false) | mode=\(try .agent.config.mode catch "n/a") | state=\(try .state catch "n/a")"' \
+    <<<"$workloads_json" || true
+else
+  println "(brak workloads)"
+fi
+hr
+
+# 3) NAMESPACES
+# Najpierw przez container_clusters → container_workload_profiles
+clusters_json="$(get "/api/v2/orgs/$ORG/container_clusters")"
+clusters_count="$(jq 'if type=="array" then length else 0 end' <<<"$clusters_json")"
+total_ns=0
+
+if (( clusters_count > 0 )); then
+  println "Container clusters: $clusters_count"
+  # href + name (TSV)
+  while IFS=$'\t' read -r href name; do
+    cwp_json="$(get "/api/v2${href}/container_workload_profiles")"
+    n="$(jq 'if type=="array" then length else 0 end' <<<"$cwp_json")"
+    total_ns=$(( total_ns + n ))
+    println " - Cluster ${name:-$href}: namespaces=${n}"
+  done < <(jq -r '.[] | [.href, (.name // "")] | @tsv' <<<"$clusters_json")
+  println "Namespaces total (via container_workload_profiles): $total_ns"
+else
+  println "Brak container_clusters → sprawdzam kubernetes_workloads…"
+  kwork_json="$(get "/api/v2/orgs/$ORG/kubernetes_workloads?max_results=2000")" || kwork_json="[]"
+  ns_count="$(jq -r 'if type=="array" then ([.[].namespace] | unique | length) else 0 end' <<<"$kwork_json")"
+  println "Namespaces total (via kubernetes_workloads unique namespace): ${ns_count:-0}"
+fi
+hr
+
+println "Done."
+EOF
+
+chmod +x illumio_probe.sh
+
+# === URUCHOMIENIE ===
+# Podstaw swoje dane (API Key ID/Secret):
+# KEY="..." TOKEN="..." ./illumio_probe.sh
+echo 'Przykład uruchomienia:'
+echo 'KEY="API_KEY_ID" TOKEN="API_KEY_SECRET" ./illumio_probe.sh'
