@@ -1,22 +1,45 @@
-1) Wersja / heartbeat
+INIT (wpisz raz – ustawia TLS, cert bypass i nagłówek Basic)
 powershell
 Kopiuj
 Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$cred=New-Object pscredential($u,(ConvertTo-SecureString $s -AsPlainText -Force)); try{(irm 'https://illumio-tst:8443/api/v2/product_version' -Authentication Basic -Credential $cred -Headers @{Accept='application/json'}).product_version.long_display}catch{(irm 'https://illumio-tst:8443/api/v2/noop' -Headers @{Accept='application/json'}).status}
-2) Labels – liczba
-powershell
-Kopiuj
-Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$cred=New-Object pscredential($u,(ConvertTo-SecureString $s -AsPlainText -Force)); (irm 'https://illumio-tst:8443/api/v2/orgs/1/labels?max_results=5000' -Authentication Basic -Credential $cred -Headers @{Accept='application/json'}).Count
-3) Workloads – liczba
-powershell
-Kopiuj
-Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$cred=New-Object pscredential($u,(ConvertTo-SecureString $s -AsPlainText -Force)); (irm 'https://illumio-tst:8443/api/v2/orgs/1/workloads?max_results=10000' -Authentication Basic -Credential $cred -Headers @{Accept='application/json'}).Count
-4) Namespaces – liczba
-(sumuje container_workload_profiles we wszystkich klastrach; jak brak klastrów – liczy unikalne z kubernetes_workloads)
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; [Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $B='https://illumio-tst:8443'; $O=1; $U='api_USER'; $S='SECRET'; $enc=[Text.Encoding]::GetEncoding('ISO-8859-1'); $b64=[Convert]::ToBase64String($enc.GetBytes("$U`:$S")); $H=@{Accept='application/json'; Authorization=("Basic $b64")}
+Podmień api_USER i SECRET. Jak masz proxy w VDI, dorzuć jeszcze:
+[System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy
+
+Jednowierszowce (PS 5.1, bez -Authentication)
+Heartbeat / wersja
 
 powershell
 Kopiuj
 Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$
+try{ (irm "$B/api/v2/product_version" -Headers $H).product_version.long_display } catch { (irm "$B/api/v2/noop" -Headers $H).status }
+Labels – liczba
+
+powershell
+Kopiuj
+Edytuj
+(irm "$B/api/v2/orgs/$O/labels?max_results=5000" -Headers $H).Count
+Workloads – liczba
+
+powershell
+Kopiuj
+Edytuj
+(irm "$B/api/v2/orgs/$O/workloads?max_results=10000" -Headers $H).Count
+Namespaces – liczba (sumuje CWP; fallback na K8s)
+
+powershell
+Kopiuj
+Edytuj
+$c=irm "$B/api/v2/orgs/$O/container_clusters" -Headers $H; if($c){$t=0;$c|%{$t+=(irm ("$B/api/v2{0}/container_workload_profiles" -f $_.href) -Headers $H).Count};$t}else{$kw=irm "$B/api/v2/orgs/$O/kubernetes_workloads?max_results=2000" -Headers $H; if($kw){($kw|% namespace|sort -u).Count}else{0}}
+Alternatywa (skoro curl u Ciebie śmiga 200)
+Jeśli wolisz trzymać się curl.exe, te same zwroty jako „czyste liczby”:
+
+powershell
+Kopiuj
+Edytuj
+# labels
+(curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2/orgs/$O/labels?max_results=5000" | ConvertFrom-Json).Count
+# workloads
+(curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2/orgs/$O/workloads?max_results=10000" | ConvertFrom-Json).Count
+# namespaces
+$c = curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2/orgs/$O/container_cluster
