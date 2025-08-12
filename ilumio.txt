@@ -1,39 +1,22 @@
-1) Heartbeat / wersja PCE
+1) Wersja / heartbeat
 powershell
 Kopiuj
 Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $B='https://illumio-tst:8443'; $U='PASTE_AUTH_USERNAME_HERE'; $S='PASTE_SECRET_HERE'; $b=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$U`:$S")); $H=@{Accept='application/json';Authorization=("Basic $b")}; $v=Invoke-RestMethod -Method Get -Uri ($B+'/api/v2/product_version') -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue; if(-not $v){$v=Invoke-RestMethod -Method Get -Uri ($B+'/api/v2/noop') -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue}; if($v.product_version.long_display){$v.product_version.long_display}elseif($v.product_version.version){$v.product_version.version}elseif($v.status){$v.status}else{'unknown'}
-2) Auth ping (org detail) — szybkie „czy klucz działa”
+[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$cred=New-Object pscredential($u,(ConvertTo-SecureString $s -AsPlainText -Force)); try{(irm 'https://illumio-tst:8443/api/v2/product_version' -Authentication Basic -Credential $cred -Headers @{Accept='application/json'}).product_version.long_display}catch{(irm 'https://illumio-tst:8443/api/v2/noop' -Headers @{Accept='application/json'}).status}
+2) Labels – liczba
 powershell
 Kopiuj
 Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $B='https://illumio-tst:8443'; $O='1'; $U='PASTE_AUTH_USERNAME_HERE'; $S='PASTE_SECRET_HERE'; $b=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$U`:$S")); $H=@{Accept='application/json';Authorization=("Basic $b")}; $r=Invoke-RestMethod -Method Get -Uri ("$B/api/v2/orgs/$O") -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue; if($r -and $r.href){ "ok: $($r.href)" } else { "auth_failed_or_no_access" }
-3) Labels — liczba
+[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$cred=New-Object pscredential($u,(ConvertTo-SecureString $s -AsPlainText -Force)); (irm 'https://illumio-tst:8443/api/v2/orgs/1/labels?max_results=5000' -Authentication Basic -Credential $cred -Headers @{Accept='application/json'}).Count
+3) Workloads – liczba
 powershell
 Kopiuj
 Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $B='https://illumio-tst:8443'; $O='1'; $U='PASTE_AUTH_USERNAME_HERE'; $S='PASTE_SECRET_HERE'; $b=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$U`:$S")); $H=@{Accept='application/json';Authorization=("Basic $b")}; $d=Invoke-RestMethod -Method Get -Uri ("$B/api/v2/orgs/$O/labels?max_results=5000") -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue; if($d){($d|Measure-Object).Count}else{0}
-4) Workloads — liczba
-powershell
-Kopiuj
-Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $B='https://illumio-tst:8443'; $O='1'; $U='PASTE_AUTH_USERNAME_HERE'; $S='PASTE_SECRET_HERE'; $b=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$U`:$S")); $H=@{Accept='application/json';Authorization=("Basic $b")}; $d=Invoke-RestMethod -Method Get -Uri ("$B/api/v2/orgs/$O/workloads?max_results=10000") -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue; if($d){($d|Measure-Object).Count}else{0}
-5) Namespaces — liczba (sumuje z klastrów; jak brak klastrów, bierze unikalne z K8s)
-powershell
-Kopiuj
-Edytuj
-[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $B='https://illumio-tst:8443'; $O='1'; $U='PASTE_AUTH_USERNAME_HERE'; $S='PASTE_SECRET_HERE'; $b=[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$U`:$S")); $H=@{Accept='application/json';Authorization=("Basic $b")}; $c=Invoke-RestMethod -Method Get -Uri ("$B/api/v2/orgs/$O/container_clusters") -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue; if($c -and $c.Count -gt 0){ $t=0; foreach($x in $c){ $cw=Invoke-RestMethod -Method Get -Uri ($B+'/api/v2'+$x.href+'/container_workload_profiles') -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue; if($cw){ $t+=($cw|Measure-Object).Count } }; $t } else { $kw=Invoke-RestMethod -Method Get -Uri ("$B/api/v2/orgs/$O/kubernetes_workloads?max_results=2000") -Headers $H -TimeoutSec 30 -ErrorAction SilentlyContinue; if($kw){ (@($kw|Select-Object -ExpandProperty namespace -ErrorAction SilentlyContinue|Sort-Object -Unique)).Count } else { 0 } }
-🧪 Z CMD możesz odpalić tak:
+[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$cred=New-Object pscredential($u,(ConvertTo-SecureString $s -AsPlainText -Force)); (irm 'https://illumio-tst:8443/api/v2/orgs/1/workloads?max_results=10000' -Authentication Basic -Credential $cred -Headers @{Accept='application/json'}).Count
+4) Namespaces – liczba
+(sumuje container_workload_profiles we wszystkich klastrach; jak brak klastrów – liczy unikalne z kubernetes_workloads)
 
-nginx
+powershell
 Kopiuj
 Edytuj
-powershell -NoProfile -ExecutionPolicy Bypass -Command "<WKLEJ TĘ SAMĄ LINIJKĘ>"
-Jak to zadziała, to w następnym kroku podam Ci wersje „clean output” w formacie:
-
-nginx
-Kopiuj
-Edytuj
-illumio_labels_total 123
-illumio_workloads_total 456
-illumio_namespaces_total 7
+[Net.ServicePointManager]::ServerCertificateValidationCallback={$true}; $u='api_USER';$s='SECRET';$
