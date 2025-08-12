@@ -42,4 +42,5 @@ Edytuj
 # workloads
 (curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2/orgs/$O/workloads?max_results=10000" | ConvertFrom-Json).Count
 # namespaces
-$c = curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2/orgs/$O/container_cluster
+# namespaces
+$c = curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2/orgs/$O/container_clusters" | ConvertFrom-Json; if($c){$t=0;foreach($x in $c){$t += (curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2$($x.href)/container_workload_profiles" | ConvertFrom-Json).Count};$t}else{ $kw=curl.exe -ksS -u "$U`:$S" -H "Accept: application/json" "$B/api/v2/orgs/$O/kubernetes_workloads?max_results=2000" | ConvertFrom-Json; if($kw){ ($kw | ForEach-Object namespace | Sort-Object -Unique).Count } else { 0 } }
