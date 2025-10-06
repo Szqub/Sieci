@@ -98,6 +98,25 @@ python Panorama_Rule_Finder
 ```
 3. Postępuj zgodnie z instrukcjami na ekranie, wprowadzając kryteria wyszukiwania
 
+### 4. Panorama Object Cleanup
+Skrypt pomaga w usuwaniu obiektów adresowych z konfiguracji Panorama.
+
+#### Opis
+Po podaniu adresu IP skrypt generuje komendę `show | match`, a następnie na podstawie
+wyniku w formacie `set` tworzy listę poleceń `delete`. Najpierw proponuje usunięcie
+obiektu z reguł (source/destination), później ewentualne skasowanie całych reguł,
+usunięcie z grup adresowych, a na końcu usunięcie samego obiektu.
+
+#### Użycie
+1. Uruchom skrypt:
+```bash
+python Panorama_object_cleanup.py
+```
+2. Podaj adres IP obiektu, który chcesz oczyścić.
+3. Wklej wynik polecenia `show | match H-adres-32` z CLI Panoramy (w trybie `set`).
+4. Skrypt wyświetli komendy `delete`, które możesz kolejno wykonać na Panoramie.
+
+
 ## Autor
 
 Szymon
