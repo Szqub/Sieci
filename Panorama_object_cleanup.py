@@ -7,14 +7,20 @@ This tool assists in removing an address object from Panorama policies and group
 from __future__ import annotations
 
 import ipaddress
-from typing import List, Tuple
+from argparse import ArgumentParser
+from typing import List, Optional, Tuple
 
 
-def prompt_for_ip() -> str:
-    """Ask the user for an IPv4 address and validate it."""
+def prompt_for_ip() -> Optional[str]:
+    """Ask the user for an IPv4 address and validate it.
+
+    Returns ``None`` when the user chooses to quit.
+    """
 
     while True:
-        ip_input = input("Podaj adres IP obiektu (np. 192.0.2.10): ").strip()
+        ip_input = input("Podaj adres IP obiektu (np. 192.0.2.10) lub 'q' aby zakończyć: ").strip()
+        if ip_input == "q":
+            return None
         if not ip_input:
             print("Adres IP nie może być pusty. Spróbuj ponownie.\n")
             continue
@@ -26,14 +32,18 @@ def prompt_for_ip() -> str:
         return ip_input
 
 
-def collect_cli_output(object_name: str) -> List[str]:
-    """Collect CLI output pasted by the user."""
+def collect_cli_output(object_name: str) -> Optional[List[str]]:
+    """Collect CLI output pasted by the user.
+
+    Returns ``None`` when the user chooses to quit.
+    """
 
     print("\nSkopiuj i uruchom w Panoramie poniższe polecenie, aby wyszukać obiekt:")
     print(f"show | match {object_name}\n")
     print(
         "Następnie skopiuj wynik w formacie 'set' z Panoramy i wklej go poniżej.\n"
-        "Po wklejeniu całego wyniku wpisz w osobnej linii END i naciśnij Enter.\n"
+        "Po wklejeniu całego wyniku wpisz w osobnej linii [edit] i naciśnij Enter.\n"
+        "Aby zakończyć działanie skryptu, wpisz 'q'.\n"
     )
 
     lines: List[str] = []
@@ -42,10 +52,13 @@ def collect_cli_output(object_name: str) -> List[str]:
             line = input()
         except EOFError:
             break
-        if line.strip() == "END":
+        stripped = line.strip()
+        if stripped == "q":
+            return None
+        if stripped == "[edit]":
             break
-        if line.strip():
-            lines.append(line.strip())
+        if stripped:
+            lines.append(stripped)
     return lines
 
 
@@ -167,11 +180,33 @@ def print_commands(
 
 
 def main() -> None:
-    ip = prompt_for_ip()
-    object_name = f"H-{ip}-32"
-    lines = collect_cli_output(object_name)
-    results = parse_set_output(object_name, lines)
-    print_commands(*results)
+    parser = ArgumentParser(description="Panorama object cleanup helper")
+    parser.add_argument("--ip", dest="ip", help="Adres IP obiektu do usunięcia")
+    args = parser.parse_args()
+
+    next_ip: Optional[str] = None
+    if args.ip:
+        try:
+            ipaddress.IPv4Address(args.ip)
+        except ipaddress.AddressValueError:
+            parser.error("Podano nieprawidłowy adres IPv4 w parametrze --ip.")
+        next_ip = args.ip
+
+    while True:
+        ip = next_ip if next_ip is not None else prompt_for_ip()
+        next_ip = None
+        if ip is None:
+            print("Zakończono działanie skryptu.")
+            break
+
+        object_name = f"H-{ip}-32"
+        lines = collect_cli_output(object_name)
+        if lines is None:
+            print("Zakończono działanie skryptu.")
+            break
+
+        results = parse_set_output(object_name, lines)
+        print_commands(*results)
 
 
 if __name__ == "__main__":
