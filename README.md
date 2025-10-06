@@ -108,13 +108,18 @@ obiektu z reguł (source/destination), później ewentualne skasowanie całych r
 usunięcie z grup adresowych, a na końcu usunięcie samego obiektu.
 
 #### Użycie
-1. Uruchom skrypt:
+1. Uruchom skrypt (opcjonalnie z podaniem adresu IP):
 ```bash
-python Panorama_object_cleanup.py
+python Panorama_object_cleanup.py [--ip 192.0.2.10]
 ```
-2. Podaj adres IP obiektu, który chcesz oczyścić.
+2. Jeśli nie korzystasz z parametru `--ip`, wpisz adres IP obiektu, który chcesz oczyścić
+   lub `q`, aby zakończyć działanie skryptu.
 3. Wklej wynik polecenia `show | match H-adres-32` z CLI Panoramy (w trybie `set`).
+   Zakończ wklejanie, wpisując w osobnej linii `[edit]`. W dowolnym momencie możesz
+   wpisać `q`, aby przerwać działanie skryptu.
 4. Skrypt wyświetli komendy `delete`, które możesz kolejno wykonać na Panoramie.
+5. Po zakończeniu jednego obiektu skrypt zapyta o kolejny adres IP. Zakończ działanie,
+   wpisując `q`.
 
 
 ## Autor
