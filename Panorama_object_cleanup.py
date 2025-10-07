@@ -49,7 +49,7 @@ def collect_cli_output(object_names: List[str]) -> Optional[List[str]]:
 
     print(
         "Następnie skopiuj wynik w formacie 'set' z Panoramy i wklej go poniżej.\n"
-        "Po wklejeniu całego wyniku wpisz w osobnej linii [edit] i naciśnij Enter.\n"
+        "Po wklejeniu całego wyniku wpisz w osobnej linii END i naciśnij Enter.\n"
         "Aby zakończyć działanie skryptu, wpisz 'q'.\n"
     )
 
@@ -62,7 +62,7 @@ def collect_cli_output(object_names: List[str]) -> Optional[List[str]]:
         stripped = line.strip()
         if stripped == "q":
             return None
-        if stripped == "[edit]":
+        if stripped == "END":
             break
         if stripped:
             lines.append(stripped)

@@ -117,7 +117,7 @@ python Panorama_object_cleanup.py [--ip 192.0.2.10] [--ip-file custom_list.txt]
 ```
 3. Jeśli podano plik z adresami, skrypt wyświetli zestaw poleceń `show | match H-adres-32`
    dla każdego obiektu. Skopiuj je i wykonaj na Panoramie, a następnie wklej zbiorczy
-   wynik w formacie `set`. Zakończ wklejanie, wpisując w osobnej linii `[edit]`. W
+   wynik w formacie `set`. Zakończ wklejanie, wpisując w osobnej linii `END`. W
    dowolnym momencie możesz wpisać `q`, aby przerwać działanie skryptu.
 4. Po wklejeniu wyniku skrypt przygotuje komendy `delete` dla każdego obiektu z listy.
 5. Po obsłudze pliku możesz kontynuować, wpisując kolejne adresy ręcznie lub zakończyć
