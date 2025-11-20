@@ -73,7 +73,7 @@ for ($i = 0; $i -lt $validDNs.Count; $i += $chunkSize) {
         $filter = "(|$(-join $parts))"
     }
     
-    Write-Host "Blok $([Math]::Floor($i/$chunkSize) + 1):" -ForegroundColor Green
+    Write-Host "Blok $(($i/$chunkSize) + 1):" -ForegroundColor Green
     Write-Output $filter
     Write-Host ""
 }
