@@ -259,7 +259,7 @@ def write_run_artifacts(
         ):
             draft_reason = "runtime_dependencies"
         else:
-            draft_reason = "incomplete_input_or_icmp"
+            draft_reason = "incomplete_input"
         draft_command_name = f"draft_commands_BLOCKED_{draft_reason}.txt"
         draft_rollback_name = f"draft_rollback_BLOCKED_{draft_reason}.txt"
         if not commands_published:
@@ -296,6 +296,10 @@ def write_run_artifacts(
         _write_text(
             run_dir / "icmp_no_response.txt",
             _ping_report(rows, pings, PingStatus.NO_REPLY),
+        )
+        _write_text(
+            run_dir / "icmp_errors.txt",
+            _ping_report(rows, pings, PingStatus.ERROR),
         )
         _write_text(
             run_dir / "raport_krotki.txt",
@@ -370,6 +374,11 @@ def write_run_artifacts(
                 ip: [asdict(reason) for reason in reasons]
                 for ip, reasons in sorted(plan.blocked_ips.items())
             },
+            "icmp_errors": {
+                ip: result.detail
+                for ip, result in sorted(pings.items())
+                if result.status == PingStatus.ERROR
+            },
             "warnings": list(global_warnings),
             "publication_blockers": list(normalized_blockers),
             "safety": {
@@ -413,10 +422,13 @@ def write_run_artifacts(
 def _ping_report(
     rows: Sequence[InputRow], pings: Mapping[str, PingResult], status: PingStatus
 ) -> str:
-    lines = ["LP | IP | STATUS"]
+    lines = ["LP | IP | STATUS | SZCZEGÓŁY"]
     for row in rows:
         if row.normalized and pings.get(row.normalized) and pings[row.normalized].status == status:
-            lines.append(f"{row.lp} | {row.normalized} | {status.value}")
+            result = pings[row.normalized]
+            lines.append(
+                f"{row.lp} | {row.normalized} | {status.value} | {result.detail}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -515,12 +527,16 @@ def _short_report(
         lines.append("")
     unique_valid = {row.normalized for row in rows if row.normalized}
     planned = sum(1 for ip in unique_valid if commands_by_ip.get(ip))
+    ping_error_count = sum(
+        pings[ip].status == PingStatus.ERROR for ip in unique_valid
+    )
     lines.extend(
         [
             f"Pozycji wejściowych: {len(rows)}",
             f"Unikalnych poprawnych IP: {len(unique_valid)}",
             f"IP z planowanymi komendami: {planned}",
-            f"Zablokowanych IP: {len(plan.blocked_ips)}",
+            f"Zablokowanych przez zależności planu: {len(plan.blocked_ips)}",
+            f"Pominiętych przez trwały błąd ICMP: {ping_error_count}",
             f"Wygenerowanych komend: {len(rendered.commands)}",
         ]
     )
@@ -658,6 +674,7 @@ def _status_csv(
             "normalized_ip",
             "duplicate_of_lp",
             "ping_status",
+            "ping_detail",
             "result",
             "exact_objects",
             "containing_objects_not_deleted",
@@ -671,7 +688,9 @@ def _status_csv(
             ids_by_ip.setdefault(ip, []).append(record.command_id)
     for row in rows:
         if not row.valid or not row.normalized:
-            writer.writerow([row.lp, row.raw, "", "", "", "NIEPOPRAWNY_IP", "", "", ""])
+            writer.writerow(
+                [row.lp, row.raw, "", "", "", "", "NIEPOPRAWNY_IP", "", "", ""]
+            )
             continue
         ip = row.normalized
         writer.writerow(
@@ -681,6 +700,7 @@ def _status_csv(
                 ip,
                 row.duplicate_of_lp or "",
                 pings[ip].status.value,
+                pings[ip].detail,
                 _status_for_ip(ip, pings, matches, plan, commands_by_ip),
                 ";".join(f"{key.location}/{key.name}" for key in matches[ip].exact_objects),
                 ";".join(

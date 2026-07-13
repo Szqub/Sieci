@@ -164,6 +164,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("---no-ping", dest="no_ping", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ping-workers", type=int, default=64)
     parser.add_argument("--ping-timeout-ms", type=int, default=1000)
+    parser.add_argument(
+        "--ping-error-retries",
+        type=int,
+        default=2,
+        help=(
+            "Liczba automatycznych ponowień wyłącznie dla lokalnego błędu "
+            "wykonania ping (domyślnie 2, zakres 0..5)."
+        ),
+    )
     tls = parser.add_mutually_exclusive_group()
     tls.add_argument(
         "--ca-bundle",
@@ -223,6 +232,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             bypass=args.no_ping,
             workers=args.ping_workers,
             timeout_ms=args.ping_timeout_ms,
+            error_retries=args.ping_error_retries,
             sensitive_environment_names=(args.password_env,),
         )
         metrics.ping_seconds = time.perf_counter() - phase
@@ -241,7 +251,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         has_ping_error = any(
             result.status == PingStatus.ERROR for result in pings.values()
         )
+        ping_error_count = sum(
+            result.status == PingStatus.ERROR for result in pings.values()
+        )
         publication_blockers = []
+        icmp_warnings = []
         if has_invalid:
             invalid_count = sum(not row.valid for row in rows)
             publication_blockers.append(
@@ -249,12 +263,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "tylko części wejścia. Popraw plik i uruchom planner ponownie."
             )
         if has_ping_error:
-            ping_error_count = sum(
-                result.status == PingStatus.ERROR for result in pings.values()
+            icmp_warnings.append(
+                f"Błąd wykonania ICMP pozostał dla {ping_error_count} IP po "
+                f"maksymalnie {args.ping_error_retries + 1} próbach. Te IP "
+                "pominięto i oznaczono ZABLOKOWANO_BŁĄD_ICMP; commands.txt "
+                "obejmuje wyłącznie pozostałe, poprawnie sprawdzone IP."
             )
-            publication_blockers.append(
-                f"Błędy wykonania ICMP: {ping_error_count}; nie można bezpiecznie "
-                "potwierdzić kompletności ochronnego prechecku."
+            print(
+                "UWAGA: trwałe błędy ICMP dotyczą tylko wskazanych IP. "
+                "Zostaną one pominięte, a commands.txt może zostać opublikowany "
+                "dla pozostałego bezpiecznego podzbioru.",
+                file=sys.stderr,
             )
 
         password = obtain_password(args.password_env)
@@ -309,6 +328,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         phase = time.perf_counter()
         model = parse_config(running_config)
+        model.warnings.extend(icmp_warnings)
         metrics.parse_seconds = time.perf_counter() - phase
         metrics.discovered_object_count = len(model.addresses)
         if running_config.get("version") and not running_config.get("version", "").startswith("10.2"):
@@ -353,7 +373,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metrics.rendering_seconds = time.perf_counter() - phase
         metrics.affected_rule_count = len(rendered.affected_rules)
         metrics.affected_group_count = len(rendered.affected_groups)
-        metrics.blocked_ip_count = len(plan.blocked_ips)
+        metrics.blocked_ip_count = len(plan.blocked_ips) + ping_error_count
         metrics.generated_command_count = len(rendered.commands)
         metrics.total_seconds = time.perf_counter() - started_perf
 
@@ -366,6 +386,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "no_ping": args.no_ping,
             "ping_workers": args.ping_workers,
             "ping_timeout_ms": args.ping_timeout_ms,
+            "ping_error_retries": args.ping_error_retries,
             "ca_bundle": ca_bundle,
             "ssl_configured": "yes" if host_settings.verify_ssl else "no",
             "ssl_certificate_verification": not ssl_verification_disabled,
@@ -400,12 +421,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(
             f"Komendy w planie: {len(rendered.commands)}, obiekty: {len(rendered.affected_addresses)}, "
             f"grupy: {len(rendered.affected_groups)}, polityki: {len(rendered.affected_rules)}, "
-            f"blokady IP: {len(plan.blocked_ips)}."
+            f"blokady IP: {len(plan.blocked_ips) + ping_error_count}."
         )
         if publication_blockers:
             print("commands.txt wstrzymany przez bramkę bezpieczeństwa.")
 
-        if has_invalid or has_ping_error:
+        if has_invalid:
             return 3
         has_skipped = any(result.status == PingStatus.REPLIED for result in pings.values())
         has_review = bool(
@@ -415,6 +436,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             or rendered.rollback_warnings
             or any(match.containing_objects for match in matches.values())
             or has_skipped
+            or has_ping_error
         )
         return 2 if has_review else 0
 

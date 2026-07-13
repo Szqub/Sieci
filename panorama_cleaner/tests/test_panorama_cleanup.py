@@ -1170,6 +1170,113 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             api.assert_not_called()
             self.assertEqual([], list(base.glob("run_*")))
 
+    def test_main_quarantines_persistent_icmp_error_and_publishes_safe_subset(
+        self,
+    ) -> None:
+        running = ET.fromstring(
+            """
+            <config version="10.2.16-h4"><shared>
+              <address>
+                <entry name="SAFE"><ip-netmask>10.0.0.1/32</ip-netmask></entry>
+                <entry name="ICMP-ERROR"><ip-netmask>10.0.0.2/32</ip-netmask></entry>
+              </address>
+              <pre-rulebase><security><rules><entry name="SAFE-RULE">
+                <source><member>SAFE</member></source>
+                <destination><member>any</member></destination>
+              </entry></rules></security></pre-rulebase>
+            </shared><devices><entry name="localhost.localdomain">
+              <device-group/>
+            </entry></devices></config>
+            """
+        )
+
+        class FakeClient:
+            snapshot_call_count = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def authenticate(self, password: str) -> None:
+                self.password_was_supplied = bool(password)
+
+            def fetch_config(self, action: str):
+                self.snapshot_call_count += 1
+                return ET.fromstring(ET.tostring(running))
+
+        ping_results = {
+            "10.0.0.1": PingResult(
+                "10.0.0.1", PingStatus.NO_REPLY, "brak odpowiedzi", 0.01
+            ),
+            "10.0.0.2": PingResult(
+                "10.0.0.2",
+                PingStatus.ERROR,
+                "Proces ping przekroczył limit wykonania; "
+                "błąd utrzymał się po 3 próbach",
+                12.0,
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            host_file = base / "panorama_host.txt"
+            ip_file = base / "ip.txt"
+            host_file.write_text(
+                "host=192.0.2.10\nusername=readonly\nssl=no\n", encoding="utf-8"
+            )
+            ip_file.write_text("10.0.0.1\n10.0.0.2\n", encoding="utf-8")
+            with mock.patch(
+                "panorama_cleanup_planner.PanoramaXMLAPI",
+                return_value=FakeClient(),
+            ), mock.patch(
+                "panorama_cleanup_planner.obtain_password", return_value="secret"
+            ), mock.patch(
+                "panorama_cleanup_planner.ping_many", return_value=ping_results
+            ) as ping, mock.patch(
+                "builtins.input", return_value="TAK"
+            ):
+                code = main(
+                    [
+                        "--host-file",
+                        str(host_file),
+                        "--ip-file",
+                        str(ip_file),
+                        "--output-dir",
+                        str(base),
+                    ]
+                )
+
+            self.assertEqual(2, code)
+            self.assertEqual(2, ping.call_args.kwargs["error_retries"])
+            run_dir = next(base.glob("run_*"))
+            commands = (run_dir / "commands.txt").read_text(encoding="utf-8")
+            self.assertIn('delete shared address "SAFE"', commands)
+            self.assertIn(
+                'delete shared pre-rulebase security rules "SAFE-RULE"', commands
+            )
+            self.assertNotIn("ICMP-ERROR", commands)
+            self.assertFalse(any(run_dir.glob("draft_commands_BLOCKED_*.txt")))
+            apply_text = (run_dir / "apply_readme.txt").read_text(encoding="utf-8")
+            self.assertIn("Błąd wykonania ICMP pozostał dla 1 IP", apply_text)
+            self.assertNotIn("BLOKADY PUBLIKACJI commands.txt", apply_text)
+
+            errors = (run_dir / "icmp_errors.txt").read_text(encoding="utf-8")
+            self.assertIn("10.0.0.2 | ERROR", errors)
+            self.assertIn("błąd utrzymał się po 3 próbach", errors)
+            input_status = (run_dir / "input_status.csv").read_text(encoding="utf-8")
+            self.assertIn("ZABLOKOWANO_BŁĄD_ICMP", input_status)
+            manual = json.loads(
+                (run_dir / "manual_review.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("10.0.0.2", manual["ping_errors"])
+            manifest = json.loads(
+                (run_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("10.0.0.2", manifest["icmp_errors"])
+            self.assertEqual(1, manifest["metrics"]["blocked_ip_count"])
+
     def test_main_reports_unrelated_runtime_namespaces_without_global_block(self) -> None:
         running = ET.parse(FIXTURE).getroot()
 
@@ -1414,6 +1521,66 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         self.assertTrue(all(call.kwargs["shell"] is False for call in run.mock_calls))
 
     @mock.patch("panorama_cleanup.runtime.subprocess.run")
+    def test_ping_execution_error_is_retried_and_can_recover(
+        self, run: mock.Mock
+    ) -> None:
+        run.side_effect = [
+            subprocess.TimeoutExpired(cmd=["ping"], timeout=4.0),
+            subprocess.CompletedProcess([], 1),
+        ]
+        result = ping_many(
+            ["10.0.0.1"],
+            bypass=False,
+            workers=64,
+            timeout_ms=1000,
+            error_retries=2,
+        )["10.0.0.1"]
+        self.assertEqual(PingStatus.NO_REPLY, result.status)
+        self.assertEqual(2, run.call_count)
+        self.assertIn("wynik uzyskano w próbie 2", result.detail)
+
+    @mock.patch("panorama_cleanup.runtime.subprocess.run")
+    def test_persistent_ping_execution_error_stops_after_retry_limit(
+        self, run: mock.Mock
+    ) -> None:
+        run.side_effect = subprocess.TimeoutExpired(cmd=["ping"], timeout=4.0)
+        result = ping_many(
+            ["10.0.0.1"],
+            bypass=False,
+            workers=64,
+            timeout_ms=1000,
+            error_retries=2,
+        )["10.0.0.1"]
+        self.assertEqual(PingStatus.ERROR, result.status)
+        self.assertEqual(3, run.call_count)
+        self.assertIn("błąd utrzymał się po 3 próbach", result.detail)
+
+    @mock.patch("panorama_cleanup.runtime.subprocess.run")
+    def test_missing_ping_program_is_not_retried(self, run: mock.Mock) -> None:
+        run.side_effect = FileNotFoundError
+        result = ping_many(
+            ["10.0.0.1"],
+            bypass=False,
+            workers=1,
+            timeout_ms=1000,
+            error_retries=5,
+        )["10.0.0.1"]
+        self.assertEqual(PingStatus.ERROR, result.status)
+        self.assertEqual(1, run.call_count)
+        self.assertEqual("Program ping nie jest dostępny", result.detail)
+
+    def test_ping_error_retry_limit_is_validated(self) -> None:
+        for value in (-1, 6):
+            with self.subTest(value=value), self.assertRaises(InputError):
+                ping_many(
+                    ["10.0.0.1"],
+                    bypass=False,
+                    workers=1,
+                    timeout_ms=1000,
+                    error_retries=value,
+                )
+
+    @mock.patch("panorama_cleanup.runtime.subprocess.run")
     def test_ping_child_environment_excludes_password_variable(
         self, run: mock.Mock
     ) -> None:
@@ -1444,6 +1611,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         self.assertEqual(PROJECT_DIR / "ip.txt", Path(args.ip_file))
         self.assertEqual(PROJECT_DIR, Path(args.output_dir))
         self.assertEqual("delete-rule", args.nat_translation)
+        self.assertEqual(2, args.ping_error_retries)
         self.assertEqual(
             "block",
             build_parser().parse_args(
@@ -1565,6 +1733,7 @@ class ArtifactTests(unittest.TestCase):
             )
             self.assertTrue((run_dir / "raport_krotki.txt").is_file())
             self.assertTrue((run_dir / "raport_szczegolowy.txt").is_file())
+            self.assertTrue((run_dir / "icmp_errors.txt").is_file())
             self.assertTrue((run_dir / "manifest.json").is_file())
             self.assertIn(
                 "Administrator jawnie potwierdził",
@@ -1854,7 +2023,7 @@ do-not-leak-second</description>
             )
             self.assertFalse((run_dir / "commands.txt").exists())
             self.assertTrue(
-                (run_dir / "draft_commands_BLOCKED_incomplete_input_or_icmp.txt").is_file()
+                (run_dir / "draft_commands_BLOCKED_incomplete_input.txt").is_file()
             )
             apply_text = (run_dir / "apply_readme.txt").read_text(encoding="utf-8")
             short_text = (run_dir / "raport_krotki.txt").read_text(encoding="utf-8")
