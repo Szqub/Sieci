@@ -114,12 +114,15 @@ def confirm_candidate_diff_checked() -> None:
 
     print(
         "UWAGA: automatyczne porównanie running/candidate jest wyłączone.\n"
-        "Administrator musi wcześniej sprawdzić diff bezpośrednio w Panoramie."
+        "Administrator musi wcześniej sprawdzić diff bezpośrednio w Panoramie.\n"
+        "Zakres analizy zależności obejmuje nazwane address objects i ich "
+        "referencje w running config. Runtime DAG/FQDN/EDL/region wymaga "
+        "osobnego audytu na managed firewallach."
     )
     try:
         answer = input(
-            "Potwierdzasz sprawdzenie diffu, brak oczekujących zmian i chcesz "
-            "kontynuować? Wpisz dokładnie TAK: "
+            "Potwierdzasz sprawdzenie diffu, brak oczekujących zmian, wskazany "
+            "zakres named-object i chcesz kontynuować? Wpisz dokładnie TAK: "
         )
     except EOFError as exc:
         raise InputError(

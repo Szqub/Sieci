@@ -24,6 +24,7 @@ from panorama_cleanup.models import (
     ScopedName,
     SnapshotError,
     TransportError,
+    UnsafePlanError,
 )
 from panorama_cleanup.panos import (
     address_literal_relation,
@@ -435,6 +436,66 @@ class DirectLiteralAndQuotingTests(unittest.TestCase):
     def test_cli_quoting_handles_spaces_quotes_and_backslashes(self) -> None:
         self.assertEqual('"Name with spaces"', quote_cli("Name with spaces"))
         self.assertEqual('"a\\"b\\\\c"', quote_cli('a"b\\c'))
+        for character, label in (
+            ("\n", "LF\\(U\\+000A\\)"),
+            ("\u0085", "NEL\\(U\\+0085\\)"),
+            ("\u2028", "LS\\(U\\+2028\\)"),
+            ("\u2029", "PS\\(U\\+2029\\)"),
+        ):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                UnsafePlanError, label
+            ):
+                quote_cli(f"bad{character}value", context="test member")
+
+    def test_multiline_description_does_not_abort_apply_plan(self) -> None:
+        config = ET.fromstring(
+            """
+            <config><shared><address><entry name="TARGET">
+              <ip-netmask>10.10.10.10/32</ip-netmask>
+              <description>address-secret-first
+address-secret-second</description>
+            </entry></address>
+            <address-group><entry name="TARGET-GROUP">
+              <static><member>TARGET</member></static>
+              <description>group-secret-first&#133;group-secret-second</description>
+            </entry></address-group>
+            <pre-rulebase><security><rules><entry name="TARGET-RULE">
+              <source><member>TARGET-GROUP</member></source>
+              <destination><member>any</member></destination>
+              <description>rule-secret-first&#8232;rule-secret-middle&#8233;rule-secret-second</description>
+            </entry></rules></security></pre-rulebase>
+            </shared></config>
+            """
+        )
+        model = parse_config(config)
+        matches = match_ip_objects(model, ["10.10.10.10"])
+        plan = plan_cleanup(model, matches, ["10.10.10.10"])
+        rendered = render_plan(model, plan)
+
+        self.assertEqual(
+            [
+                'delete shared pre-rulebase security rules "TARGET-RULE"',
+                'delete shared address-group "TARGET-GROUP"',
+                'delete shared address "TARGET"',
+            ],
+            [record.command for record in rendered.commands],
+        )
+        self.assertEqual(3, len(rendered.rollback_warnings))
+        warning_text = "\n".join(rendered.rollback_warnings)
+        self.assertIn("ROLLBACK_CLI_FIELD_OMITTED", warning_text)
+        self.assertIn("LF(U+000A)", warning_text)
+        self.assertIn("NEL(U+0085)", warning_text)
+        self.assertIn("LS(U+2028)", warning_text)
+        self.assertIn("PS(U+2029)", warning_text)
+        self.assertIn("address shared/TARGET", warning_text)
+        self.assertIn("address-group shared/TARGET-GROUP", warning_text)
+        self.assertIn("rule shared/pre-rulebase/security/TARGET-RULE", warning_text)
+        self.assertNotIn("address-secret-first", warning_text)
+        self.assertNotIn("group-secret-first", warning_text)
+        self.assertNotIn("rule-secret-first", warning_text)
+        rollback_text = "\n".join(rendered.rollback_commands)
+        self.assertIn('set shared address "TARGET" ip-netmask "10.10.10.10/32"', rollback_text)
+        self.assertNotIn("description", rollback_text)
 
     def test_ipv6_host_is_exact_but_prefix_is_containment_only(self) -> None:
         config = ET.fromstring(
@@ -920,7 +981,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             api.assert_not_called()
             self.assertEqual([], list(base.glob("run_*")))
 
-    def test_main_withholds_commands_for_runtime_dependency_gate(self) -> None:
+    def test_main_reports_unrelated_runtime_namespaces_without_global_block(self) -> None:
         running = ET.parse(FIXTURE).getroot()
 
         class FakeClient:
@@ -951,7 +1012,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             host_file.write_text(
                 "host=192.0.2.10\nusername=readonly\nssl=no\n", encoding="utf-8"
             )
-            ip_file.write_text("10.0.0.1\n", encoding="utf-8")
+            ip_file.write_text("10.0.0.1\n10.0.0.4\n", encoding="utf-8")
             with mock.patch(
                 "panorama_cleanup_planner.PanoramaXMLAPI",
                 return_value=FakeClient(),
@@ -974,9 +1035,9 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             self.assertEqual(2, code)
             self.assertFalse(api_factory.call_args.kwargs["verify"])
             run_dir = next(base.glob("run_*"))
-            self.assertFalse((run_dir / "commands.txt").exists())
-            self.assertTrue(
-                (run_dir / "draft_commands_BLOCKED_runtime_dependencies.txt").is_file()
+            self.assertTrue((run_dir / "commands.txt").is_file())
+            self.assertFalse(
+                (run_dir / "draft_commands_BLOCKED_runtime_dependencies.txt").exists()
             )
             self.assertFalse(
                 (run_dir / "draft_commands_BLOCKED_candidate_drift.txt").exists()
@@ -988,8 +1049,27 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             self.assertTrue(candidate_control["administrator_confirmed"])
             self.assertIsNone(candidate_control["different"])
             self.assertIsNone(candidate_control["relevant_different"])
+            manifest = json.loads(
+                (run_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "named-address-objects-from-running-config",
+                manifest["safety"]["dependency_scope"],
+            )
+            self.assertFalse(
+                manifest["safety"]["runtime_membership_audit_performed"]
+            )
+            self.assertTrue(
+                manifest["safety"]["administrator_confirmed_dependency_scope"]
+            )
+            report = (run_dir / "raport_krotki.txt").read_text(encoding="utf-8")
+            self.assertIn("RUNTIME_DAG_PRESENT", report)
+            self.assertIn("DYNAMIC_GROUP_MEMBERSHIP_REQUIRES_REVIEW", report)
+            commands = (run_dir / "commands.txt").read_text(encoding="utf-8")
+            self.assertIn('delete shared address "TARGET_A"', commands)
+            self.assertNotIn("DAG_TARGET", commands)
 
-    def test_config_completeness_gates_runtime_address_namespaces(self) -> None:
+    def test_config_completeness_warns_about_runtime_address_namespaces(self) -> None:
         config = ET.fromstring(
             """
             <config><shared>
@@ -1005,13 +1085,14 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             """
         )
         model = parse_config(config)
-        _, blockers = config_completeness_findings(model, config)
-        blocker_text = "\n".join(blockers)
-        self.assertIn("RUNTIME_DAG_MEMBERSHIP_UNVERIFIED", blocker_text)
-        self.assertIn("FQDN_RESOLUTION_UNVERIFIED", blocker_text)
-        self.assertIn("IP_EDL_CONTENT_UNVERIFIED", blocker_text)
-        self.assertIn("REGION_MEMBERSHIP_UNVERIFIED", blocker_text)
-        self.assertIn("UNMODELED_ADDRESS_REFERENCE", blocker_text)
+        warnings, blockers = config_completeness_findings(model, config)
+        warning_text = "\n".join(warnings)
+        self.assertEqual([], blockers)
+        self.assertIn("RUNTIME_DAG_PRESENT", warning_text)
+        self.assertIn("FQDN_PRESENT", warning_text)
+        self.assertIn("IP_EDL_PRESENT", warning_text)
+        self.assertIn("REGION_PRESENT", warning_text)
+        self.assertIn("UNMODELED_ADDRESS_REFERENCE_PRESENT", warning_text)
 
     def test_modeled_wide_literal_is_not_an_unresolved_namespace(self) -> None:
         config = ET.fromstring(
@@ -1023,9 +1104,10 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             """
         )
         model = parse_config(config)
-        _, blockers = config_completeness_findings(model, config)
+        warnings, blockers = config_completeness_findings(model, config)
+        self.assertEqual([], blockers)
         self.assertFalse(
-            any("UNMODELED_ADDRESS_REFERENCE" in item for item in blockers)
+            any("UNMODELED_ADDRESS_REFERENCE" in item for item in warnings)
         )
 
     def test_running_candidate_semantic_comparison(self) -> None:
@@ -1280,6 +1362,74 @@ class ArtifactTests(unittest.TestCase):
             manifest_text = (run_dir / "manifest.json").read_text(encoding="utf-8")
             self.assertNotIn('"commands_published"', manifest_text)
             self.assertIn('"commands_file_expected_on_success": true', manifest_text)
+
+    def test_incomplete_rollback_cli_keeps_commands_and_requires_xml_restore(self) -> None:
+        config = ET.fromstring(
+            """
+            <config><shared><address><entry name="TARGET">
+              <ip-netmask>10.10.10.10/32</ip-netmask>
+              <description>do-not-leak-first
+do-not-leak-second</description>
+            </entry></address></shared></config>
+            """
+        )
+        model = parse_config(config)
+        matches = match_ip_objects(model, ["10.10.10.10"])
+        plan = plan_cleanup(model, matches, ["10.10.10.10"])
+        rendered = render_plan(model, plan)
+        self.assertTrue(rendered.rollback_warnings)
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir, stamp = create_run_directory(Path(temp))
+            write_run_artifacts(
+                run_dir=run_dir,
+                file_stamp=stamp,
+                model=model,
+                plan=plan,
+                rendered=rendered,
+                rows=[InputRow(1, "10.10.10.10", "10.10.10.10", True)],
+                pings={
+                    "10.10.10.10": PingResult(
+                        "10.10.10.10", PingStatus.NO_REPLY, "brak", 0.01
+                    )
+                },
+                matches=matches,
+                comparison=CandidateComparison(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    automated_check_performed=False,
+                    administrator_confirmed=True,
+                ),
+                host="192.0.2.10",
+                username="admin",
+                system_info={},
+                sanitized_arguments={},
+                metrics=RunMetrics(),
+                started_utc=datetime.now(timezone.utc),
+            )
+
+            self.assertTrue((run_dir / "commands.txt").is_file())
+            restore_note = run_dir / "rollback_manual_restore_required.txt"
+            self.assertTrue(restore_note.is_file())
+            restore_text = restore_note.read_text(encoding="utf-8")
+            self.assertIn("ROLLBACK_CLI_FIELD_OMITTED", restore_text)
+            self.assertNotIn("do-not-leak-first", restore_text)
+            apply_text = (run_dir / "apply_readme.txt").read_text(encoding="utf-8")
+            self.assertIn("rollback_manual_restore_required.txt", apply_text)
+            self.assertNotIn("do-not-leak-first", apply_text)
+            backup_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in (run_dir / "backups").rglob("*.xml")
+            )
+            self.assertIn("do-not-leak-first", backup_text)
+            manifest = json.loads(
+                (run_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(manifest["rollback_cli_complete"])
+            self.assertEqual(rendered.rollback_warnings, manifest["rollback_warnings"])
 
     def test_backup_failure_never_creates_commands_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

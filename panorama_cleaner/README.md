@@ -28,27 +28,25 @@ Rozpoznawane są hosty `ip-netmask`, singleton `ip-range` i exact
 `ip-wildcard`; szersze podsieci, zakresy i wildcardy są raportowane wraz z ich
 zależnościami, ale nigdy automatycznie usuwane. Szerszy literal w polityce lub
 puli NAT blokuje całe IP. Obiektów FQDN skrypt nie przypisuje do IP na podstawie
-chwilowego DNS — raportuje tę granicę jawnie i wstrzymuje publikację komend.
-Referencje poza obsługiwanym
+chwilowego DNS — raportuje tę granicę jawnie, ale samo istnienie niezwiązanego
+FQDN nie blokuje usunięcia nazwanego address object. Referencje poza obsługiwanym
 Security/NAT source/destination, zanegowane pola, cykle grup, niebezpieczny
 fallback override i możliwe członkostwo w dynamic address group blokują całe
 IP do ręcznego review. Pola translacji NAT domyślnie blokują;
 całą regułę NAT można przeznaczyć do usunięcia wyłącznie przez jawne
 `--nat-translation delete-rule`.
 
-Ważna granica: operacyjne rejestracje IP→tag dla dynamic address groups nie są
-częścią `running` ani `candidate`. Jeżeli w snapshotcie istnieje choć jedna DAG,
-skrypt generuje statyczny raport i wyraźnie oznaczony draft, ale domyślnie
-**wstrzymuje globalnie `commands.txt`** (`RUNTIME_DAG_MEMBERSHIP_UNVERIFIED`).
-Nie wolno deklarować kompletnego cleanupu wyłącznie z tych dwóch snapshotów;
-membership trzeba osobno zweryfikować na właściwych managed firewallach.
-Analogicznie dowolny obiekt FQDN powoduje blokadę
-`FQDN_RESOLUTION_UNVERIFIED`, ponieważ lokalny DNS nie jest autorytatywnym
-stanem rozwiązania nazwy na firewallu. IP External Dynamic Lists, custom lub
-predefined regions i nierozwiązane nazwy z pól adresowych również wstrzymują
-`commands.txt`: ich zawartości albo namespace nie można kompletnie przypisać do
-target IP z samych snapshotów. Poprawne surowe subnety, range i wildcardy są
-modelowane per-IP i same nie uruchamiają tej globalnej blokady.
+Ważna granica zakresu: plan dotyczy zależności nazwanych obiektów widocznych w
+running config. Operacyjne rejestracje IP→tag dla DAG, rozwiązania FQDN, runtime
+contents IP EDL i predefined regions nie są częścią `running` ani `candidate`.
+Ich sama obecność jest raportowana jako warning i daje kod wyjścia `2`, ale nie
+blokuje globalnie `commands.txt`, ponieważ nie jest referencją do usuwanej
+definicji address object. Planner nadal blokuje targetowo obiekt z tagami
+pasującymi do filtra DAG, dotkniętą grupę z nierozwiązanym członkiem oraz każdą
+rozpoznaną zależność NAT/polityki. Jeżeli celem jest potwierdzenie, że IP nie
+występuje również semantycznie przez runtime DAG/FQDN/EDL/region, administrator
+musi wykonać osobny audit na właściwych managed firewallach. Skrypt nie może
+uczciwie dowieść tego z dwóch snapshotów konfiguracji.
 
 ## Pliki wejściowe
 
@@ -96,8 +94,10 @@ hasła.
 Automatyczne porównanie running/candidate jest wyłączone. Każdy run przed ICMP
 i połączeniem z Panoramą wymaga wpisania dokładnie `TAK`. Potwierdzenie oznacza,
 że administrator sprawdził wcześniej diff w GUI/CLI Panoramy, nie ma
-oczekujących zmian i świadomie chce kontynuować. Brak potwierdzenia przerywa
-run kodem 3. Oba snapshoty nadal są pobierane; plan zawsze powstaje z running.
+oczekujących zmian, akceptuje zakres zależności nazwanych address objects z
+running config i świadomie chce kontynuować. Runtime DAG/FQDN/EDL/region nie
+jest audytowany przez ten run. Brak potwierdzenia przerywa run kodem 3. Oba
+snapshoty nadal są pobierane; plan zawsze powstaje z running.
 
 ## Uruchomienie
 
@@ -122,6 +122,7 @@ Każdy run tworzy osobny katalog `run_DDMMYY_HH_MM_SS`, między innymi:
 ```text
 commands.txt
 rollback_commands.txt
+rollback_manual_restore_required.txt  # tylko gdy rollback CLI jest niepełny
 apply_readme.txt
 raport_krotki.txt
 raport_szczegolowy.txt
@@ -137,25 +138,29 @@ backups/policies/...
 ```
 
 `candidate_comparison.json` zapisuje, że automatyczny diff był pominięty oraz
-że administrator go potwierdził. Niepoprawny wiersz wejścia albo błąd
-uruchomienia ICMP wstrzymuje cały `commands.txt` i tworzy
+że administrator go potwierdził. Ostrzeżenia o obecności DAG/FQDN/EDL/region i
+niewymodelowanych, niezwiązanych nazwach nie tworzą już globalnego draftu;
+targetowane blokady nadal pomijają wyłącznie ryzykowne IP. Niepoprawny wiersz
+wejścia albo błąd uruchomienia ICMP wstrzymuje cały `commands.txt` i tworzy
 `draft_*_BLOCKED_incomplete_input_or_icmp.txt` — skrypt nie publikuje planu dla
 nieoznaczonego podzbioru. Nie wolno stosować żadnego draftu; trzeba usunąć
 blokadę i uruchomić skrypt ponownie. Wszystkie globalne ostrzeżenia są widoczne
 w `apply_readme.txt`, obu raportach, `manual_review.json` i manifeście.
-Blokady DAG/FQDN/EDL/region/unmodeled namespace używają nazwy
-`draft_*_BLOCKED_runtime_dependencies.txt`.
 
 Nazwy backupów zawierają nazwę encji, timestamp `DDMMYY_HH_MM` i stabilny
 skrót zapobiegający kolizjom. Raporty mówią „zaplanowano”, ponieważ żadna
 komenda nie została wykonana. `rollback_commands.txt` odtwarza wartości i
-pozycję reguł w candidate, natomiast pełne XML w `backups/` pozostają
-autorytatywnym backupem (na przykład UUID reguły może wymagać kontrolowanego
-`load config partial`/XML API).
+pozycję reguł w candidate. Jeżeli opis, komentarz albo inne pole zawiera znak
+sterujący, którego nie można bezpiecznie wkleić do CLI, tylko ta pomocnicza
+komenda rollbacku jest pomijana, a run tworzy
+`rollback_manual_restore_required.txt`. Pełne XML w `backups/` pozostają
+autorytatywnym backupem do kontrolowanego `load config partial`/XML API (dotyczy
+to również atrybutów takich jak UUID).
 
-Publikację nadal wstrzymują nierozstrzygnięte zależności runtime, na przykład
-DAG/FQDN/EDL/region. Brak potwierdzenia administratora, niepoprawne wejście lub
-błąd procesu ICMP kończy się kodem 3. Po bezpiecznym runie administrator nadal
+Targetowane blokady bezpieczeństwa pomijają konkretne ryzykowne IP i są opisane
+w raportach. Publikację całego `commands.txt` wstrzymuje brak potwierdzenia
+administratora, niepoprawne wejście lub błąd procesu ICMP; te przypadki kończą
+się kodem 3. Po bezpiecznym runie administrator nadal
 wykonuje `validate full` i ponownie `show config diff`; dopiero potem ręcznie
 decyduje o commit.
 

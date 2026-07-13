@@ -49,31 +49,26 @@ PROJECT_DIR = Path(__file__).resolve().parent
 def config_completeness_findings(
     model: ConfigModel, running_config: Any
 ) -> Tuple[List[str], List[str]]:
-    """Find runtime/unmodeled address namespaces that make IP inventory partial."""
+    """Report runtime namespaces without treating unrelated entries as dependencies."""
 
     warnings: List[str] = []
     blockers: List[str] = []
     if model.dynamic_groups:
         warnings.append(
-            f"Snapshot zawiera {len(model.dynamic_groups)} dynamic address group. "
-            "Running/candidate nie zawierają operacyjnych rejestracji IP→tag "
-            "z firewalli, więc pełnego członkostwa target IP nie da się dowieść."
-        )
-        blockers.append(
-            "RUNTIME_DAG_MEMBERSHIP_UNVERIFIED: commands.txt wstrzymany, "
-            "ponieważ dwa snapshoty konfiguracji nie obejmują runtime DAG."
+            f"RUNTIME_DAG_PRESENT: snapshot zawiera {len(model.dynamic_groups)} "
+            "dynamic address group. Nie jest to globalna zależność usuwanego "
+            "obiektu; planner osobno blokuje tylko targety, których tagi mogą "
+            "pasować do filtra DAG. Operacyjne rejestracje IP→tag nie są częścią "
+            "running/candidate."
         )
 
     fqdn_count = sum(obj.object_type == "fqdn" for obj in model.addresses.values())
     if fqdn_count:
         warnings.append(
-            f"Snapshot zawiera {fqdn_count} obiektów FQDN; ich bieżących "
-            "rozwiązań DNS nie można wiarygodnie przypisać do IP wyłącznie "
-            "z running config."
-        )
-        blockers.append(
-            "FQDN_RESOLUTION_UNVERIFIED: commands.txt wstrzymany, ponieważ "
-            "snapshot nie dowodzi, czy FQDN wskazuje któryś target IP."
+            f"FQDN_PRESENT: snapshot zawiera {fqdn_count} obiektów FQDN. "
+            "Nie są bezpośrednimi referencjami do usuwanych address objects i "
+            "nie blokują globalnie planu; ich bieżących rozwiązań DNS nie można "
+            "potwierdzić z running config."
         )
 
     ip_edl_count = sum(
@@ -82,23 +77,18 @@ def config_completeness_findings(
     )
     if ip_edl_count:
         warnings.append(
-            f"Snapshot zawiera {ip_edl_count} IP External Dynamic List; "
-            "ich runtime contents nie są zawarte w running/candidate."
-        )
-        blockers.append(
-            "IP_EDL_CONTENT_UNVERIFIED: commands.txt wstrzymany, ponieważ "
-            "target IP może znajdować się w runtime EDL."
+            f"IP_EDL_PRESENT: snapshot zawiera {ip_edl_count} IP External "
+            "Dynamic List. Ich runtime contents nie są zawarte w "
+            "running/candidate, ale nie są referencją do usuwanej definicji "
+            "address object i nie blokują globalnie planu."
         )
 
     region_count = len(running_config.findall(".//region/entry"))
     if region_count:
         warnings.append(
-            f"Snapshot zawiera {region_count} custom region; planner nie "
-            "rozwija regionów do adresów target IP."
-        )
-        blockers.append(
-            "REGION_MEMBERSHIP_UNVERIFIED: commands.txt wstrzymany, ponieważ "
-            "target IP może należeć do custom/predefined region."
+            f"REGION_PRESENT: snapshot zawiera {region_count} custom region; "
+            "planner nie rozwija regionów do IP, ale region nie jest referencją "
+            "do usuwanej definicji address object i nie blokuje globalnie planu."
         )
 
     unresolved_values = {
@@ -116,15 +106,15 @@ def config_completeness_findings(
         and not is_supported_address_literal(occurrence.value)
     )
     if unresolved_values:
-        sample = ", ".join(sorted(unresolved_values)[:10])
-        warnings.append(
-            f"Wykryto {len(unresolved_values)} nierozwiązanych nazw w polach "
-            f"adresowych (przykłady: {sample}); mogą oznaczać EDL, region "
-            "predefined albo niewidoczny obiekt."
+        sample = ", ".join(
+            value.encode("unicode_escape").decode("ascii")
+            for value in sorted(unresolved_values)[:10]
         )
-        blockers.append(
-            "UNMODELED_ADDRESS_REFERENCE: commands.txt wstrzymany do czasu "
-            "rozwiązania wszystkich nazw z pól adresowych."
+        warnings.append(
+            f"UNMODELED_ADDRESS_REFERENCE_PRESENT: wykryto "
+            f"{len(unresolved_values)} nierozwiązanych nazw w polach adresowych "
+            f"(przykłady: {sample}). Niezwiązane nazwy nie blokują całego batcha; "
+            "dotknięte grupy i reguły są nadal blokowane targetowo przez planner."
         )
     return warnings, blockers
 
@@ -353,6 +343,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         phase = time.perf_counter()
         rendered = render_plan(model, plan)
+        if rendered.rollback_warnings:
+            print(
+                "UWAGA: część pomocniczego rollbacku CLI wymaga odtworzenia z "
+                "pełnych backupów XML; szczegóły znajdą się w artefaktach runu.",
+                file=sys.stderr,
+            )
         metrics.rendering_seconds = time.perf_counter() - phase
         metrics.affected_rule_count = len(rendered.affected_rules)
         metrics.affected_group_count = len(rendered.affected_groups)
@@ -375,6 +371,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "legacy_insecure_override": args.insecure,
             "candidate_diff_automated_check": False,
             "candidate_diff_administrator_confirmed": True,
+            "dependency_scope": "named-address-objects-from-running-config",
+            "runtime_membership_audit_performed": False,
+            "administrator_confirmed_dependency_scope": True,
             "nat_translation": args.nat_translation,
         }
         write_run_artifacts(
@@ -412,6 +411,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             plan.blocked_ips
             or plan.dynamic_group_impacts
             or plan.warnings
+            or rendered.rollback_warnings
             or any(match.containing_objects for match in matches.values())
             or has_skipped
         )
