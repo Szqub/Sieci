@@ -180,10 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--nat-translation",
         choices=("block", "delete-rule"),
-        default="block",
+        default="delete-rule",
         help=(
-            "Dla referencji w polach translacji NAT: block (domyślnie) albo "
-            "delete-rule po jawnej decyzji operatora."
+            "Dla dokładnych referencji w polach translacji NAT: delete-rule "
+            "(domyślnie usuwa regułę, ale zachowuje ją, gdy wystarczy bezpiecznie "
+            "oczyścić niepustą grupę) albo block, aby wymusić manual review."
         ),
     )
     return parser
