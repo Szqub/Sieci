@@ -1,0 +1,75 @@
+<config version="10.2.16">
+  <shared>
+    <address>
+      <entry name="TARGET_A"><ip-netmask>10.0.0.1/32</ip-netmask></entry>
+      <entry name="TARGET_B"><ip-netmask>10.0.0.2</ip-netmask></entry>
+      <entry name="CYCLE_TARGET"><ip-netmask>10.0.0.3/32</ip-netmask></entry>
+      <entry name="DAG_TARGET"><ip-netmask>10.0.0.4/32</ip-netmask><tag><member>retire</member></tag></entry>
+      <entry name="KEEP"><ip-netmask>10.0.0.99/32</ip-netmask></entry>
+      <entry name="NET_CONTAINS"><ip-netmask>10.0.0.0/24</ip-netmask></entry>
+      <entry name="RANGE_CONTAINS"><ip-range>10.0.0.1-10.0.0.10</ip-range></entry>
+      <entry name="SINGLE_RANGE"><ip-range>10.0.0.50-10.0.0.50</ip-range></entry>
+      <entry name="TRANS_TARGET"><ip-netmask>203.0.113.10/32</ip-netmask></entry>
+      <entry name="NEG_TARGET"><ip-netmask>203.0.113.11/32</ip-netmask></entry>
+      <entry name="UNSUPPORTED_TARGET"><ip-netmask>203.0.113.12/32</ip-netmask></entry>
+      <entry name="OVERRIDE"><ip-netmask>192.0.2.1/32</ip-netmask></entry>
+    </address>
+    <address-group>
+      <entry name="G-MIX"><static><member>TARGET_A</member><member>KEEP</member></static></entry>
+      <entry name="G-BATCH"><static><member>TARGET_A</member><member>TARGET_B</member></static></entry>
+      <entry name="G-INNER"><static><member>TARGET_A</member></static></entry>
+      <entry name="G-OUTER"><static><member>G-INNER</member></static></entry>
+      <entry name="G-CYCLE-1"><static><member>CYCLE_TARGET</member><member>G-CYCLE-2</member></static></entry>
+      <entry name="G-CYCLE-2"><static><member>G-CYCLE-1</member></static></entry>
+      <entry name="DAG-RETIRE"><dynamic><filter>'retire'</filter></dynamic></entry>
+    </address-group>
+    <pre-rulebase>
+      <security>
+        <rules>
+          <entry name="SEC-MIX"><source><member>TARGET_A</member><member>KEEP</member></source><destination><member>any</member></destination><action>allow</action></entry>
+          <entry name="SEC-B-ONLY"><source><member>any</member></source><destination><member>TARGET_B</member></destination><action>deny</action></entry>
+          <entry name="SEC-BATCH"><source><member>TARGET_A</member><member>TARGET_B</member></source><destination><member>any</member></destination><action>allow</action></entry>
+          <entry name="SEC-GROUP"><source><member>G-OUTER</member></source><destination><member>any</member></destination><action>allow</action></entry>
+          <entry name="SEC-NEG"><source><member>NEG_TARGET</member><member>KEEP</member></source><destination><member>any</member></destination><negate-source>yes</negate-source><action>allow</action></entry>
+        </rules>
+      </security>
+      <nat>
+        <rules>
+          <entry name="NAT-MIX"><source><member>TARGET_A</member><member>KEEP</member></source><destination><member>any</member></destination><service>any</service></entry>
+          <entry name="NAT-B-ONLY"><source><member>TARGET_B</member></source><destination><member>any</member></destination><service>any</service></entry>
+          <entry name="NAT-TRANS"><source><member>any</member></source><destination><member>any</member></destination><service>any</service><destination-translation><translated-address>TRANS_TARGET</translated-address></destination-translation></entry>
+        </rules>
+      </nat>
+      <pbf>
+        <rules>
+          <entry name="PBF-UNSUPPORTED"><source><member>UNSUPPORTED_TARGET</member></source><destination><member>any</member></destination></entry>
+        </rules>
+      </pbf>
+    </pre-rulebase>
+  </shared>
+  <devices>
+    <entry name="localhost.localdomain">
+      <device-group>
+        <entry name="DG-PARENT">
+          <address>
+            <entry name="OVERRIDE"><ip-netmask>192.0.2.2/32</ip-netmask></entry>
+            <entry name="PARENT_ONLY"><ip-netmask>198.51.100.10/32</ip-netmask></entry>
+          </address>
+          <post-rulebase>
+            <security><rules><entry name="PARENT-POST"><source><member>OVERRIDE</member></source><destination><member>any</member></destination><action>allow</action></entry></rules></security>
+          </post-rulebase>
+        </entry>
+        <entry name="DG-CHILD">
+          <parent-dg>DG-PARENT</parent-dg>
+          <address><entry name="OVERRIDE"><ip-netmask>192.0.2.3/32</ip-netmask></entry></address>
+          <pre-rulebase>
+            <security><rules><entry name="CHILD-PRE"><source><member>OVERRIDE</member></source><destination><member>any</member></destination><action>allow</action></entry></rules></security>
+          </pre-rulebase>
+          <post-rulebase>
+            <nat><rules><entry name="CHILD-NAT"><source><member>PARENT_ONLY</member></source><destination><member>any</member></destination><service>any</service></entry></rules></nat>
+          </post-rulebase>
+        </entry>
+      </device-group>
+    </entry>
+  </devices>
+</config>

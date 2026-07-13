@@ -1,0 +1,3 @@
+# Skopiuj ten plik jako panorama_host.txt. Nie wpisuj tutaj hasła.
+host=192.0.2.10
+username=panorama-api-user
