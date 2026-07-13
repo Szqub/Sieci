@@ -220,6 +220,9 @@ def write_run_artifacts(
         normalized_blockers = tuple(
             sorted({item.strip() for item in publication_blockers if item.strip()})
         )
+        global_warnings = tuple(
+            sorted(set(plan.warnings) | set(rendered.rollback_warnings))
+        )
 
         command_text = "\n".join(record.command for record in rendered.commands)
         if command_text:
@@ -268,6 +271,11 @@ def write_run_artifacts(
                 run_dir / draft_rollback_name,
                 rollback_text,
             )
+        if rendered.rollback_warnings:
+            _write_text(
+                run_dir / "rollback_manual_restore_required.txt",
+                _rollback_warning_report(rendered.rollback_warnings),
+            )
         _write_text(
             run_dir / "apply_readme.txt",
             _apply_readme(
@@ -275,7 +283,8 @@ def write_run_artifacts(
                 has_commands=bool(rendered.commands),
                 commands_published=commands_published,
                 publication_blockers=normalized_blockers,
-                warnings=plan.warnings,
+                warnings=global_warnings,
+                rollback_warnings=rendered.rollback_warnings,
                 draft_command_name=draft_command_name,
                 draft_rollback_name=draft_rollback_name,
             ),
@@ -298,6 +307,7 @@ def write_run_artifacts(
                 plan,
                 rendered,
                 normalized_blockers,
+                global_warnings,
             ),
         )
         _write_text(
@@ -310,6 +320,7 @@ def write_run_artifacts(
                 plan,
                 rendered,
                 normalized_blockers,
+                global_warnings,
             ),
         )
         _write_text(
@@ -329,6 +340,8 @@ def write_run_artifacts(
                 plan,
                 comparison,
                 normalized_blockers,
+                global_warnings,
+                rendered.rollback_warnings,
             ),
         )
 
@@ -351,11 +364,13 @@ def write_run_artifacts(
             "backups": backup_manifest,
             "commands": [asdict(command) for command in rendered.commands],
             "rollback_command_count": len(rendered.rollback_commands),
+            "rollback_cli_complete": not rendered.rollback_warnings,
+            "rollback_warnings": sorted(set(rendered.rollback_warnings)),
             "blocked_ips": {
                 ip: [asdict(reason) for reason in reasons]
                 for ip, reasons in sorted(plan.blocked_ips.items())
             },
-            "warnings": sorted(set(plan.warnings)),
+            "warnings": list(global_warnings),
             "publication_blockers": list(normalized_blockers),
             "safety": {
                 "changes_executed": False,
@@ -369,6 +384,13 @@ def write_run_artifacts(
                     else "applicable commands intentionally withheld"
                 ),
                 "planning_snapshot": "running",
+                "dependency_scope": sanitized_arguments.get("dependency_scope"),
+                "runtime_membership_audit_performed": sanitized_arguments.get(
+                    "runtime_membership_audit_performed", False
+                ),
+                "administrator_confirmed_dependency_scope": sanitized_arguments.get(
+                    "administrator_confirmed_dependency_scope", False
+                ),
                 "candidate_diff_requires_operator_review": comparison.different,
             },
         }
@@ -435,6 +457,7 @@ def _short_report(
     plan: BatchPlan,
     rendered: RenderedPlan,
     publication_blockers: Sequence[str],
+    global_warnings: Sequence[str],
 ) -> str:
     commands_by_ip = _commands_by_ip(rendered)
     inventory_keys = {
@@ -450,9 +473,9 @@ def _short_report(
         lines.append("BLOKADY PUBLIKACJI commands.txt:")
         lines.extend(f"  - {item}" for item in publication_blockers)
         lines.append("")
-    if plan.warnings:
+    if global_warnings:
         lines.append("OSTRZEŻENIA GLOBALNE:")
-        lines.extend(f"  - {item}" for item in sorted(set(plan.warnings)))
+        lines.extend(f"  - {item}" for item in global_warnings)
         lines.append("")
     records_by_id = {record.command_id: record for record in rendered.commands}
     for row in rows:
@@ -512,6 +535,7 @@ def _detailed_report(
     plan: BatchPlan,
     rendered: RenderedPlan,
     publication_blockers: Sequence[str],
+    global_warnings: Sequence[str],
 ) -> str:
     commands_by_ip = _commands_by_ip(rendered)
     inventory_keys = {
@@ -534,9 +558,9 @@ def _detailed_report(
         lines.append("BLOKADY PUBLIKACJI commands.txt:")
         lines.extend(f"  - {item}" for item in publication_blockers)
         lines.append("")
-    if plan.warnings:
+    if global_warnings:
         lines.append("OSTRZEŻENIA GLOBALNE:")
-        lines.extend(f"  - {item}" for item in sorted(set(plan.warnings)))
+        lines.extend(f"  - {item}" for item in global_warnings)
         lines.append("")
     for ip, first_lp in sorted(first_rows.items(), key=lambda item: item[1]):
         status = _status_for_ip(ip, pings, matches, plan, commands_by_ip)
@@ -675,6 +699,8 @@ def _manual_review(
     plan: BatchPlan,
     comparison: CandidateComparison,
     publication_blockers: Sequence[str],
+    global_warnings: Sequence[str],
+    rollback_warnings: Sequence[str],
 ) -> Dict[str, Any]:
     invalid = [
         {"lp": row.lp, "value": row.raw, "error": row.error}
@@ -687,7 +713,8 @@ def _manual_review(
     return {
         "candidate_drift": asdict(comparison),
         "publication_blockers": list(publication_blockers),
-        "warnings": sorted(set(plan.warnings)),
+        "warnings": list(global_warnings),
+        "rollback_warnings": sorted(set(rollback_warnings)),
         "invalid_input": invalid,
         "ping_errors": ping_errors,
         "blocked_ips": {
@@ -708,6 +735,21 @@ def _manual_review(
     }
 
 
+def _rollback_warning_report(warnings: Sequence[str]) -> str:
+    lines = [
+        "ROLLBACK CLI — WYMAGANE RĘCZNE ODTWORZENIE WYBRANYCH PÓL",
+        "========================================================",
+        "",
+        "Nie wykonuj rollback_commands.txt jako jedynego źródła odtworzenia.",
+        "Poniższe pola pominięto, ponieważ nie można ich bezpiecznie wkleić do CLI.",
+        "Pełne backupy XML w backups/ zachowują wartości do kontrolowanego",
+        "load config partial/XML API.",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in sorted(set(warnings)))
+    return "\n".join(lines) + "\n"
+
+
 def _apply_readme(
     *,
     comparison: CandidateComparison,
@@ -715,6 +757,7 @@ def _apply_readme(
     commands_published: bool,
     publication_blockers: Sequence[str],
     warnings: Sequence[str],
+    rollback_warnings: Sequence[str],
     draft_command_name: str,
     draft_rollback_name: str,
 ) -> str:
@@ -758,6 +801,14 @@ def _apply_readme(
         warnings_note = "OSTRZEŻENIA WYMAGAJĄCE REVIEW:\n" + "".join(
             f"  - {item}\n" for item in sorted(set(warnings))
         )
+    rollback_note = ""
+    if rollback_warnings:
+        rollback_note = (
+            "UWAGA: pomocniczy rollback CLI jest niepełny dla pól ze znakami "
+            "sterującymi. Szczegóły zapisano w "
+            "rollback_manual_restore_required.txt. Dla wskazanych encji użyj "
+            "pełnego XML z backups/ przez kontrolowany load config partial/XML API.\n"
+        )
     if has_commands and commands_published:
         command_note = "Plik commands.txt zawiera plan zmian.\n"
     elif has_commands:
@@ -792,6 +843,7 @@ def _apply_readme(
         + drift
         + blockers_note
         + warnings_note
+        + rollback_note
         + command_note
         + "Backupy XML każdej dotkniętej encji są w katalogu backups/.\n\n"
         "Bezpośrednio przed zastosowaniem uruchom planner ponownie i porównaj manifest.\n"

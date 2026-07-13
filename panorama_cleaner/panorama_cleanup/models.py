@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 class CleanupError(Exception):
@@ -234,6 +234,7 @@ class RenderedPlan:
     affected_addresses: Set[ScopedName]
     affected_groups: Set[ScopedName]
     affected_rules: Set[RuleKey]
+    rollback_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
