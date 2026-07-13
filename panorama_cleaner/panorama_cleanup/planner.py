@@ -39,6 +39,30 @@ class _ComputedPlan:
     blockers: Dict[str, List[BlockReason]]
 
 
+NAT_TRANSLATION_FIELDS = {
+    "source-translation",
+    "destination-translation",
+    "dynamic-destination-translation",
+}
+
+
+def _is_nat_translation_occurrence(
+    model: ConfigModel, occurrence: UnknownOccurrence
+) -> bool:
+    owner = occurrence.owner_rule
+    if owner is None or owner.policy_type != "nat":
+        return False
+    rule = model.rules.get(owner)
+    if rule is None:
+        return False
+    prefix = rule.xpath.rstrip("/") + "/"
+    if not occurrence.configuration_path.startswith(prefix):
+        return False
+    relative_path = occurrence.configuration_path[len(prefix):]
+    root_field = relative_path.split("/", 1)[0]
+    return root_field in NAT_TRANSLATION_FIELDS
+
+
 def _add_reason(
     blockers: Dict[str, List[BlockReason]],
     tokens: Iterable[TargetToken],
@@ -77,7 +101,7 @@ def plan_cleanup(
     matches: Mapping[str, IPMatch],
     eligible_ips: Iterable[str],
     *,
-    nat_translation_action: str = "block",
+    nat_translation_action: str = "delete-rule",
 ) -> BatchPlan:
     """Create a global plan and atomically block unsafe IPs until convergence."""
 
@@ -738,6 +762,10 @@ def _compute_plan(
     # Exact occurrences in NAT translation and other address-bearing contexts
     # are intentionally not treated like source/destination list members.
     occurrence_causes: List[Tuple[UnknownOccurrence, Set[TargetToken]]] = []
+    # A translation may keep referencing a static group after that group is
+    # safely trimmed. Deleting the NAT rule in that case would break traffic
+    # for non-target members that remain in the pool.
+    group_cleanup_occurrences: Set[UnknownOccurrence] = set()
     for occurrence in model.unknown_occurrences:
         kind, resolved_key, detail = resolve_occurrence(model, occurrence)
         causes: Set[TargetToken] = set()
@@ -751,17 +779,25 @@ def _compute_plan(
                     (occurrence.location, resolved_key), set()
                 )
             )
+            if (
+                causes
+                and resolved_key not in deleted_groups
+                and nat_translation_action == "delete-rule"
+                and _is_nat_translation_occurrence(model, occurrence)
+            ):
+                group_cleanup_occurrences.add(occurrence)
         if causes:
             occurrence_causes.append((occurrence, causes))
 
     occurrence_removal_causes: Dict[UnknownOccurrence, Set[TargetToken]] = {}
     if nat_translation_action == "delete-rule":
         for occurrence, causes in occurrence_causes:
+            if occurrence in group_cleanup_occurrences:
+                continue
             owner_rule = occurrence.owner_rule
             if (
                 owner_rule is not None
-                and owner_rule.policy_type == "nat"
-                and "translation" in occurrence.configuration_path
+                and _is_nat_translation_occurrence(model, occurrence)
             ):
                 occurrence_removal_causes[occurrence] = set(causes)
                 deleted_rules.add(owner_rule)
@@ -833,11 +869,11 @@ def _compute_plan(
             if occurrence.owner_rule is not None:
                 rule_causes.setdefault(occurrence.owner_rule, set()).update(causes)
             continue
+        if occurrence in group_cleanup_occurrences:
+            continue
         code = (
             "NAT_TRANSLATION_REFERENCE"
-            if occurrence.owner_rule is not None
-            and occurrence.owner_rule.policy_type == "nat"
-            and "translation" in occurrence.configuration_path
+            if _is_nat_translation_occurrence(model, occurrence)
             else "UNSUPPORTED_REFERENCE"
         )
         _add_reason(

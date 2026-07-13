@@ -28,7 +28,7 @@ from .models import (
 
 SHARED = "shared"
 RULEBASES = ("pre-rulebase", "post-rulebase")
-POLICY_TYPES = ("security", "nat")
+POLICY_TYPES = ("security", "nat", "application-override")
 VOLATILE_ATTRIBUTES = {"admin", "dirtyId", "time", "last-modified"}
 FREE_TEXT_TAGS = {"description", "audit-comment", "comments"}
 ADDRESS_MEMBER_CONTAINERS = {

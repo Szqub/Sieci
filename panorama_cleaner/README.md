@@ -18,7 +18,7 @@ zmienia konfiguracji i nigdy nie generuje `commit`. Dla całej listy IP:
 5. lokalnie rozpoznaje prawdziwe nazwy obiektów po dokładnej wartości IP;
 6. analizuje `shared`, wszystkie widoczne device groups, dziedziczenie,
    statyczne/zagnieżdżone grupy, override i globalną kolejność precedence oraz
-   Security i NAT w pre/post-rulebase;
+   Security, NAT i Application Override w pre/post-rulebase;
 7. liczy jeden wsadowy plan, więc nigdy nie pozostawia pustego `source`,
    `destination` ani dotkniętej statycznej grupy;
 8. zapisuje pełny XML każdej zmienianej lub usuwanej encji, rollback, raporty
@@ -30,11 +30,17 @@ zależnościami, ale nigdy automatycznie usuwane. Szerszy literal w polityce lub
 puli NAT blokuje całe IP. Obiektów FQDN skrypt nie przypisuje do IP na podstawie
 chwilowego DNS — raportuje tę granicę jawnie, ale samo istnienie niezwiązanego
 FQDN nie blokuje usunięcia nazwanego address object. Referencje poza obsługiwanym
-Security/NAT source/destination, zanegowane pola, cykle grup, niebezpieczny
-fallback override i możliwe członkostwo w dynamic address group blokują całe
-IP do ręcznego review. Pola translacji NAT domyślnie blokują;
-całą regułę NAT można przeznaczyć do usunięcia wyłącznie przez jawne
-`--nat-translation delete-rule`.
+Security/NAT/Application Override source/destination, zanegowane pola, cykle
+grup, niebezpieczny fallback override i możliwe członkostwo w dynamic address
+group blokują całe IP do ręcznego review. Bezpośrednia dokładna referencja w
+polu translacji NAT domyślnie przeznacza całą regułę NAT do usunięcia, ponieważ
+pozostawienie reguły bez wymaganej translacji byłoby niebezpieczne. To samo
+dotyczy referencji do grupy, która po czyszczeniu stałaby się pusta i zostanie
+usunięta. Jeżeli translacja wskazuje grupę pozostającą niepustą, skrypt usuwa
+z niej target, ale zachowuje regułę NAT dla pozostałych członków. Zachowawczy
+tryb `--nat-translation block` zamiast tego wymusza manual review. Szersze
+pule, zakresy i podsieci translacji nadal blokują target i nie są automatycznie
+modyfikowane.
 
 Ważna granica zakresu: plan dotyczy zależności nazwanych obiektów widocznych w
 running config. Operacyjne rejestracje IP→tag dla DAG, rozwiązania FQDN, runtime

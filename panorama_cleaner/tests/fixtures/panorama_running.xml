@@ -40,6 +40,12 @@
           <entry name="NAT-TRANS"><source><member>any</member></source><destination><member>any</member></destination><service>any</service><destination-translation><translated-address>TRANS_TARGET</translated-address></destination-translation></entry>
         </rules>
       </nat>
+      <application-override>
+        <rules>
+          <entry name="APP-MIX"><from><member>any</member></from><source><member>TARGET_A</member><member>KEEP</member></source><to><member>any</member></to><destination><member>any</member></destination><application>custom-app</application><protocol>tcp</protocol><port>443</port></entry>
+          <entry name="APP-B-ONLY"><from><member>any</member></from><source><member>any</member></source><to><member>any</member></to><destination><member>TARGET_B</member></destination><application>custom-app</application><protocol>tcp</protocol><port>443</port></entry>
+        </rules>
+      </application-override>
       <pbf>
         <rules>
           <entry name="PBF-UNSUPPORTED"><source><member>UNSUPPORTED_TARGET</member></source><destination><member>any</member></destination></entry>

@@ -66,7 +66,7 @@ class PlannerFixtureTests(unittest.TestCase):
         # each test receives an independent model.
         self.model = parse_config(ET.fromstring(ET.tostring(self.config)))
 
-    def plan_for(self, *ips: str, nat_translation: str = "block"):
+    def plan_for(self, *ips: str, nat_translation: str = "delete-rule"):
         matches = match_ip_objects(self.model, ips)
         plan = plan_cleanup(
             self.model,
@@ -89,6 +89,10 @@ class PlannerFixtureTests(unittest.TestCase):
         )
         self.assertIn(
             'delete shared pre-rulebase nat rules "NAT-MIX" source "TARGET_A"',
+            commands,
+        )
+        self.assertIn(
+            'delete shared pre-rulebase application-override rules "APP-MIX" source "TARGET_A"',
             commands,
         )
         self.assertIn(
@@ -119,17 +123,24 @@ class PlannerFixtureTests(unittest.TestCase):
             [record.command for record in second.commands],
         )
 
-    def test_security_and_nat_singleton_fields_delete_whole_rules(self) -> None:
+    def test_supported_policy_singleton_fields_delete_whole_rules(self) -> None:
         _, plan, rendered = self.plan_for("10.0.0.2")
         commands = {record.command for record in rendered.commands}
         self.assertIn(
             'delete shared pre-rulebase security rules "SEC-B-ONLY"', commands
         )
         self.assertIn('delete shared pre-rulebase nat rules "NAT-B-ONLY"', commands)
+        self.assertIn(
+            'delete shared pre-rulebase application-override rules "APP-B-ONLY"',
+            commands,
+        )
         self.assertFalse(
             any('SEC-B-ONLY" destination' in command for command in commands)
         )
         self.assertFalse(any('NAT-B-ONLY" source' in command for command in commands))
+        self.assertFalse(
+            any('APP-B-ONLY" destination' in command for command in commands)
+        )
 
     def test_deleted_group_order_is_parent_before_child_and_object_last(self) -> None:
         _, _, rendered = self.plan_for("10.0.0.1")
@@ -140,8 +151,22 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertLess(outer, inner)
         self.assertLess(inner, address)
 
-    def test_nat_translation_blocks_by_default(self) -> None:
+    def test_nat_translation_deletes_owner_rule_by_default(self) -> None:
         _, plan, rendered = self.plan_for("203.0.113.10")
+        self.assertNotIn("203.0.113.10", plan.blocked_ips)
+        commands = {record.command for record in rendered.commands}
+        self.assertIn('delete shared pre-rulebase nat rules "NAT-TRANS"', commands)
+        self.assertIn('delete shared address "TRANS_TARGET"', commands)
+        self.assertIn(
+            'set shared pre-rulebase nat rules "NAT-TRANS" '
+            'destination-translation translated-address "TRANS_TARGET"',
+            rendered.rollback_commands,
+        )
+
+    def test_nat_translation_can_be_blocked_explicitly(self) -> None:
+        _, plan, rendered = self.plan_for(
+            "203.0.113.10", nat_translation="block"
+        )
         self.assertIn("203.0.113.10", plan.blocked_ips)
         self.assertEqual([], rendered.commands)
         self.assertIn(
@@ -149,14 +174,85 @@ class PlannerFixtureTests(unittest.TestCase):
             {reason.code for reason in plan.blocked_ips["203.0.113.10"]},
         )
 
-    def test_nat_translation_can_delete_rule_explicitly(self) -> None:
-        _, plan, rendered = self.plan_for(
-            "203.0.113.10", nat_translation="delete-rule"
+    def test_nat_source_destination_and_translation_are_cleaned_atomically(self) -> None:
+        config = ET.fromstring(
+            """
+            <config><shared>
+              <address>
+                <entry name="TARGET"><ip-netmask>198.51.100.10/32</ip-netmask></entry>
+                <entry name="KEEP"><ip-netmask>198.51.100.20/32</ip-netmask></entry>
+              </address>
+              <pre-rulebase><nat><rules>
+                <entry name="NAT-MIX">
+                  <source><member>TARGET</member><member>KEEP</member></source>
+                  <destination><member>any</member></destination>
+                </entry>
+                <entry name="NAT-ONLY">
+                  <source><member>any</member></source>
+                  <destination><member>TARGET</member></destination>
+                </entry>
+                <entry name="NAT-TRANSLATION">
+                  <source><member>any</member></source>
+                  <destination><member>any</member></destination>
+                  <destination-translation>
+                    <translated-address>TARGET</translated-address>
+                  </destination-translation>
+                </entry>
+              </rules></nat></pre-rulebase>
+            </shared></config>
+            """
         )
-        self.assertNotIn("203.0.113.10", plan.blocked_ips)
-        commands = {record.command for record in rendered.commands}
-        self.assertIn('delete shared pre-rulebase nat rules "NAT-TRANS"', commands)
-        self.assertIn('delete shared address "TRANS_TARGET"', commands)
+        model = parse_config(config)
+        matches = match_ip_objects(model, ["198.51.100.10"])
+        plan = plan_cleanup(model, matches, ["198.51.100.10"])
+        rendered = render_plan(model, plan)
+
+        self.assertEqual({}, plan.blocked_ips)
+        self.assertEqual(
+            {
+                'delete shared pre-rulebase nat rules "NAT-MIX" source "TARGET"',
+                'delete shared pre-rulebase nat rules "NAT-ONLY"',
+                'delete shared pre-rulebase nat rules "NAT-TRANSLATION"',
+                'delete shared address "TARGET"',
+            },
+            {record.command for record in rendered.commands},
+        )
+        self.assertNotIn(
+            'delete shared pre-rulebase nat rules "NAT-TRANSLATION" '
+            'destination-translation translated-address "TARGET"',
+            {record.command for record in rendered.commands},
+        )
+
+    def test_translation_word_in_rule_name_does_not_trigger_nat_rule_deletion(self) -> None:
+        config = ET.fromstring(
+            """
+            <config><shared>
+              <address><entry name="TARGET">
+                <ip-netmask>198.51.100.10/32</ip-netmask>
+              </entry></address>
+              <pre-rulebase><nat><rules>
+                <entry name="contains-translation-word">
+                  <source><member>any</member></source>
+                  <destination><member>any</member></destination>
+                  <future-field><addresses><member>TARGET</member></addresses></future-field>
+                </entry>
+              </rules></nat></pre-rulebase>
+            </shared></config>
+            """
+        )
+        model = parse_config(config)
+        matches = match_ip_objects(model, ["198.51.100.10"])
+        plan = plan_cleanup(model, matches, ["198.51.100.10"])
+
+        self.assertEqual([], render_plan(model, plan).commands)
+        self.assertIn(
+            "UNSUPPORTED_REFERENCE",
+            {reason.code for reason in plan.blocked_ips["198.51.100.10"]},
+        )
+        self.assertNotIn(
+            "NAT_TRANSLATION_REFERENCE",
+            {reason.code for reason in plan.blocked_ips["198.51.100.10"]},
+        )
 
     def test_negated_security_field_blocks_atomically(self) -> None:
         _, plan, rendered = self.plan_for("203.0.113.11")
@@ -433,6 +529,63 @@ class DirectLiteralAndQuotingTests(unittest.TestCase):
             [record.command for record in rendered.commands],
         )
 
+    def test_application_override_direct_literal_is_removed_or_deletes_rule(self) -> None:
+        config = ET.fromstring(
+            """
+            <config><shared>
+              <pre-rulebase><application-override><rules>
+                <entry name="APP-MIX">
+                  <from><member>any</member></from>
+                  <source><member>10.10.10.10</member><member>10.10.10.20</member></source>
+                  <to><member>any</member></to>
+                  <destination><member>any</member></destination>
+                  <application>custom-app</application><protocol>tcp</protocol><port>443</port>
+                </entry>
+              </rules></application-override></pre-rulebase>
+            </shared>
+            <devices><entry name="localhost.localdomain"><device-group>
+              <entry name="DG-APP"><post-rulebase><application-override><rules>
+                  <entry name="APP-ONLY">
+                    <from><member>any</member></from><source><member>any</member></source>
+                    <to><member>any</member></to><destination><member>10.10.10.10</member></destination>
+                    <application>custom-app</application><protocol>tcp</protocol><port>8443</port>
+                  </entry>
+              </rules></application-override></post-rulebase></entry>
+            </device-group></entry></devices></config>
+            """
+        )
+        model = parse_config(config)
+        matches = match_ip_objects(model, ["10.10.10.10"])
+        plan = plan_cleanup(model, matches, ["10.10.10.10"])
+        rendered = render_plan(model, plan)
+
+        self.assertEqual({}, plan.blocked_ips)
+        self.assertEqual((), matches["10.10.10.10"].exact_objects)
+        self.assertEqual(
+            {
+                'delete shared pre-rulebase application-override rules "APP-MIX" source "10.10.10.10"',
+                'delete device-group "DG-APP" post-rulebase application-override rules "APP-ONLY"',
+            },
+            {record.command for record in rendered.commands},
+        )
+        self.assertEqual(
+            {
+                RuleKey("shared", "pre-rulebase", "application-override", "APP-MIX"),
+                RuleKey("DG-APP", "post-rulebase", "application-override", "APP-ONLY"),
+            },
+            rendered.affected_rules,
+        )
+        self.assertIn(
+            'set shared pre-rulebase application-override rules "APP-MIX" source "10.10.10.10"',
+            rendered.rollback_commands,
+        )
+        self.assertFalse(
+            any(
+                occurrence.value == "10.10.10.10"
+                for occurrence in model.unknown_occurrences
+            )
+        )
+
     def test_cli_quoting_handles_spaces_quotes_and_backslashes(self) -> None:
         self.assertEqual('"Name with spaces"', quote_cli("Name with spaces"))
         self.assertEqual('"a\\"b\\\\c"', quote_cli('a"b\\c'))
@@ -593,7 +746,7 @@ address-secret-second</description>
         self.assertTrue(any("NET" in reason.message for reason in reasons))
         self.assertTrue(any("POOL" in reason.message for reason in reasons))
 
-    def test_retained_group_used_by_nat_translation_is_a_dependency(self) -> None:
+    def test_retained_group_in_nat_translation_is_cleaned_without_rule_deletion(self) -> None:
         config = ET.fromstring(
             """
             <config><shared>
@@ -616,22 +769,26 @@ address-secret-second</description>
         model = parse_config(config)
         matches = match_ip_objects(model, ["192.0.2.1"])
 
-        blocked = plan_cleanup(model, matches, ["192.0.2.1"])
+        blocked = plan_cleanup(
+            model, matches, ["192.0.2.1"], nat_translation_action="block"
+        )
         self.assertEqual([], render_plan(model, blocked).commands)
         self.assertIn(
             "NAT_TRANSLATION_REFERENCE",
             {reason.code for reason in blocked.blocked_ips["192.0.2.1"]},
         )
 
-        deleting = plan_cleanup(
-            model,
-            matches,
-            ["192.0.2.1"],
-            nat_translation_action="delete-rule",
+        plan = plan_cleanup(model, matches, ["192.0.2.1"])
+        self.assertEqual({}, plan.blocked_ips)
+        commands = {record.command for record in render_plan(model, plan).commands}
+        self.assertEqual(
+            {
+                'delete shared address-group "POOL" static "T"',
+                'delete shared address "T"',
+            },
+            commands,
         )
-        commands = [record.command for record in render_plan(model, deleting).commands]
-        self.assertIn('delete shared pre-rulebase nat rules "N"', commands)
-        self.assertIn('delete shared address-group "POOL" static "T"', commands)
+        self.assertNotIn('delete shared pre-rulebase nat rules "N"', commands)
 
         groups, rules, paths = dependency_inventory(
             model, ScopedName("shared", "T")
@@ -639,6 +796,38 @@ address-secret-second</description>
         self.assertIn(ScopedName("shared", "POOL"), groups)
         self.assertIn(RuleKey("shared", "pre-rulebase", "nat", "N"), rules)
         self.assertTrue(any("translated-address" in path for path in paths))
+
+    def test_deleted_group_in_nat_translation_deletes_owner_rule(self) -> None:
+        config = ET.fromstring(
+            """
+            <config><shared>
+              <address><entry name="T"><ip-netmask>192.0.2.1/32</ip-netmask></entry></address>
+              <address-group><entry name="POOL"><static>
+                <member>T</member>
+              </static></entry></address-group>
+              <pre-rulebase><nat><rules><entry name="N">
+                <source><member>any</member></source><destination><member>any</member></destination>
+                <source-translation><dynamic-ip-and-port><translated-address>
+                  <member>POOL</member>
+                </translated-address></dynamic-ip-and-port></source-translation>
+              </entry></rules></nat></pre-rulebase>
+            </shared></config>
+            """
+        )
+        model = parse_config(config)
+        matches = match_ip_objects(model, ["192.0.2.1"])
+        plan = plan_cleanup(model, matches, ["192.0.2.1"])
+        rendered = render_plan(model, plan)
+
+        self.assertEqual({}, plan.blocked_ips)
+        self.assertEqual(
+            {
+                'delete shared pre-rulebase nat rules "N"',
+                'delete shared address-group "POOL"',
+                'delete shared address "T"',
+            },
+            {record.command for record in rendered.commands},
+        )
 
     def test_nested_group_override_in_inherited_nat_fails_closed(self) -> None:
         config = ET.fromstring(
@@ -1254,6 +1443,13 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         self.assertEqual(PROJECT_DIR / "panorama_host.txt", Path(args.host_file))
         self.assertEqual(PROJECT_DIR / "ip.txt", Path(args.ip_file))
         self.assertEqual(PROJECT_DIR, Path(args.output_dir))
+        self.assertEqual("delete-rule", args.nat_translation)
+        self.assertEqual(
+            "block",
+            build_parser().parse_args(
+                ["--nat-translation", "block"]
+            ).nat_translation,
+        )
 
     def test_xml_api_uses_header_and_exactly_two_snapshot_calls(self) -> None:
         key_response = mock.Mock()
@@ -1347,7 +1543,25 @@ class ArtifactTests(unittest.TestCase):
             self.assertTrue(all(stamp in path.name for path in backups))
             self.assertNotIn("commit", command_text.lower())
             self.assertIn(
+                'delete shared pre-rulebase application-override rules "APP-B-ONLY"',
+                command_text,
+            )
+            self.assertIn(
                 'set shared address "TARGET_B" ip-netmask "10.0.0.2"', rollback
+            )
+            self.assertIn(
+                'set shared pre-rulebase application-override rules "APP-B-ONLY" destination "TARGET_B"',
+                rollback,
+            )
+            app_override_backups = list(
+                (run_dir / "backups" / "policies").glob(
+                    "*/pre-rulebase/application-override/*.xml"
+                )
+            )
+            self.assertEqual(1, len(app_override_backups))
+            self.assertIn(
+                'name="APP-B-ONLY"',
+                app_override_backups[0].read_text(encoding="utf-8"),
             )
             self.assertTrue((run_dir / "raport_krotki.txt").is_file())
             self.assertTrue((run_dir / "raport_szczegolowy.txt").is_file())
