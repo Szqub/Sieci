@@ -208,6 +208,7 @@ def ping_many(
     bypass: bool,
     workers: int,
     timeout_ms: int,
+    error_retries: int = 2,
     sensitive_environment_names: Iterable[str] = (),
 ) -> Dict[str, PingResult]:
     ordered = sorted(set(ips))
@@ -220,12 +221,66 @@ def ping_many(
         raise InputError("--ping-workers musi być w zakresie 1..256.")
     if timeout_ms < 100 or timeout_ms > 60000:
         raise InputError("--ping-timeout-ms musi być w zakresie 100..60000.")
+    if error_retries < 0 or error_retries > 5:
+        raise InputError("--ping-error-retries musi być w zakresie 0..5.")
     excluded_names = {name.casefold() for name in sensitive_environment_names}
     child_environment = {
         key: value
         for key, value in os.environ.items()
         if key.casefold() not in excluded_names
     }
+    results: Dict[str, PingResult] = {}
+    attempts = {ip: 0 for ip in ordered}
+    elapsed = {ip: 0.0 for ip in ordered}
+    pending = ordered
+    for attempt_index in range(error_retries + 1):
+        # Retry only failed processes and reduce local process pressure. This is
+        # especially relevant when Windows launches many ping.exe instances.
+        attempt_workers = workers if attempt_index == 0 else min(workers, 8)
+        attempt_results = _ping_attempt(
+            pending,
+            timeout_ms=timeout_ms,
+            workers=attempt_workers,
+            child_environment=child_environment,
+        )
+        retry_ips: List[str] = []
+        for ip in pending:
+            result = attempt_results[ip]
+            attempts[ip] += 1
+            elapsed[ip] += result.elapsed_seconds
+            retryable = (
+                result.status == PingStatus.ERROR
+                and result.detail != "Program ping nie jest dostępny"
+            )
+            if retryable and attempt_index < error_retries:
+                retry_ips.append(ip)
+                continue
+            detail = result.detail
+            if attempts[ip] > 1:
+                if result.status == PingStatus.ERROR:
+                    detail += f"; błąd utrzymał się po {attempts[ip]} próbach"
+                else:
+                    detail += f"; wynik uzyskano w próbie {attempts[ip]}"
+            results[ip] = PingResult(
+                ip,
+                result.status,
+                detail,
+                elapsed[ip],
+            )
+        pending = retry_ips
+        if not pending:
+            break
+    return {ip: results[ip] for ip in ordered}
+
+
+def _ping_attempt(
+    ips: Iterable[str],
+    *,
+    timeout_ms: int,
+    workers: int,
+    child_environment: Mapping[str, str],
+) -> Dict[str, PingResult]:
+    ordered = sorted(set(ips))
     results: Dict[str, PingResult] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {

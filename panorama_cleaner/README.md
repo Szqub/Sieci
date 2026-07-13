@@ -121,7 +121,11 @@ python .\panorama_cleanup_planner.py `
 Weryfikacją TLS steruje `ssl=yes/no` w `panorama_host.txt`. Dla wewnętrznego
 CA ustaw `ssl=yes` i użyj `--ca-bundle C:\sciezka\ca.pem`. `--insecure`
 pozostaje wyłącznie jako zgodnościowy, niezalecany override. Ochronny ICMP
-można pominąć tylko przez `--no-ping`.
+można pominąć tylko przez `--no-ping`. Lokalny błąd uruchomienia procesu
+`ping` jest domyślnie ponawiany dwa razy (łącznie maksymalnie trzy próby).
+Liczbę ponowień można ustawić w zakresie `0..5` przez
+`--ping-error-retries N`; ponawiane są wyłącznie wyniki `ERROR`, nigdy zwykły
+brak odpowiedzi hosta.
 
 Każdy run tworzy osobny katalog `run_DDMMYY_HH_MM_SS`, między innymi:
 
@@ -135,6 +139,7 @@ raport_szczegolowy.txt
 input_status.csv
 icmp_responded.txt
 icmp_no_response.txt
+icmp_errors.txt
 candidate_comparison.json
 manual_review.json
 manifest.json
@@ -146,12 +151,15 @@ backups/policies/...
 `candidate_comparison.json` zapisuje, że automatyczny diff był pominięty oraz
 że administrator go potwierdził. Ostrzeżenia o obecności DAG/FQDN/EDL/region i
 niewymodelowanych, niezwiązanych nazwach nie tworzą już globalnego draftu;
-targetowane blokady nadal pomijają wyłącznie ryzykowne IP. Niepoprawny wiersz
-wejścia albo błąd uruchomienia ICMP wstrzymuje cały `commands.txt` i tworzy
-`draft_*_BLOCKED_incomplete_input_or_icmp.txt` — skrypt nie publikuje planu dla
-nieoznaczonego podzbioru. Nie wolno stosować żadnego draftu; trzeba usunąć
-blokadę i uruchomić skrypt ponownie. Wszystkie globalne ostrzeżenia są widoczne
-w `apply_readme.txt`, obu raportach, `manual_review.json` i manifeście.
+targetowane blokady nadal pomijają wyłącznie ryzykowne IP. Po wyczerpaniu
+ponowień trwały `ERROR` ICMP pomija tylko konkretne IP i oznacza je jako
+`ZABLOKOWANO_BŁĄD_ICMP`. Pozostały poprawnie sprawdzony podzbiór nadal trafia
+do `commands.txt`, a szczegóły błędu są w `icmp_errors.txt`,
+`input_status.csv`, raportach, `manual_review.json` i manifeście. Niepoprawny
+wiersz wejścia nadal wstrzymuje cały `commands.txt` i tworzy
+`draft_*_BLOCKED_incomplete_input.txt`, ponieważ plan obejmowałby
+nieoznaczony podzbiór wejścia. Nie wolno stosować żadnego draftu; trzeba usunąć
+blokadę i uruchomić skrypt ponownie.
 
 Nazwy backupów zawierają nazwę encji, timestamp `DDMMYY_HH_MM` i stabilny
 skrót zapobiegający kolizjom. Raporty mówią „zaplanowano”, ponieważ żadna
@@ -165,13 +173,15 @@ to również atrybutów takich jak UUID).
 
 Targetowane blokady bezpieczeństwa pomijają konkretne ryzykowne IP i są opisane
 w raportach. Publikację całego `commands.txt` wstrzymuje brak potwierdzenia
-administratora, niepoprawne wejście lub błąd procesu ICMP; te przypadki kończą
-się kodem 3. Po bezpiecznym runie administrator nadal
+administratora albo niepoprawne wejście; te przypadki kończą się kodem 3.
+Trwały błąd procesu ICMP daje kod 2 i pomija wyłącznie wskazane IP. Po
+bezpiecznym runie administrator nadal
 wykonuje `validate full` i ponownie `show config diff`; dopiero potem ręcznie
 decyduje o commit.
 
 Kody wyjścia: `0` — kompletny plan; `2` — plan z warningiem/review/pominiętym
-ICMP; `3` — wejście lub ICMP; `4` — transport/snapshot; `5` — XML/scope;
+IP (w tym trwałym błędem ICMP); `3` — wejście; `4` — transport/snapshot;
+`5` — XML/scope;
 `6` — backup/wyjście; `7` — naruszenie inwariantu.
 
 Testy offline:
