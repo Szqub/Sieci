@@ -228,9 +228,14 @@ def write_run_artifacts(
         if rollback_text:
             rollback_text += "\n"
 
-        commands_published = (
-            not comparison.relevant_different and not normalized_blockers
+        candidate_control_passed = (
+            comparison.automated_check_performed
+            and comparison.relevant_different is False
+        ) or (
+            not comparison.automated_check_performed
+            and comparison.administrator_confirmed
         )
+        commands_published = candidate_control_passed and not normalized_blockers
         runtime_blocker_prefixes = (
             "RUNTIME_DAG_",
             "FQDN_",
@@ -238,8 +243,13 @@ def write_run_artifacts(
             "REGION_",
             "UNMODELED_",
         )
-        if comparison.relevant_different:
+        if (
+            comparison.automated_check_performed
+            and comparison.relevant_different is True
+        ):
             draft_reason = "candidate_drift"
+        elif not candidate_control_passed:
+            draft_reason = "candidate_confirmation"
         elif any(
             blocker.startswith(runtime_blocker_prefixes)
             for blocker in normalized_blockers
@@ -350,6 +360,8 @@ def write_run_artifacts(
             "safety": {
                 "changes_executed": False,
                 "commit_command_generated": False,
+                "candidate_automated_check_performed": comparison.automated_check_performed,
+                "candidate_administrator_confirmed": comparison.administrator_confirmed,
                 "commands_file_expected_on_success": commands_published,
                 "commands_publication_proof": (
                     "commands.txt exists; it is the final atomic write"
@@ -706,7 +718,23 @@ def _apply_readme(
     draft_command_name: str,
     draft_rollback_name: str,
 ) -> str:
-    if comparison.relevant_different:
+    if not comparison.automated_check_performed and comparison.administrator_confirmed:
+        drift = (
+            "Automatyczne porównanie running/candidate było wyłączone. "
+            "Administrator jawnie potwierdził wcześniejsze sprawdzenie diffu "
+            "w Panoramie i zgodę na kontynuowanie. Oba snapshoty pobrano, ale "
+            "plan policzono wyłącznie z running.\n"
+        )
+    elif not comparison.automated_check_performed:
+        drift = (
+            "BLOKADA KRYTYCZNA: nie wykonano automatycznego porównania ani nie "
+            "zapisano potwierdzenia administratora.\n"
+        )
+    elif comparison.relevant_different is None:
+        drift = (
+            "BLOKADA KRYTYCZNA: wynik automatycznego porównania jest niekompletny.\n"
+        )
+    elif comparison.relevant_different:
         drift = (
             "BLOKADA KRYTYCZNA: running i candidate różnią się w obiektach, "
             "device groupach lub rulebase. Plan policzono z running, ale nie "
