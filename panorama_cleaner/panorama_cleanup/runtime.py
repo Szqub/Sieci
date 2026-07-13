@@ -33,6 +33,7 @@ from .panos import parse_api_response
 class HostSettings:
     host: str
     username: str
+    verify_ssl: bool
 
 
 def load_host_settings(path: Path) -> HostSettings:
@@ -46,7 +47,7 @@ def load_host_settings(path: Path) -> HostSettings:
         if "=" not in stripped:
             raise InputError(f"{path}:{line_number}: oczekiwano klucz=wartość.")
         key, value = (part.strip() for part in stripped.split("=", 1))
-        if key not in {"host", "username"}:
+        if key not in {"host", "username", "ssl"}:
             raise InputError(f"{path}:{line_number}: nieznany klucz {key!r}.")
         if not value:
             raise InputError(f"{path}:{line_number}: pusta wartość {key}.")
@@ -56,8 +57,15 @@ def load_host_settings(path: Path) -> HostSettings:
     missing = {"host", "username"} - values.keys()
     if missing:
         raise InputError(f"W {path} brakuje: {', '.join(sorted(missing))}.")
+    ssl_value = values.get("ssl", "yes").casefold()
+    if ssl_value not in {"yes", "no"}:
+        raise InputError(f"W {path} ssl musi mieć wartość yes albo no.")
     host = _normalize_host(values["host"])
-    return HostSettings(host=host, username=values["username"])
+    return HostSettings(
+        host=host,
+        username=values["username"],
+        verify_ssl=ssl_value == "yes",
+    )
 
 
 def _normalize_host(value: str) -> str:
@@ -99,6 +107,28 @@ def obtain_password(environment_name: str) -> str:
     if not password:
         raise InputError("Hasło nie może być puste.")
     return password
+
+
+def confirm_candidate_diff_checked() -> None:
+    """Require an explicit operator assertion before any network activity."""
+
+    print(
+        "UWAGA: automatyczne porównanie running/candidate jest wyłączone.\n"
+        "Administrator musi wcześniej sprawdzić diff bezpośrednio w Panoramie."
+    )
+    try:
+        answer = input(
+            "Potwierdzasz sprawdzenie diffu, brak oczekujących zmian i chcesz "
+            "kontynuować? Wpisz dokładnie TAK: "
+        )
+    except EOFError as exc:
+        raise InputError(
+            "Brak interaktywnego potwierdzenia ręcznej kontroli diffu."
+        ) from exc
+    if answer != "TAK":
+        raise InputError(
+            "Nie potwierdzono ręcznej kontroli running/candidate; przerwano."
+        )
 
 
 def validate_ca_bundle(value: Optional[str]) -> Optional[str]:
@@ -344,8 +374,8 @@ class PanoramaXMLAPI:
             return response.content
         except requests.exceptions.SSLError as exc:
             raise TransportError(
-                "Weryfikacja TLS Panoramy nie powiodła się. Użyj --ca-bundle; "
-                "--insecure tylko po świadomej decyzji."
+                "Weryfikacja TLS Panoramy nie powiodła się. Użyj --ca-bundle "
+                "albo ustaw ssl=no w panorama_host.txt tylko po świadomej decyzji."
             ) from exc
         except requests.RequestException as exc:
             raise TransportError(

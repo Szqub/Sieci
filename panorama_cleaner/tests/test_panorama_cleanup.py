@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -36,6 +37,8 @@ from panorama_cleanup.panos import (
 from panorama_cleanup.planner import dependency_inventory, plan_cleanup
 from panorama_cleanup.render import quote_cli, render_plan
 from panorama_cleanup.runtime import (
+    confirm_candidate_diff_checked,
+    load_host_settings,
     load_ip_rows,
     obtain_password,
     ping_many,
@@ -816,6 +819,107 @@ class DirectLiteralAndQuotingTests(unittest.TestCase):
 
 
 class SnapshotAndRuntimeTests(unittest.TestCase):
+    def test_main_manual_confirmation_publishes_when_other_gates_are_clear(self) -> None:
+        running = ET.fromstring(
+            """
+            <config version="10.2.16-h4"><shared>
+              <address><entry name="TARGET">
+                <ip-netmask>10.0.0.1/32</ip-netmask>
+              </entry></address>
+              <pre-rulebase><security><rules><entry name="ONLY-RULE">
+                <source><member>TARGET</member></source>
+                <destination><member>any</member></destination>
+              </entry></rules></security></pre-rulebase>
+            </shared><devices><entry name="localhost.localdomain">
+              <device-group/>
+            </entry></devices></config>
+            """
+        )
+
+        class FakeClient:
+            snapshot_call_count = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def authenticate(self, password: str) -> None:
+                self.password_was_supplied = bool(password)
+
+            def fetch_config(self, action: str):
+                self.snapshot_call_count += 1
+                snapshot = ET.fromstring(ET.tostring(running))
+                if action == "get":
+                    snapshot.find("./shared/address/entry/ip-netmask").text = (
+                        "203.0.113.250/32"
+                    )
+                return snapshot
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            host_file = base / "panorama_host.txt"
+            ip_file = base / "ip.txt"
+            client = FakeClient()
+            host_file.write_text(
+                "host=192.0.2.10\nusername=readonly\nssl=yes\n",
+                encoding="utf-8",
+            )
+            ip_file.write_text("10.0.0.1\n", encoding="utf-8")
+            with mock.patch(
+                "panorama_cleanup_planner.PanoramaXMLAPI",
+                return_value=client,
+            ), mock.patch(
+                "panorama_cleanup_planner.obtain_password", return_value="secret"
+            ), mock.patch("builtins.input", return_value="TAK"):
+                code = main(
+                    [
+                        "--host-file",
+                        str(host_file),
+                        "--ip-file",
+                        str(ip_file),
+                        "--output-dir",
+                        str(base),
+                        "--no-ping",
+                    ]
+                )
+            self.assertEqual(0, code)
+            self.assertEqual(2, client.snapshot_call_count)
+            run_dir = next(base.glob("run_*"))
+            self.assertTrue((run_dir / "commands.txt").is_file())
+            self.assertFalse(any(run_dir.glob("draft_commands_BLOCKED_*.txt")))
+
+    def test_main_stops_before_icmp_and_api_without_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            host_file = base / "panorama_host.txt"
+            ip_file = base / "ip.txt"
+            host_file.write_text(
+                "host=192.0.2.10\nusername=readonly\nssl=yes\n",
+                encoding="utf-8",
+            )
+            ip_file.write_text("10.0.0.1\n", encoding="utf-8")
+            with mock.patch("builtins.input", return_value="NIE"), mock.patch(
+                "panorama_cleanup_planner.ping_many"
+            ) as ping, mock.patch(
+                "panorama_cleanup_planner.PanoramaXMLAPI"
+            ) as api:
+                code = main(
+                    [
+                        "--host-file",
+                        str(host_file),
+                        "--ip-file",
+                        str(ip_file),
+                        "--output-dir",
+                        str(base),
+                    ]
+                )
+            self.assertEqual(3, code)
+            ping.assert_not_called()
+            api.assert_not_called()
+            self.assertEqual([], list(base.glob("run_*")))
+
     def test_main_withholds_commands_for_runtime_dependency_gate(self) -> None:
         running = ET.parse(FIXTURE).getroot()
 
@@ -833,21 +937,28 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
 
             def fetch_config(self, action: str):
                 self.snapshot_call_count += 1
-                return ET.fromstring(ET.tostring(running))
+                snapshot = ET.fromstring(ET.tostring(running))
+                if action == "get":
+                    snapshot.find("./shared/address/entry/ip-netmask").text = (
+                        "203.0.113.250/32"
+                    )
+                return snapshot
 
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             host_file = base / "panorama_host.txt"
             ip_file = base / "ip.txt"
             host_file.write_text(
-                "host=192.0.2.10\nusername=readonly\n", encoding="utf-8"
+                "host=192.0.2.10\nusername=readonly\nssl=no\n", encoding="utf-8"
             )
             ip_file.write_text("10.0.0.1\n", encoding="utf-8")
             with mock.patch(
                 "panorama_cleanup_planner.PanoramaXMLAPI",
                 return_value=FakeClient(),
-            ), mock.patch(
+            ) as api_factory, mock.patch(
                 "panorama_cleanup_planner.obtain_password", return_value="secret"
+            ), mock.patch(
+                "builtins.input", return_value="TAK"
             ):
                 code = main(
                     [
@@ -861,11 +972,22 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(2, code)
+            self.assertFalse(api_factory.call_args.kwargs["verify"])
             run_dir = next(base.glob("run_*"))
             self.assertFalse((run_dir / "commands.txt").exists())
             self.assertTrue(
                 (run_dir / "draft_commands_BLOCKED_runtime_dependencies.txt").is_file()
             )
+            self.assertFalse(
+                (run_dir / "draft_commands_BLOCKED_candidate_drift.txt").exists()
+            )
+            candidate_control = json.loads(
+                (run_dir / "candidate_comparison.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(candidate_control["automated_check_performed"])
+            self.assertTrue(candidate_control["administrator_confirmed"])
+            self.assertIsNone(candidate_control["different"])
+            self.assertIsNone(candidate_control["relevant_different"])
 
     def test_config_completeness_gates_runtime_address_namespaces(self) -> None:
         config = ET.fromstring(
@@ -968,6 +1090,37 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaises(InputError):
                 validate_ca_bundle(str(Path(temp) / "missing.pem"))
+
+    def test_host_settings_support_ssl_yes_no_and_safe_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "panorama_host.txt"
+            path.write_text(
+                "host=192.0.2.10\nusername=admin\nssl=no\n", encoding="utf-8"
+            )
+            self.assertFalse(load_host_settings(path).verify_ssl)
+            path.write_text(
+                "host=192.0.2.10\nusername=admin\nssl=yes\n", encoding="utf-8"
+            )
+            self.assertTrue(load_host_settings(path).verify_ssl)
+            path.write_text(
+                "host=192.0.2.10\nusername=admin\n", encoding="utf-8"
+            )
+            self.assertTrue(load_host_settings(path).verify_ssl)
+            path.write_text(
+                "host=192.0.2.10\nusername=admin\nssl=maybe\n", encoding="utf-8"
+            )
+            with self.assertRaises(InputError):
+                load_host_settings(path)
+
+    def test_candidate_diff_confirmation_requires_exact_tak(self) -> None:
+        with mock.patch("builtins.input", return_value="TAK"):
+            confirm_candidate_diff_checked()
+        for answer in ("tak", "yes", "", "NIE", " TAK ", "TAK "):
+            with self.subTest(answer=answer), mock.patch(
+                "builtins.input", return_value=answer
+            ):
+                with self.assertRaises(InputError):
+                    confirm_candidate_diff_checked()
 
     def test_missing_password_tty_is_reported_as_input_error(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
@@ -1078,7 +1231,16 @@ class ArtifactTests(unittest.TestCase):
                     "10.0.0.2", PingStatus.NO_REPLY, "brak", 0.01
                 )
             }
-            comparison = compare_configs(self.config, self.config)
+            comparison = CandidateComparison(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                automated_check_performed=False,
+                administrator_confirmed=True,
+            )
             write_run_artifacts(
                 run_dir=run_dir,
                 file_stamp=stamp,
@@ -1108,6 +1270,10 @@ class ArtifactTests(unittest.TestCase):
             self.assertTrue((run_dir / "raport_krotki.txt").is_file())
             self.assertTrue((run_dir / "raport_szczegolowy.txt").is_file())
             self.assertTrue((run_dir / "manifest.json").is_file())
+            self.assertIn(
+                "Administrator jawnie potwierdził",
+                (run_dir / "apply_readme.txt").read_text(encoding="utf-8"),
+            )
             short_text = (run_dir / "raport_krotki.txt").read_text(encoding="utf-8")
             self.assertIn("Znaleziono w grupie:", short_text)
             self.assertIn("Znaleziono w polityce:", short_text)
@@ -1256,6 +1422,44 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn(
                 "BLOKADA KRYTYCZNA",
                 (run_dir / "apply_readme.txt").read_text(encoding="utf-8"),
+            )
+
+    def test_missing_manual_confirmation_withholds_applicable_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir, stamp = create_run_directory(Path(temp))
+            write_run_artifacts(
+                run_dir=run_dir,
+                file_stamp=stamp,
+                model=self.model,
+                plan=self.plan,
+                rendered=self.rendered,
+                rows=[InputRow(1, "10.0.0.2", "10.0.0.2", True)],
+                pings={
+                    "10.0.0.2": PingResult(
+                        "10.0.0.2", PingStatus.NO_REPLY, "brak", 0.01
+                    )
+                },
+                matches=self.matches,
+                comparison=CandidateComparison(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    automated_check_performed=False,
+                    administrator_confirmed=False,
+                ),
+                host="192.0.2.10",
+                username="admin",
+                system_info={},
+                sanitized_arguments={},
+                metrics=RunMetrics(),
+                started_utc=datetime.now(timezone.utc),
+            )
+            self.assertFalse((run_dir / "commands.txt").exists())
+            self.assertTrue(
+                (run_dir / "draft_commands_BLOCKED_candidate_confirmation.txt").is_file()
             )
 
     def test_partial_input_blocker_withholds_commands_and_surfaces_warnings(self) -> None:

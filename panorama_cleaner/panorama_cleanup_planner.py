@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from panorama_cleanup.artifacts import create_run_directory, write_run_artifacts
 from panorama_cleanup.models import (
+    CandidateComparison,
     ConfigModel,
     InputError,
     OutputError,
@@ -23,7 +24,6 @@ from panorama_cleanup.models import (
     UnsafePlanError,
 )
 from panorama_cleanup.panos import (
-    compare_configs,
     is_supported_address_literal,
     match_ip_objects,
     parse_config,
@@ -33,6 +33,7 @@ from panorama_cleanup.planner import plan_cleanup
 from panorama_cleanup.render import render_plan
 from panorama_cleanup.runtime import (
     PanoramaXMLAPI,
+    confirm_candidate_diff_checked,
     load_host_settings,
     load_ip_rows,
     obtain_password,
@@ -131,16 +132,17 @@ def config_completeness_findings(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Analizuje running config Panoramy, porównuje candidate i generuje "
-            "backupy, raporty oraz komendy CLI. Nie wykonuje zmian ani commit."
+            "Po ręcznym potwierdzeniu diffu pobiera running i candidate, analizuje "
+            "running oraz generuje backupy, raporty i komendy CLI. Nie wykonuje "
+            "zmian ani commit."
         )
     )
     parser.add_argument(
         "--host-file",
         default=str(PROJECT_DIR / "panorama_host.txt"),
         help=(
-            "Plik host=... i username=... (domyślnie panorama_host.txt "
-            "obok skryptu)."
+            "Plik host=..., username=... i opcjonalnie ssl=yes/no "
+            "(domyślnie panorama_host.txt obok skryptu)."
         ),
     )
     parser.add_argument(
@@ -180,7 +182,10 @@ def build_parser() -> argparse.ArgumentParser:
     tls.add_argument(
         "--insecure",
         action="store_true",
-        help="Jawnie wyłącza weryfikację TLS (niezalecane).",
+        help=(
+            "Zgodnościowy override wyłączający weryfikację TLS; preferowane "
+            "jest ssl=no w panorama_host.txt (niezalecane)."
+        ),
     )
     parser.add_argument(
         "--nat-translation",
@@ -204,12 +209,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         ca_bundle = validate_ca_bundle(args.ca_bundle)
         host_settings = load_host_settings(Path(args.host_file))
+        if not host_settings.verify_ssl and ca_bundle:
+            raise InputError(
+                "ssl=no w panorama_host.txt jest sprzeczne z --ca-bundle. "
+                "Ustaw ssl=yes, aby użyć wskazanego CA."
+            )
+        ssl_verification_disabled = args.insecure or not host_settings.verify_ssl
+        verify: Any = False if ssl_verification_disabled else (ca_bundle or True)
         rows = load_ip_rows(Path(args.ip_file))
         valid_ips = unique_valid_ips(rows)
         if not valid_ips:
             raise InputError("Brak poprawnych adresów IP do analizy.")
         metrics.input_row_count = len(rows)
         metrics.unique_ip_count = len(valid_ips)
+        confirm_candidate_diff_checked()
 
         print(f"Załadowano {len(rows)} pozycji, {len(valid_ips)} unikalnych poprawnych IP.")
         print("Uruchamianie ochronnego ICMP..." if not args.no_ping else "ICMP pominięty jawnie (--no-ping).")
@@ -254,9 +267,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
         password = obtain_password(args.password_env)
-        verify: Any = False if args.insecure else (ca_bundle or True)
-        if args.insecure:
-            print("UWAGA: weryfikacja TLS została jawnie wyłączona.", file=sys.stderr)
+        if ssl_verification_disabled:
+            print(
+                "UWAGA: HTTPS pozostaje włączone, ale weryfikacja certyfikatu "
+                "TLS została wyłączona.",
+                file=sys.stderr,
+            )
 
         print(f"Pobieranie running i candidate z Panoramy {host_settings.host}...")
         phase = time.perf_counter()
@@ -270,7 +286,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # Do not retain the password longer than needed by this scope.
                 password = ""
                 running_config = client.fetch_config("show")  # running/active
-                candidate_config = client.fetch_config("get")  # candidate
+                candidate_config = client.fetch_config("get")  # fetched, not compared
                 metrics.remote_snapshot_command_count = client.snapshot_call_count
         finally:
             password = ""
@@ -281,18 +297,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         metrics.snapshot_seconds = time.perf_counter() - phase
 
-        comparison = compare_configs(running_config, candidate_config)
-        if comparison.relevant_different:
-            print(
-                "BLOKADA: running i candidate różnią się w analizowanym zakresie. "
-                "Plan powstanie z running, ale commands.txt nie zostanie opublikowany.",
-                file=sys.stderr,
-            )
-        elif comparison.different:
-            print(
-                "UWAGA: running i candidate różnią się poza analizowanym zakresem.",
-                file=sys.stderr,
-            )
+        # Candidate is intentionally fetched to preserve the two-snapshot audit
+        # contract, but the operator's explicit confirmation replaces an
+        # automated XML comparison.
+        del candidate_config
+        comparison = CandidateComparison(
+            different=None,
+            full_running_sha256=None,
+            full_candidate_sha256=None,
+            relevant_running_sha256=None,
+            relevant_candidate_sha256=None,
+            relevant_different=None,
+            automated_check_performed=False,
+            administrator_confirmed=True,
+        )
+        print(
+            "Automatyczny diff pominięty zgodnie z trybem pracy; "
+            "zapisano potwierdzenie administratora."
+        )
 
         phase = time.perf_counter()
         model = parse_config(running_config)
@@ -348,7 +370,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "ping_workers": args.ping_workers,
             "ping_timeout_ms": args.ping_timeout_ms,
             "ca_bundle": ca_bundle,
-            "insecure": args.insecure,
+            "ssl_configured": "yes" if host_settings.verify_ssl else "no",
+            "ssl_certificate_verification": not ssl_verification_disabled,
+            "legacy_insecure_override": args.insecure,
+            "candidate_diff_automated_check": False,
+            "candidate_diff_administrator_confirmed": True,
             "nat_translation": args.nat_translation,
         }
         write_run_artifacts(
@@ -376,7 +402,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"grupy: {len(rendered.affected_groups)}, polityki: {len(rendered.affected_rules)}, "
             f"blokady IP: {len(plan.blocked_ips)}."
         )
-        if comparison.relevant_different or publication_blockers:
+        if publication_blockers:
             print("commands.txt wstrzymany przez bramkę bezpieczeństwa.")
 
         if has_invalid or has_ping_error:
@@ -384,7 +410,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         has_skipped = any(result.status == PingStatus.REPLIED for result in pings.values())
         has_review = bool(
             plan.blocked_ips
-            or comparison.different
             or plan.dynamic_group_impacts
             or plan.warnings
             or any(match.containing_objects for match in matches.values())
