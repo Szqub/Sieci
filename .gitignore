@@ -34,9 +34,4 @@ ENV/
 # Project specific
 rules_0hit
 rules_hit
-*.log
-
-# Panorama cleanup local inputs and generated plans
-panorama_host.txt
-ip.txt
-run_*/
+*.log 

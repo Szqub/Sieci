@@ -43,6 +43,7 @@ from panorama_cleanup.runtime import (
 )
 from panorama_cleanup.runtime import PanoramaXMLAPI
 from panorama_cleanup_planner import (
+    PROJECT_DIR,
     build_parser,
     config_completeness_findings,
     main,
@@ -1012,6 +1013,12 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
     def test_legacy_triple_dash_no_ping_alias_is_accepted(self) -> None:
         args = build_parser().parse_args(["---no-ping"])
         self.assertTrue(args.no_ping)
+
+    def test_default_paths_stay_inside_panorama_cleaner(self) -> None:
+        args = build_parser().parse_args([])
+        self.assertEqual(PROJECT_DIR / "panorama_host.txt", Path(args.host_file))
+        self.assertEqual(PROJECT_DIR / "ip.txt", Path(args.ip_file))
+        self.assertEqual(PROJECT_DIR, Path(args.output_dir))
 
     def test_xml_api_uses_header_and_exactly_two_snapshot_calls(self) -> None:
         key_response = mock.Mock()

@@ -42,6 +42,7 @@ from panorama_cleanup.runtime import (
 )
 
 EXPECTED_PAN_OS = "10.2.16-h4"
+PROJECT_DIR = Path(__file__).resolve().parent
 
 
 def config_completeness_findings(
@@ -136,13 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--host-file",
-        default="panorama_host.txt",
-        help="Plik host=... i username=... (domyślnie panorama_host.txt).",
+        default=str(PROJECT_DIR / "panorama_host.txt"),
+        help=(
+            "Plik host=... i username=... (domyślnie panorama_host.txt "
+            "obok skryptu)."
+        ),
     )
     parser.add_argument(
         "--ip-file",
-        default="ip.txt",
-        help="Plik z jednym IPv4/IPv6 na linię (domyślnie ip.txt).",
+        default=str(PROJECT_DIR / "ip.txt"),
+        help="Plik z IPv4/IPv6 (domyślnie ip.txt obok skryptu).",
     )
     parser.add_argument(
         "--password-env",
@@ -154,8 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default=".",
-        help="Katalog nadrzędny dla run_DDMMYY_HH_MM_SS (domyślnie bieżący).",
+        default=str(PROJECT_DIR),
+        help=(
+            "Katalog nadrzędny dla run_DDMMYY_HH_MM_SS "
+            "(domyślnie katalog skryptu)."
+        ),
     )
     parser.add_argument(
         "--no-ping",
