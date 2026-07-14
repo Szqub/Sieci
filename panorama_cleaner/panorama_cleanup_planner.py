@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from panorama_cleanup.artifacts import create_run_directory, write_run_artifacts
+from panorama_cleanup.hitcounts import collect_rule_hit_counts
 from panorama_cleanup.models import (
     CandidateComparison,
     ConfigModel,
@@ -205,6 +206,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     started_perf = time.perf_counter()
     started_utc = datetime.now(timezone.utc)
     metrics = RunMetrics()
+    client: Optional[PanoramaXMLAPI] = None
+    password = ""
 
     try:
         ca_bundle = validate_ca_bundle(args.ca_bundle)
@@ -286,20 +289,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         print(f"Pobieranie running i candidate z Panoramy {host_settings.host}...")
         phase = time.perf_counter()
-        try:
-            with PanoramaXMLAPI(
-                host_settings.host,
-                host_settings.username,
-                verify=verify,
-            ) as client:
-                client.authenticate(password)
-                # Do not retain the password longer than needed by this scope.
-                password = ""
-                running_config = client.fetch_config("show")  # running/active
-                candidate_config = client.fetch_config("get")  # fetched, not compared
-                metrics.remote_snapshot_command_count = client.snapshot_call_count
-        finally:
-            password = ""
+        client = PanoramaXMLAPI(
+            host_settings.host,
+            host_settings.username,
+            verify=verify,
+        )
+        client.authenticate(password)
+        # Do not retain the password after key generation.
+        password = ""
+        running_config = client.fetch_config("show")  # running/active
+        candidate_config = client.fetch_config("get")  # fetched, not compared
+        metrics.remote_snapshot_command_count = client.snapshot_call_count
         system_info = {
             "declared_target_version": EXPECTED_PAN_OS,
             "config_version": running_config.get("version", "unknown"),
@@ -375,6 +375,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metrics.affected_group_count = len(rendered.affected_groups)
         metrics.blocked_ip_count = len(plan.blocked_ips) + ping_error_count
         metrics.generated_command_count = len(rendered.commands)
+
+        phase = time.perf_counter()
+        hit_counts = collect_rule_hit_counts(client, plan.deleted_rules)
+        metrics.hit_count_seconds = time.perf_counter() - phase
+        metrics.remote_operational_command_count = client.operational_call_count
+        metrics.hit_count_rule_count = len(hit_counts)
+        metrics.recent_hit_rule_count = sum(
+            result.status == "RECENT" for result in hit_counts.values()
+        )
+        metrics.no_last_hit_rule_count = sum(
+            result.status == "NEVER" for result in hit_counts.values()
+        )
+        metrics.hit_count_error_count = sum(
+            result.status in {"ERROR", "NOT_FOUND", "INVALID", "NOT_LATEST"}
+            for result in hit_counts.values()
+        )
+        if metrics.recent_hit_rule_count:
+            print(
+                "UWAGA: polityki przeznaczone do usunięcia mają last-hit z "
+                "ostatnich 14 dni. Szczegóły: policies_recent_hits_review.txt. "
+                "Nie wstrzymuje to commands.txt.",
+                file=sys.stderr,
+            )
+        if metrics.hit_count_error_count:
+            print(
+                "UWAGA: części last-hit nie udało się potwierdzić. Szczegóły: "
+                "policies_hit_count_errors.txt. Nie wstrzymuje to commands.txt.",
+                file=sys.stderr,
+            )
+        if metrics.no_last_hit_rule_count:
+            print(
+                "UWAGA: część polityk nie ma last-hit. Bez potwierdzonego "
+                "14-dniowego okna obserwacji wymaga to review; szczegóły: "
+                "policies_no_last_hit_review.txt. Nie wstrzymuje to commands.txt.",
+                file=sys.stderr,
+            )
         metrics.total_seconds = time.perf_counter() - started_perf
 
         run_dir, file_stamp = create_run_directory(Path(args.output_dir).resolve())
@@ -414,6 +450,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             sanitized_arguments=sanitized_arguments,
             metrics=metrics,
             started_utc=started_utc,
+            hit_counts=hit_counts,
             publication_blockers=publication_blockers,
         )
 
@@ -437,6 +474,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             or any(match.containing_objects for match in matches.values())
             or has_skipped
             or has_ping_error
+            or any(result.requires_review for result in hit_counts.values())
         )
         return 2 if has_review else 0
 
@@ -455,6 +493,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except UnsafePlanError as exc:
         print(f"BŁĄD INWARIANTU: {exc}", file=sys.stderr)
         return 7
+    finally:
+        password = ""
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
 
 if __name__ == "__main__":

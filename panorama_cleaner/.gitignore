@@ -3,3 +3,5 @@ __pycache__/
 panorama_host.txt
 ip.txt
 run_*/
+audit_*/
+restore_*/

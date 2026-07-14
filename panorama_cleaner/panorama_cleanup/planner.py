@@ -1050,6 +1050,19 @@ def _dynamic_group_impacts(
     return impacts
 
 
+def dynamic_group_impacts_for_addresses(
+    model: ConfigModel, address_keys: Iterable[ScopedName]
+) -> Dict[ScopedName, Set[ScopedName]]:
+    """Report configured-tag membership in dynamic groups for existing objects."""
+
+    tokens = {
+        TargetToken.address("", key)
+        for key in set(address_keys)
+        if key in model.addresses
+    }
+    return _dynamic_group_impacts(model, tokens)
+
+
 def dependency_inventory(
     model: ConfigModel, address_key: ScopedName
 ) -> Tuple[Set[ScopedName], Set[RuleKey], List[str]]:

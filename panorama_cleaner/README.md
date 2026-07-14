@@ -4,7 +4,11 @@ Samodzielny projekt znajduje się w całości w katalogu `panorama_cleaner/`.
 Przed uruchomieniem wejdź do tego katalogu; wejścia i katalogi wynikowe są
 domyślnie rozwiązywane względem położenia skryptu.
 
-**Entry point:** `panorama_cleanup_planner.py`
+**Entry point planera:** `panorama_cleanup_planner.py`
+
+**Entry point audytu po czyszczeniu:** `panorama_post_cleanup_audit.py`
+
+**Entry point awaryjnego restore per IP:** `panorama_emergency_restore.py`
 
 Narzędzie jest generatorem planu dla Panorama/PAN-OS 10.2.16-h4. Samo nie
 zmienia konfiguracji i nigdy nie generuje `commit`. Dla całej listy IP:
@@ -21,7 +25,9 @@ zmienia konfiguracji i nigdy nie generuje `commit`. Dla całej listy IP:
    Security, NAT i Application Override w pre/post-rulebase;
 7. liczy jeden wsadowy plan, więc nigdy nie pozostawia pustego `source`,
    `destination` ani dotkniętej statycznej grupy;
-8. zapisuje pełny XML każdej zmienianej lub usuwanej encji, rollback, raporty
+8. dla polityk przeznaczonych do pełnego usunięcia pobiera operacyjny
+   `rule-hit-count` i klasyfikuje `last-hit` względem 14 dni;
+9. zapisuje pełny XML każdej zmienianej lub usuwanej encji, rollback, raporty
    i manifest; stosowalny `commands.txt` jest zawsze ostatnim zapisem runu.
 
 Rozpoznawane są hosty `ip-netmask`, singleton `ip-range` i exact
@@ -75,8 +81,11 @@ Konto API musi mieć pełny odczyt konfiguracji `shared` i wszystkich device
 groups objętych czyszczeniem. Skrypt może zagwarantować kompletność wyłącznie
 dla konfiguracji widocznej temu kontu; ograniczony RBAC jest blockerem
 operacyjnym i nie wolno wtedy stosować komend. Skrypt nie odpytuje osobno
-`show system info`, więc poza uwierzytelnieniem wykonuje dokładnie dwa odczyty
-snapshotów konfiguracji.
+`show system info`. Zawsze wykonuje dokładnie dwa odczyty konfiguracji, a
+dodatkowo po jednym szczegółowym operacyjnym `show rule-hit-count ... rules
+rule-name` dla każdej polityki przeznaczonej do pełnego usunięcia. Panorama nie
+zwraca szczegółowego `last-hit-timestamp` dla wielu nazw przez firewallowe
+`rules list`, dlatego odczyty są wykonywane per reguła.
 
 ## Hasło
 
@@ -140,6 +149,11 @@ input_status.csv
 icmp_responded.txt
 icmp_no_response.txt
 icmp_errors.txt
+policy_last_hit_all.csv
+policies_recent_hits_review.txt
+policies_no_last_hit_review.txt
+policies_last_hit_ok.txt
+policies_hit_count_errors.txt
 candidate_comparison.json
 manual_review.json
 manifest.json
@@ -179,10 +193,154 @@ bezpiecznym runie administrator nadal
 wykonuje `validate full` i ponownie `show config diff`; dopiero potem ręcznie
 decyduje o commit.
 
+### Last-hit polityk usuwanych w całości
+
+Odczyt jest wyłącznie pomocniczy i nie analizuje traffic logów. Dotyczy tylko
+reguł, które plan zamierza usunąć w całości; reguły z usuwanym pojedynczym
+członkiem nie są odpytane. `STALE` oznacza potwierdzony `last-hit` starszy niż
+14 dni. `RECENT` (14 dni lub mniej), `NEVER`, `NOT_LATEST`, brak reguły i błąd
+odczytu trafiają do review. `NEVER` nie jest automatycznie uznawany za bezpieczny,
+bo bez czasu utworzenia/resetu licznika nie dowodzi pełnych 14 dni obserwacji.
+Jeśli Panorama zwróci osobne obserwacje z kilku firewalli/VSYS, raport sumuje
+`hit-count`, ale do klasyfikacji używa najnowszego `last-hit` ze wszystkich
+obserwacji. Wystarczy więc jeden świeży hit na dowolnym urządzeniu, aby polityka
+trafiła do `RECENT`.
+
+Błąd lub świeży ruch nie blokuje publikacji: `commands.txt` nadal powstaje,
+skrypt kończy się kodem `2`, a szczegóły trafiają do osobnych raportów.
+Administrator decyduje, czy pominąć daną komendę lub wykonać dodatkową
+weryfikację.
+
 Kody wyjścia: `0` — kompletny plan; `2` — plan z warningiem/review/pominiętym
 IP (w tym trwałym błędem ICMP); `3` — wejście; `4` — transport/snapshot;
 `5` — XML/scope;
 `6` — backup/wyjście; `7` — naruszenie inwariantu.
+
+## Audyt po wykonaniu czyszczenia
+
+`panorama_post_cleanup_audit.py` jest osobnym, wyłącznie odczytowym przebiegiem.
+Nie prosi o potwierdzenie diffu, nie tworzy komend i nie zmienia Panoramy.
+Korzysta z tych samych `panorama_host.txt`, `ip.txt`, ustawień hasła, TLS i ICMP
+co planner. Pobiera dokładnie running (`action=show`) i candidate (`action=get`),
+ale analizuje wyłącznie running; candidate jest pobrany tylko jako drugi snapshot
+i nie jest porównywany.
+
+Audyt ponownie sprawdza wszystkie IP. Adres odpowiadający na ICMP jest traktowany
+jako oczekiwany do pozostawienia, ale raport nadal pokazuje jego dokładne obiekty,
+scope/device group, grupy, reguły Security/NAT/Application Override,
+pre/post-rulebase, pola translacji NAT i XPath. Dla braku odpowiedzi dokładny
+pozostały obiekt, literal IP lub referencja po usuniętej nazwie daje alert.
+Szersza podsieć, zakres albo wildcard zawierający IP jest raportowany osobno jako
+review, a nie jako jednoznacznie pozostawiony obiekt hosta.
+
+Najpełniejszy przebieg wymaga podania katalogu lub `manifest.json` z każdego runu,
+którego komendy zastosowano:
+
+```powershell
+Set-Location .\panorama_cleaner
+python .\panorama_post_cleanup_audit.py `
+  --host-file .\panorama_host.txt `
+  --ip-file .\ip.txt `
+  --output-dir . `
+  --previous-run .\run_140726_09_15_00 `
+  --previous-run .\run_140726_10_30_00
+```
+
+Manifest zawiera powiązanie pierwotnego IP z nazwą i scope usuniętego obiektu.
+Dzięki temu audyt może wykryć pozostawione `OLD_OBJECT` w grupie, polityce lub
+translacji NAT nawet wtedy, gdy definicji `OLD_OBJECT` nie ma już w running.
+Bez `--previous-run` nadal wykrywane są bieżące obiekty i bezpośrednie literały
+IP, ale kompletności referencji po usuniętych nazwach nie da się dowieść;
+audyt zapisze `HISTORIA_NIEPODANA` i zakończy się kodem `2`.
+
+Każdy przebieg tworzy katalog `audit_DDMMYY_HH_MM_SS`:
+
+```text
+audit_summary.txt       # krótki wynik per LP/IP
+audit_detailed.txt      # obiekty, zależności i dokładne ścieżki
+audit_status.csv        # wynik tabelaryczny
+audit_results.json      # pełne dane per IP
+audit_manifest.json     # parametry, snapshoty, warningi i liczniki
+icmp_responded.txt
+icmp_no_response.txt
+icmp_errors.txt
+```
+
+Nie powstają `commands.txt`, rollback ani backupy, ponieważ ten etap niczego nie
+planuje ani nie usuwa. `0` oznacza brak alertów/review i pełną historię nazw;
+`2` oznacza wykrytą pozostałość, wynik do review, błąd ICMP albo brak manifestów;
+pozostałe kody `3`–`6` mają takie samo znaczenie jak w planerze.
+
+Granice snapshotów pozostają takie same: runtime rejestracje DAG, bieżące
+rozwiązania FQDN, runtime contents IP EDL oraz rozwinięcia regionów nie znajdują
+się w running/candidate. Ich obecność jest jawnie raportowana; do semantycznego
+potwierdzenia takich źródeł potrzebny jest osobny odczyt runtime na właściwych
+managed firewallach.
+
+## Awaryjny restore konkretnego IP
+
+`panorama_emergency_restore.py` tworzy pakiet odtworzeniowy na podstawie
+autorytatywnych XML i manifestów runów, których `commands.txt` faktycznie
+zastosowano. Nie wykonuje ICMP, zmian, commit ani push. Przed połączeniem wymaga
+wpisania `TAK`, potwierdzającego ręczne sprawdzenie diffu i pustego candidate.
+Następnie pobiera running oraz candidate, ale analizuje running.
+
+Podawaj runy jawnie — w kolejności nie ma znaczenia, bo decyduje ich
+`started_utc`:
+
+```powershell
+Set-Location .\panorama_cleaner
+python .\panorama_emergency_restore.py 10.0.0.1 `
+  --host-file .\panorama_host.txt `
+  --run .\run_140726_09_15_00 `
+  --run .\run_140726_10_30_00 `
+  --output-dir .
+```
+
+Kilka IP można podać pozycyjnie, wielokrotnym `--ip` albo przez `--ip-file`.
+`--all-runs-applied --runs-dir .` włącza autodiscovery dopiero po jawnym
+potwierdzeniu, że zastosowano każdy znaleziony run. Nie używaj tej opcji, jeżeli
+w katalogu są plany wygenerowane, ale niewklejone.
+
+Generator:
+
+- weryfikuje SHA256 każdego backupu, zgodność `commands.txt` z manifestem,
+  host Panoramy, `devices/entry`, device groups i historyczne dziedziczenie;
+- od wskazanego IP buduje pełny połączony komponent zależności, na przykład
+  `adres A → grupa G → inny usunięty adres B → grupa H → polityka P`;
+- dla encji występującej w kilku runach odtwarza forward historię cleanup i
+  odrzuca nieciągłość mogącą oznaczać zmianę administratora między paczkami;
+- przywraca reguły według pełnej historycznej kolejności i najbliższego
+  istniejącego anchoru; jeżeli pozycji 1:1 nie da się dowieść, zatrzymuje się
+  zamiast przenosić regułę nad lub pod niewłaściwy DROP;
+- akceptuje również znany stan częściowego rollbacku, więc może dokończyć
+  odtwarzanie komponentu bez ponownego dodawania encji już zgodnych z backupem.
+
+Powstaje katalog `restore_IP_DDMMYY_HH_MM_SS`:
+
+```text
+RESTORE_READY                       # obowiązkowy marker kompletnego pakietu
+restore_report.txt                  # co i dlaczego wchodzi do domknięcia
+restore_warnings.txt
+restore_manifest.json               # źródła, SHA256 i dowód publikacji
+restore_bundle.xml                  # pełne XML, w tym UUID
+restore_commands.txt                # szybki wariant set/move CLI
+restore_partial_load_commands.txt   # zalecany wariant XML 1:1
+RESTORE_INSTRUCTIONS.txt
+```
+
+Nie używaj plików komend bez `RESTORE_READY`. Zalecana ścieżka importuje
+`restore_bundle.xml` jako named configuration snapshot i wykonuje zapisane
+`load config partial`: brakujące encje są mergowane z kontenerem nadrzędnym,
+a istniejące znane stany częściowego rollbacku są zastępowane pełną wersją 1:1.
+Po tym zawsze wykonaj `validate full` i `show config diff`; commit i push pozostają
+ręczne. Szybki plik CLI odtwarza pola `set` i pozycję `move`, ale atrybutów
+`entry`, takich jak UUID, nie odtworzy — do tego służy XML.
+
+Ważne: Palo Alto opisuje, że `load config partial` z XPath na Panoramie może
+zablokować selective push dla wszystkich device groups do czasu full commit/full
+push. Przed użyciem XML zaplanuj wpływ na cały candidate i okno zmiany; zobacz
+[KB Palo Alto o partial load na Panoramie](https://knowledgebase.paloaltonetworks.com/KCSArticleDetail?id=kA14u000000CrRyCAK).
 
 Testy offline:
 

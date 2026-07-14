@@ -8,6 +8,7 @@ import ipaddress
 import os
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Union
@@ -387,6 +388,7 @@ class PanoramaXMLAPI:
         self.session.headers.update({"User-Agent": "ByteTech-Panorama-Cleanup/1.0"})
         self._authenticated = False
         self.snapshot_call_count = 0
+        self.operational_call_count = 0
         if verify is False:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -411,6 +413,21 @@ class PanoramaXMLAPI:
         )
         self.snapshot_call_count += 1
         return parse_api_response(payload, expect_config=True)
+
+    def run_op_show(self, command: ET.Element) -> ET.Element:
+        """Execute one authenticated, read-only operational show command."""
+
+        if command.tag != "show":
+            raise ValueError("Dozwolone są wyłącznie operacyjne komendy <show>.")
+        self.operational_call_count += 1
+        payload = self._post(
+            {
+                "type": "op",
+                "cmd": ET.tostring(command, encoding="unicode"),
+            },
+            authenticated=True,
+        )
+        return parse_api_response(payload)
 
     def _post(self, data: Dict[str, str], *, authenticated: bool) -> bytes:
         if authenticated and not self._authenticated:
