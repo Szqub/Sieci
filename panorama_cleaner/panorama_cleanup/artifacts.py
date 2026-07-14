@@ -24,11 +24,13 @@ from .models import (
     PingResult,
     PingStatus,
     RenderedPlan,
+    RuleHitCount,
     RuleKey,
     RunMetrics,
     ScopedName,
     __version__,
 )
+from .hitcounts import hit_count_csv, hit_count_text
 from .planner import dependency_inventories
 
 
@@ -103,6 +105,19 @@ def _backup_entities(
     rendered: RenderedPlan,
 ) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
+    rule_order_by_bucket: Dict[Tuple[str, str, str], List[str]] = {}
+    for rule_key, rule in sorted(
+        model.rules.items(),
+        key=lambda item: (
+            item[0].location,
+            item[0].rulebase,
+            item[0].policy_type,
+            item[1].order_index,
+            item[0].name,
+        ),
+    ):
+        bucket = (rule_key.location, rule_key.rulebase, rule_key.policy_type)
+        rule_order_by_bucket.setdefault(bucket, []).append(rule_key.name)
 
     def save(
         *,
@@ -187,6 +202,9 @@ def _backup_entities(
                 "order_index": rule.order_index,
                 "previous_rule": rule.previous_rule,
                 "next_rule": rule.next_rule,
+                "rule_order": rule_order_by_bucket[
+                    (key.location, key.rulebase, key.policy_type)
+                ],
                 "original_source": list(rule.source_members),
                 "original_destination": list(rule.destination_members),
             },
@@ -211,11 +229,13 @@ def write_run_artifacts(
     sanitized_arguments: Mapping[str, Any],
     metrics: RunMetrics,
     started_utc: datetime,
+    hit_counts: Optional[Mapping[RuleKey, RuleHitCount]] = None,
     publication_blockers: Sequence[str] = (),
 ) -> Path:
     """Write every prerequisite first; publish applicable commands absolutely last."""
 
     try:
+        normalized_hit_counts = hit_counts or {}
         backup_manifest = _backup_entities(run_dir, file_stamp, model, rendered)
         normalized_blockers = tuple(
             sorted({item.strip() for item in publication_blockers if item.strip()})
@@ -285,6 +305,7 @@ def write_run_artifacts(
                 publication_blockers=normalized_blockers,
                 warnings=global_warnings,
                 rollback_warnings=rendered.rollback_warnings,
+                hit_counts=normalized_hit_counts,
                 draft_command_name=draft_command_name,
                 draft_rollback_name=draft_rollback_name,
             ),
@@ -300,6 +321,42 @@ def write_run_artifacts(
         _write_text(
             run_dir / "icmp_errors.txt",
             _ping_report(rows, pings, PingStatus.ERROR),
+        )
+        _write_text(
+            run_dir / "policy_last_hit_all.csv",
+            hit_count_csv(normalized_hit_counts),
+        )
+        _write_text(
+            run_dir / "policies_recent_hits_review.txt",
+            hit_count_text(
+                normalized_hit_counts,
+                {"RECENT"},
+                "POLITYKI USUWANE — LAST-HIT Z OSTATNICH 14 DNI",
+            ),
+        )
+        _write_text(
+            run_dir / "policies_no_last_hit_review.txt",
+            hit_count_text(
+                normalized_hit_counts,
+                {"NEVER"},
+                "POLITYKI USUWANE — BRAK LAST-HIT, WYMAGA WERYFIKACJI",
+            ),
+        )
+        _write_text(
+            run_dir / "policies_last_hit_ok.txt",
+            hit_count_text(
+                normalized_hit_counts,
+                {"STALE"},
+                "POLITYKI USUWANE — LAST-HIT STARSZY NIŻ 14 DNI",
+            ),
+        )
+        _write_text(
+            run_dir / "policies_hit_count_errors.txt",
+            hit_count_text(
+                normalized_hit_counts,
+                {"ERROR", "NOT_FOUND", "INVALID", "NOT_LATEST"},
+                "POLITYKI USUWANE — NIEPEŁNY ODCZYT HIT COUNT",
+            ),
         )
         _write_text(
             run_dir / "raport_krotki.txt",
@@ -346,6 +403,7 @@ def write_run_artifacts(
                 normalized_blockers,
                 global_warnings,
                 rendered.rollback_warnings,
+                normalized_hit_counts,
             ),
         )
 
@@ -365,8 +423,19 @@ def write_run_artifacts(
             "arguments": dict(sanitized_arguments),
             "candidate_comparison": asdict(comparison),
             "metrics": asdict(metrics),
+            "configuration_context": {
+                "device_entry_name": model.device_entry_name,
+                "ancestor_objects_take_precedence": (
+                    model.ancestor_objects_take_precedence
+                ),
+                "device_group_parents": dict(sorted(model.parents.items())),
+            },
             "backups": backup_manifest,
             "commands": [asdict(command) for command in rendered.commands],
+            "rule_hit_counts": [
+                asdict(result)
+                for _, result in sorted(normalized_hit_counts.items())
+            ],
             "rollback_command_count": len(rendered.rollback_commands),
             "rollback_cli_complete": not rendered.rollback_warnings,
             "rollback_warnings": sorted(set(rendered.rollback_warnings)),
@@ -721,6 +790,7 @@ def _manual_review(
     publication_blockers: Sequence[str],
     global_warnings: Sequence[str],
     rollback_warnings: Sequence[str],
+    hit_counts: Mapping[RuleKey, RuleHitCount],
 ) -> Dict[str, Any]:
     invalid = [
         {"lp": row.lp, "value": row.raw, "error": row.error}
@@ -752,6 +822,11 @@ def _manual_review(
             ]
             for group, objects in sorted(plan.dynamic_group_impacts.items())
         },
+        "policy_last_hit_review": [
+            asdict(result)
+            for _, result in sorted(hit_counts.items())
+            if result.requires_review
+        ],
     }
 
 
@@ -778,6 +853,7 @@ def _apply_readme(
     publication_blockers: Sequence[str],
     warnings: Sequence[str],
     rollback_warnings: Sequence[str],
+    hit_counts: Mapping[RuleKey, RuleHitCount],
     draft_command_name: str,
     draft_rollback_name: str,
 ) -> str:
@@ -829,6 +905,26 @@ def _apply_readme(
             "rollback_manual_restore_required.txt. Dla wskazanych encji użyj "
             "pełnego XML z backups/ przez kontrolowany load config partial/XML API.\n"
         )
+    if hit_counts:
+        status_counts: Dict[str, int] = {}
+        for result in hit_counts.values():
+            status_counts[result.status] = status_counts.get(result.status, 0) + 1
+        hit_note = (
+            "Last-hit sprawdzono wyłącznie dla polityk przeznaczonych do pełnego "
+            f"usunięcia ({len(hit_counts)}). Wyniki: "
+            + ", ".join(
+                f"{status}={count}"
+                for status, count in sorted(status_counts.items())
+            )
+            + ". RECENT (<=14 dni), NEVER, NOT_LATEST i błędy wymagają review, "
+            "ale zgodnie z założeniem nie blokują commands.txt. Zobacz pliki "
+            "policies_*hit*.txt oraz policy_last_hit_all.csv.\n"
+        )
+    else:
+        hit_note = (
+            "Brak polityk przeznaczonych do pełnego usunięcia; nie było zapytań "
+            "rule-hit-count.\n"
+        )
     if has_commands and commands_published:
         command_note = "Plik commands.txt zawiera plan zmian.\n"
     elif has_commands:
@@ -864,6 +960,7 @@ def _apply_readme(
         + blockers_note
         + warnings_note
         + rollback_note
+        + hit_note
         + command_note
         + "Backupy XML każdej dotkniętej encji są w katalogu backups/.\n\n"
         "Bezpośrednio przed zastosowaniem uruchom planner ponownie i porównaj manifest.\n"

@@ -108,6 +108,13 @@ python3 Panorama_rules_checker.py
 
 ## 4. Czyszczenie Obiektów (Panorama Object Cleanup)
 
+Aktualny, bezpieczny planner wsadowy, odczytowy audyt po czyszczeniu i generator
+awaryjnego restore per IP znajdują się w katalogu `panorama_cleaner/`. Planner
+sprawdza `last-hit` każdej polityki przeznaczonej do pełnego usunięcia, a restore
+odtwarza pełne domknięcie adresów, grup i polityk wraz z historyczną pozycją
+reguł. Szczegółowe uruchomienie i zasady użycia manifestów opisuje
+`panorama_cleaner/README.md`.
+
 **Skrypt:** `Panorama_object_cleanup.py` (wrapper: `panorama_object_cleaner`)
 
 ### Cel

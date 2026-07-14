@@ -138,6 +138,7 @@ def parse_config(config: ET.Element) -> ConfigModel:
     addresses: Dict[ScopedName, AddressObject] = {}
     static_groups: Dict[ScopedName, StaticGroup] = {}
     dynamic_groups: Dict[ScopedName, DynamicGroup] = {}
+    other_address_definitions: Dict[ScopedName, str] = {}
     rules: Dict[RuleKey, PolicyRule] = {}
     parents: Dict[str, Optional[str]] = {}
     warnings: List[str] = []
@@ -292,6 +293,17 @@ def parse_config(config: ET.Element) -> ConfigModel:
                 skipped_definition_entries.add(id(entry))
                 group_entry_keys[id(entry)] = key
 
+        for entry in scope.findall("./region/entry"):
+            name = entry.get("name")
+            if name:
+                other_address_definitions[ScopedName(location, name)] = "region"
+        for entry in scope.findall("./external-list/entry"):
+            name = entry.get("name")
+            if name and entry.find("./type/ip") is not None:
+                other_address_definitions[
+                    ScopedName(location, name)
+                ] = "ip-external-list"
+
         for rulebase in RULEBASES:
             for policy_type in POLICY_TYPES:
                 rules_container = scope.find(f"./{rulebase}/{policy_type}/rules")
@@ -344,6 +356,7 @@ def parse_config(config: ET.Element) -> ConfigModel:
         addresses=addresses,
         static_groups=static_groups,
         dynamic_groups=dynamic_groups,
+        other_address_definitions=other_address_definitions,
         rules=rules,
         group_references={},
         rule_references={},

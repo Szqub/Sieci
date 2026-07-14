@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
-__version__ = "1.3.0"
+__version__ = "1.5.0"
 
 
 class CleanupError(Exception):
@@ -181,6 +181,7 @@ class ConfigModel:
     addresses: Dict[ScopedName, AddressObject]
     static_groups: Dict[ScopedName, StaticGroup]
     dynamic_groups: Dict[ScopedName, DynamicGroup]
+    other_address_definitions: Dict[ScopedName, str]
     rules: Dict[RuleKey, PolicyRule]
     group_references: Dict[ScopedName, List[ResolvedReference]]
     rule_references: Dict[RuleKey, List[ResolvedReference]]
@@ -256,8 +257,10 @@ class RunMetrics:
     parse_seconds: float = 0.0
     planning_seconds: float = 0.0
     rendering_seconds: float = 0.0
+    hit_count_seconds: float = 0.0
     total_seconds: float = 0.0
     remote_snapshot_command_count: int = 0
+    remote_operational_command_count: int = 0
     input_row_count: int = 0
     unique_ip_count: int = 0
     discovered_object_count: int = 0
@@ -265,3 +268,30 @@ class RunMetrics:
     affected_group_count: int = 0
     blocked_ip_count: int = 0
     generated_command_count: int = 0
+    hit_count_rule_count: int = 0
+    recent_hit_rule_count: int = 0
+    no_last_hit_rule_count: int = 0
+    hit_count_error_count: int = 0
+
+
+@dataclass(frozen=True)
+class RuleHitCount:
+    rule: RuleKey
+    status: str
+    hit_count: Optional[int]
+    last_hit_timestamp: Optional[int]
+    last_hit_utc: Optional[str]
+    age_days: Optional[float]
+    latest: Optional[bool]
+    detail: str = ""
+
+    @property
+    def requires_review(self) -> bool:
+        return self.status in {
+            "RECENT",
+            "NEVER",
+            "ERROR",
+            "NOT_FOUND",
+            "INVALID",
+            "NOT_LATEST",
+        }

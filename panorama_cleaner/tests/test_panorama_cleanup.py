@@ -56,6 +56,21 @@ from panorama_cleanup_planner import (
 FIXTURE = Path(__file__).parent / "fixtures" / "panorama_running.xml"
 
 
+def fake_hit_count_response(command: ET.Element) -> ET.Element:
+    response = ET.Element("response", status="success")
+    result = ET.SubElement(response, "result")
+    hit_root = ET.SubElement(result, "rule-hit-count")
+    rules = ET.SubElement(hit_root, "rules")
+    for requested in command.findall(".//rules/rule-name/entry"):
+        entry = ET.SubElement(
+            rules, "entry", name=requested.get("name") or ""
+        )
+        ET.SubElement(entry, "latest").text = "yes"
+        ET.SubElement(entry, "hit-count").text = "1"
+        ET.SubElement(entry, "last-hit-timestamp").text = "1"
+    return response
+
+
 class PlannerFixtureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1088,6 +1103,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
 
         class FakeClient:
             snapshot_call_count = 0
+            operational_call_count = 0
 
             def __enter__(self):
                 return self
@@ -1106,6 +1122,10 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
                         "203.0.113.250/32"
                     )
                 return snapshot
+
+            def run_op_show(self, command: ET.Element) -> ET.Element:
+                self.operational_call_count += 1
+                return fake_hit_count_response(command)
 
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
@@ -1139,6 +1159,84 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             run_dir = next(base.glob("run_*"))
             self.assertTrue((run_dir / "commands.txt").is_file())
             self.assertFalse(any(run_dir.glob("draft_commands_BLOCKED_*.txt")))
+
+    def test_recent_last_hit_requires_review_but_does_not_block_commands(self) -> None:
+        running = ET.fromstring(
+            """
+            <config version="10.2.16-h4"><shared>
+              <address><entry name="TARGET">
+                <ip-netmask>10.0.0.1/32</ip-netmask>
+              </entry></address>
+              <pre-rulebase><security><rules><entry name="ACTIVE-RULE">
+                <source><member>TARGET</member></source>
+                <destination><member>any</member></destination>
+              </entry></rules></security></pre-rulebase>
+            </shared><devices><entry name="localhost.localdomain">
+              <device-group/>
+            </entry></devices></config>
+            """
+        )
+
+        class FakeClient:
+            snapshot_call_count = 0
+            operational_call_count = 0
+
+            def authenticate(self, password: str) -> None:
+                self.password_was_supplied = bool(password)
+
+            def fetch_config(self, action: str):
+                self.snapshot_call_count += 1
+                return ET.fromstring(ET.tostring(running))
+
+            def run_op_show(self, command: ET.Element) -> ET.Element:
+                self.operational_call_count += 1
+                timestamp = int(datetime.now(timezone.utc).timestamp())
+                return ET.fromstring(
+                    "<response status='success'><result><rule-hit-count>"
+                    "<shared><pre-rulebase><entry name='security'><rules>"
+                    "<entry name='ACTIVE-RULE'><latest>yes</latest>"
+                    "<hit-count>42</hit-count>"
+                    f"<last-hit-timestamp>{timestamp}</last-hit-timestamp>"
+                    "</entry></rules></entry></pre-rulebase></shared>"
+                    "</rule-hit-count></result></response>"
+                )
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            host_file = base / "panorama_host.txt"
+            ip_file = base / "ip.txt"
+            host_file.write_text(
+                "host=192.0.2.10\nusername=readonly\nssl=yes\n",
+                encoding="utf-8",
+            )
+            ip_file.write_text("10.0.0.1\n", encoding="utf-8")
+            with mock.patch(
+                "panorama_cleanup_planner.PanoramaXMLAPI",
+                return_value=FakeClient(),
+            ), mock.patch(
+                "panorama_cleanup_planner.obtain_password", return_value="secret"
+            ), mock.patch("builtins.input", return_value="TAK"):
+                code = main(
+                    [
+                        "--host-file",
+                        str(host_file),
+                        "--ip-file",
+                        str(ip_file),
+                        "--output-dir",
+                        str(base),
+                        "--no-ping",
+                    ]
+                )
+
+            self.assertEqual(2, code)
+            run_dir = next(base.glob("run_*"))
+            self.assertTrue((run_dir / "commands.txt").is_file())
+            self.assertFalse(any(run_dir.glob("draft_commands_BLOCKED_*.txt")))
+            recent_report = (run_dir / "policies_recent_hits_review.txt").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("ACTIVE-RULE", recent_report)
+            self.assertIn("RECENT", recent_report)
 
     def test_main_stops_before_icmp_and_api_without_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1192,6 +1290,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
 
         class FakeClient:
             snapshot_call_count = 0
+            operational_call_count = 0
 
             def __enter__(self):
                 return self
@@ -1205,6 +1304,10 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             def fetch_config(self, action: str):
                 self.snapshot_call_count += 1
                 return ET.fromstring(ET.tostring(running))
+
+            def run_op_show(self, command: ET.Element) -> ET.Element:
+                self.operational_call_count += 1
+                return fake_hit_count_response(command)
 
         ping_results = {
             "10.0.0.1": PingResult(
@@ -1282,6 +1385,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
 
         class FakeClient:
             snapshot_call_count = 0
+            operational_call_count = 0
 
             def __enter__(self):
                 return self
@@ -1300,6 +1404,10 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
                         "203.0.113.250/32"
                     )
                 return snapshot
+
+            def run_op_show(self, command: ET.Element) -> ET.Element:
+                self.operational_call_count += 1
+                return fake_hit_count_response(command)
 
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
