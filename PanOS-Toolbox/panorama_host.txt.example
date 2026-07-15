@@ -1,0 +1,10 @@
+# Nowy format PanOS Toolbox: ssl wybiera protokół, verify_ssl weryfikację certyfikatu.
+host=10.0.0.1
+username=superadmin
+ssl=yes
+verify_ssl=no
+
+# read-only | candidate | commit | push
+# Brak pola oznacza read-only. Wyższy etap nadal wymaga jawnego
+# --enable-api-write albo nietrwałego przełącznika w GUI.
+api_max_stage=read-only

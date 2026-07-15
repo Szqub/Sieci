@@ -1084,7 +1084,7 @@ address-secret-second</description>
 
 
 class SnapshotAndRuntimeTests(unittest.TestCase):
-    def test_main_manual_confirmation_publishes_when_other_gates_are_clear(self) -> None:
+    def test_main_candidate_drift_is_informational_and_publishes(self) -> None:
         running = ET.fromstring(
             """
             <config version="10.2.16-h4"><shared>
@@ -1142,7 +1142,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
                 return_value=client,
             ), mock.patch(
                 "panorama_cleanup_planner.obtain_password", return_value="secret"
-            ), mock.patch("builtins.input", return_value="TAK"):
+            ), mock.patch("builtins.input", side_effect=AssertionError("no prompt")):
                 code = main(
                     [
                         "--host-file",
@@ -1238,7 +1238,30 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             self.assertIn("ACTIVE-RULE", recent_report)
             self.assertIn("RECENT", recent_report)
 
-    def test_main_stops_before_icmp_and_api_without_confirmation(self) -> None:
+    def test_main_requires_no_typed_confirmation(self) -> None:
+        running = ET.fromstring(
+            """
+            <config version="10.2.16-h4"><shared>
+              <address><entry name="TARGET"><ip-netmask>10.0.0.1/32</ip-netmask></entry></address>
+            </shared><devices><entry name="localhost.localdomain"><device-group/></entry></devices></config>
+            """
+        )
+
+        class FakeClient:
+            snapshot_call_count = 0
+            operational_call_count = 0
+
+            def authenticate(self, password: str) -> None:
+                self.authenticated = bool(password)
+
+            def fetch_config(self, action: str) -> ET.Element:
+                self.snapshot_call_count += 1
+                return ET.fromstring(ET.tostring(running))
+
+            def run_op_show(self, command: ET.Element) -> ET.Element:
+                self.operational_call_count += 1
+                return fake_hit_count_response(command)
+
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             host_file = base / "panorama_host.txt"
@@ -1248,10 +1271,13 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             ip_file.write_text("10.0.0.1\n", encoding="utf-8")
-            with mock.patch("builtins.input", return_value="NIE"), mock.patch(
-                "panorama_cleanup_planner.ping_many"
-            ) as ping, mock.patch(
-                "panorama_cleanup_planner.PanoramaXMLAPI"
+            client = FakeClient()
+            with mock.patch(
+                "builtins.input", side_effect=AssertionError("no prompt")
+            ), mock.patch(
+                "panorama_cleanup_planner.obtain_password", return_value="secret"
+            ), mock.patch(
+                "panorama_cleanup_planner.PanoramaXMLAPI", return_value=client
             ) as api:
                 code = main(
                     [
@@ -1261,12 +1287,13 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
                         str(ip_file),
                         "--output-dir",
                         str(base),
+                        "--no-ping",
                     ]
                 )
-            self.assertEqual(3, code)
-            ping.assert_not_called()
-            api.assert_not_called()
-            self.assertEqual([], list(base.glob("run_*")))
+            self.assertEqual(0, code)
+            api.assert_called_once()
+            self.assertEqual(2, client.snapshot_call_count)
+            self.assertTrue(next(base.glob("run_*")).joinpath("commands.txt").is_file())
 
     def test_main_quarantines_persistent_icmp_error_and_publishes_safe_subset(
         self,
@@ -1449,10 +1476,10 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             candidate_control = json.loads(
                 (run_dir / "candidate_comparison.json").read_text(encoding="utf-8")
             )
-            self.assertFalse(candidate_control["automated_check_performed"])
-            self.assertTrue(candidate_control["administrator_confirmed"])
-            self.assertIsNone(candidate_control["different"])
-            self.assertIsNone(candidate_control["relevant_different"])
+            self.assertTrue(candidate_control["automated_check_performed"])
+            self.assertFalse(candidate_control["administrator_confirmed"])
+            self.assertTrue(candidate_control["different"])
+            self.assertTrue(candidate_control["relevant_different"])
             manifest = json.loads(
                 (run_dir / "manifest.json").read_text(encoding="utf-8")
             )
@@ -1598,15 +1625,9 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
             with self.assertRaises(InputError):
                 load_host_settings(path)
 
-    def test_candidate_diff_confirmation_requires_exact_tak(self) -> None:
-        with mock.patch("builtins.input", return_value="TAK"):
-            confirm_candidate_diff_checked()
-        for answer in ("tak", "yes", "", "NIE", " TAK ", "TAK "):
-            with self.subTest(answer=answer), mock.patch(
-                "builtins.input", return_value=answer
-            ):
-                with self.assertRaises(InputError):
-                    confirm_candidate_diff_checked()
+    def test_legacy_candidate_confirmation_hook_is_noninteractive(self) -> None:
+        with mock.patch("builtins.input", side_effect=AssertionError("no prompt")):
+            self.assertIsNone(confirm_candidate_diff_checked())
 
     def test_missing_password_tty_is_reported_as_input_error(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
@@ -1627,6 +1648,22 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         self.assertEqual(PingStatus.REPLIED, results["10.0.0.1"].status)
         self.assertEqual(PingStatus.NO_REPLY, results["10.0.0.2"].status)
         self.assertTrue(all(call.kwargs["shell"] is False for call in run.mock_calls))
+
+    @mock.patch("panorama_cleanup.runtime.subprocess.run")
+    def test_ping_non_timeout_process_failures_are_errors(self, run: mock.Mock) -> None:
+        run.side_effect = [
+            subprocess.CompletedProcess([], 2, stdout=b"", stderr=b"permission denied"),
+            subprocess.CompletedProcess([], 1, stdout=b"General failure", stderr=b""),
+        ]
+        results = ping_many(
+            ["10.0.0.1", "10.0.0.2"],
+            bypass=False,
+            workers=1,
+            timeout_ms=1000,
+            error_retries=0,
+        )
+        self.assertEqual(PingStatus.ERROR, results["10.0.0.1"].status)
+        self.assertEqual(PingStatus.ERROR, results["10.0.0.2"].status)
 
     @mock.patch("panorama_cleanup.runtime.subprocess.run")
     def test_ping_execution_error_is_retried_and_can_recover(
@@ -1844,7 +1881,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertTrue((run_dir / "icmp_errors.txt").is_file())
             self.assertTrue((run_dir / "manifest.json").is_file())
             self.assertIn(
-                "Administrator jawnie potwierdził",
+                "starszym trybie zgodności",
                 (run_dir / "apply_readme.txt").read_text(encoding="utf-8"),
             )
             short_text = (run_dir / "raport_krotki.txt").read_text(encoding="utf-8")
@@ -2032,7 +2069,7 @@ do-not-leak-second</description>
                 )
             self.assertEqual("commands.txt", writes[-1])
 
-    def test_relevant_candidate_drift_withholds_applicable_commands(self) -> None:
+    def test_relevant_candidate_drift_is_informational(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir, stamp = create_run_directory(Path(temp))
             write_run_artifacts(
@@ -2056,16 +2093,14 @@ do-not-leak-second</description>
                 metrics=RunMetrics(),
                 started_utc=datetime.now(timezone.utc),
             )
-            self.assertFalse((run_dir / "commands.txt").exists())
-            self.assertTrue(
-                (run_dir / "draft_commands_BLOCKED_candidate_drift.txt").is_file()
-            )
+            self.assertTrue((run_dir / "commands.txt").exists())
+            self.assertFalse(any(run_dir.glob("draft_commands_BLOCKED_*.txt")))
             self.assertIn(
-                "BLOKADA KRYTYCZNA",
+                "UWAGA: running i candidate różnią się",
                 (run_dir / "apply_readme.txt").read_text(encoding="utf-8"),
             )
 
-    def test_missing_manual_confirmation_withholds_applicable_commands(self) -> None:
+    def test_missing_candidate_comparison_does_not_withhold_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_dir, stamp = create_run_directory(Path(temp))
             write_run_artifacts(
@@ -2098,9 +2133,11 @@ do-not-leak-second</description>
                 metrics=RunMetrics(),
                 started_utc=datetime.now(timezone.utc),
             )
-            self.assertFalse((run_dir / "commands.txt").exists())
-            self.assertTrue(
-                (run_dir / "draft_commands_BLOCKED_candidate_confirmation.txt").is_file()
+            self.assertTrue((run_dir / "commands.txt").exists())
+            self.assertFalse(any(run_dir.glob("draft_commands_BLOCKED_*.txt")))
+            self.assertIn(
+                "automatyczne porównanie running/candidate jest niedostępne",
+                (run_dir / "apply_readme.txt").read_text(encoding="utf-8"),
             )
 
     def test_partial_input_blocker_withholds_commands_and_surfaces_warnings(self) -> None:

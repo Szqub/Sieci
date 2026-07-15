@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from panorama_cleanup.artifacts import create_run_directory, write_run_artifacts
 from panorama_cleanup.hitcounts import collect_rule_hit_counts
 from panorama_cleanup.models import (
-    CandidateComparison,
     ConfigModel,
     InputError,
     OutputError,
@@ -25,6 +24,7 @@ from panorama_cleanup.models import (
     UnsafePlanError,
 )
 from panorama_cleanup.panos import (
+    compare_configs,
     is_supported_address_literal,
     match_ip_objects,
     parse_config,
@@ -34,7 +34,6 @@ from panorama_cleanup.planner import plan_cleanup
 from panorama_cleanup.render import render_plan
 from panorama_cleanup.runtime import (
     PanoramaXMLAPI,
-    confirm_candidate_diff_checked,
     load_host_settings,
     load_ip_rows,
     obtain_password,
@@ -225,8 +224,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise InputError("Brak poprawnych adresów IP do analizy.")
         metrics.input_row_count = len(rows)
         metrics.unique_ip_count = len(valid_ips)
-        confirm_candidate_diff_checked()
-
         print(f"Załadowano {len(rows)} pozycji, {len(valid_ips)} unikalnych poprawnych IP.")
         print("Uruchamianie ochronnego ICMP..." if not args.no_ping else "ICMP pominięty jawnie (--no-ping).")
         phase = time.perf_counter()
@@ -298,7 +295,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Do not retain the password after key generation.
         password = ""
         running_config = client.fetch_config("show")  # running/active
-        candidate_config = client.fetch_config("get")  # fetched, not compared
+        candidate_config = client.fetch_config("get")  # candidate
         metrics.remote_snapshot_command_count = client.snapshot_call_count
         system_info = {
             "declared_target_version": EXPECTED_PAN_OS,
@@ -307,24 +304,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         metrics.snapshot_seconds = time.perf_counter() - phase
 
-        # Candidate is intentionally fetched to preserve the two-snapshot audit
-        # contract, but the operator's explicit confirmation replaces an
-        # automated XML comparison.
-        del candidate_config
-        comparison = CandidateComparison(
-            different=None,
-            full_running_sha256=None,
-            full_candidate_sha256=None,
-            relevant_running_sha256=None,
-            relevant_candidate_sha256=None,
-            relevant_different=None,
-            automated_check_performed=False,
-            administrator_confirmed=True,
-        )
-        print(
-            "Automatyczny diff pominięty zgodnie z trybem pracy; "
-            "zapisano potwierdzenie administratora."
-        )
+        comparison = compare_configs(running_config, candidate_config)
+        if comparison.relevant_different:
+            print(
+                "INFORMACJA: running i candidate różnią się w analizowanym "
+                "zakresie. Plan nadal powstaje z running; szczegóły zapisano "
+                "w candidate_comparison.json.",
+                file=sys.stderr,
+            )
+        elif comparison.different:
+            print(
+                "INFORMACJA: running i candidate różnią się poza analizowanym "
+                "zakresem. Nie blokuje to publikacji planu.",
+                file=sys.stderr,
+            )
+        else:
+            print("Running i candidate są semantycznie zgodne.")
 
         phase = time.perf_counter()
         model = parse_config(running_config)
@@ -427,8 +422,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "ssl_configured": "yes" if host_settings.verify_ssl else "no",
             "ssl_certificate_verification": not ssl_verification_disabled,
             "legacy_insecure_override": args.insecure,
-            "candidate_diff_automated_check": False,
-            "candidate_diff_administrator_confirmed": True,
+            "candidate_diff_automated_check": True,
+            "candidate_diff_administrator_confirmed": False,
             "dependency_scope": "named-address-objects-from-running-config",
             "runtime_membership_audit_performed": False,
             "administrator_confirmed_dependency_scope": True,

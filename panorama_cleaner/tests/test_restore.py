@@ -544,34 +544,60 @@ class RestoreEntrypointTests(unittest.TestCase):
             manifest = json.loads(
                 (restore_dir / "restore_manifest.json").read_text(encoding="utf-8")
             )
-            self.assertTrue(manifest["candidate_diff_administrator_confirmed"])
+            self.assertFalse(manifest["candidate_diff_administrator_confirmed"])
+            self.assertTrue(manifest["candidate_snapshot_compared"])
+            self.assertIn("candidate_comparison", manifest)
             self.assertFalse(manifest["changes_executed"])
 
-    def test_rejected_candidate_confirmation_stops_before_network(self) -> None:
+    def test_restore_generation_requires_no_typed_confirmation(self) -> None:
+        class FakeClient:
+            snapshot_call_count = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def authenticate(self, password: str) -> None:
+                self.authenticated = bool(password)
+
+            def fetch_config(self, action: str) -> ET.Element:
+                self.snapshot_call_count += 1
+                return ET.fromstring(ET.tostring(_current()))
+
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
-            run1, _ = _history(base)
+            run1, run2 = _history(base)
             host_file = base / "panorama_host.txt"
             host_file.write_text(
                 f"host={HOST}\nusername=readonly\nssl=yes\n",
                 encoding="utf-8",
             )
-            with mock.patch("builtins.input", return_value="NIE"), mock.patch(
-                "panorama_emergency_restore.PanoramaXMLAPI"
-            ) as api:
+            client = FakeClient()
+            with mock.patch(
+                "builtins.input", side_effect=AssertionError("no prompt")
+            ), mock.patch(
+                "panorama_emergency_restore.PanoramaXMLAPI", return_value=client
+            ) as api, mock.patch(
+                "panorama_emergency_restore.obtain_password", return_value="secret"
+            ):
                 code = restore_main(
                     [
                         "10.0.0.1",
                         "--run",
                         str(run1.parent),
+                        "--run",
+                        str(run2.parent),
                         "--host-file",
                         str(host_file),
                         "--output-dir",
                         str(base),
                     ]
                 )
-            self.assertEqual(3, code)
-            api.assert_not_called()
+            self.assertEqual(2, code)
+            api.assert_called_once()
+            self.assertEqual(2, client.snapshot_call_count)
 
     def test_manifest_host_mismatch_stops_before_prompt_and_network(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

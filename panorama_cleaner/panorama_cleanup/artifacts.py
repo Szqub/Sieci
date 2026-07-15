@@ -251,14 +251,10 @@ def write_run_artifacts(
         if rollback_text:
             rollback_text += "\n"
 
-        candidate_control_passed = (
-            comparison.automated_check_performed
-            and comparison.relevant_different is False
-        ) or (
-            not comparison.automated_check_performed
-            and comparison.administrator_confirmed
-        )
-        commands_published = candidate_control_passed and not normalized_blockers
+        # Candidate drift is informational. The generator plans from running
+        # and never mutates Panorama, so only concrete dependency/input
+        # blockers may withhold the otherwise applicable CLI plan.
+        commands_published = not normalized_blockers
         runtime_blocker_prefixes = (
             "RUNTIME_DAG_",
             "FQDN_",
@@ -266,14 +262,7 @@ def write_run_artifacts(
             "REGION_",
             "UNMODELED_",
         )
-        if (
-            comparison.automated_check_performed
-            and comparison.relevant_different is True
-        ):
-            draft_reason = "candidate_drift"
-        elif not candidate_control_passed:
-            draft_reason = "candidate_confirmation"
-        elif any(
+        if any(
             blocker.startswith(runtime_blocker_prefixes)
             for blocker in normalized_blockers
         ):
@@ -859,26 +848,25 @@ def _apply_readme(
 ) -> str:
     if not comparison.automated_check_performed and comparison.administrator_confirmed:
         drift = (
-            "Automatyczne porównanie running/candidate było wyłączone. "
-            "Administrator jawnie potwierdził wcześniejsze sprawdzenie diffu "
-            "w Panoramie i zgodę na kontynuowanie. Oba snapshoty pobrano, ale "
-            "plan policzono wyłącznie z running.\n"
+            "Automatyczne porównanie running/candidate było wyłączone w starszym "
+            "trybie zgodności. Plan policzono wyłącznie z running.\n"
         )
     elif not comparison.automated_check_performed:
         drift = (
-            "BLOKADA KRYTYCZNA: nie wykonano automatycznego porównania ani nie "
-            "zapisano potwierdzenia administratora.\n"
+            "INFORMACJA: automatyczne porównanie running/candidate jest "
+            "niedostępne. Nie blokuje to planu liczonego z running.\n"
         )
     elif comparison.relevant_different is None:
         drift = (
-            "BLOKADA KRYTYCZNA: wynik automatycznego porównania jest niekompletny.\n"
+            "INFORMACJA: wynik automatycznego porównania jest niekompletny. "
+            "Nie blokuje to planu liczonego z running.\n"
         )
     elif comparison.relevant_different:
         drift = (
-            "BLOKADA KRYTYCZNA: running i candidate różnią się w obiektach, "
-            "device groupach lub rulebase. Plan policzono z running, ale nie "
-            "opublikowano stosowalnego commands.txt, ponieważ CLI zmienia candidate. "
-            "Uzgodnij candidate i uruchom planner ponownie.\n"
+            "UWAGA: running i candidate różnią się w obiektach, device groupach "
+            "lub rulebase. Plan policzono z running i opublikowano razem z tym "
+            "ostrzeżeniem; przed zastosowaniem sprawdź candidate_comparison.json "
+            "oraz bieżący diff w Panoramie.\n"
         )
     elif comparison.different:
         drift = (

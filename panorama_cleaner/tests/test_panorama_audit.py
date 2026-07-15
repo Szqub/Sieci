@@ -374,7 +374,13 @@ class PanoramaPostCleanupAuditTests(unittest.TestCase):
             results = json.loads(
                 (audit_dir / "audit_results.json").read_text(encoding="utf-8")
             )
+            manifest = json.loads(
+                (audit_dir / "audit_manifest.json").read_text(encoding="utf-8")
+            )
             self.assertEqual("LEFT", results["10.0.0.1"]["exact_objects"][0]["name"])
+            self.assertTrue(manifest["candidate_snapshot_compared"])
+            self.assertTrue(manifest["candidate_comparison"]["different"])
+            self.assertTrue(manifest["candidate_comparison"]["relevant_different"])
             self.assertFalse((audit_dir / "commands.txt").exists())
 
 
