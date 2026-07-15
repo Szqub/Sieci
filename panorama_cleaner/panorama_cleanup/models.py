@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 
 class CleanupError(Exception):

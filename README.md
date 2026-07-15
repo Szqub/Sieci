@@ -15,6 +15,7 @@ Poniżej znajduje się szczegółowa dokumentacja każdego narzędzia, opisując
 5. [Masowe Wyłączanie Reguł (Disable Commands Generator)](#5-masowe-wyłączanie-reguł-disable-commands-generator)
 6. [Diagnostyka Illumio (Illumio Probe)](#6-diagnostyka-illumio-illumio-probe)
 7. [Generator Filtrów AD (AD Group Generator)](#7-generator-filtrów-ad-ad-group-generator)
+8. [PanOS Toolbox](#8-panos-toolbox)
 
 ---
 
@@ -202,3 +203,17 @@ Automatyzacja tworzenia filtrów LDAP dla mapowania grup Active Directory w Palo
 ```powershell
 .\pa_ad_group_generator.ps1
 ```
+
+---
+
+## 8. PanOS Toolbox
+
+Niezależna aplikacja lokalna znajduje się w katalogu `PanOS-Toolbox/`. Łączy
+przeglądarkowy interfejs z backendem Python nasłuchującym wyłącznie na
+`127.0.0.1`. Domyślnie działa odczytowo i generuje plan/komendy; zapis do
+candidate, commit oraz push wymagają osobnego zezwolenia profilu i jawnego
+włączenia dla danej operacji. GUI obejmuje cleanup, audit, historię sesji i
+Emergency Restore.
+
+Instrukcja uruchomienia, zabezpieczenia i budowania paczki niewymagającej
+Node.js na maszynie docelowej: `PanOS-Toolbox/README.md`.

@@ -111,28 +111,13 @@ def obtain_password(environment_name: str) -> str:
 
 
 def confirm_candidate_diff_checked() -> None:
-    """Require an explicit operator assertion before any network activity."""
+    """Backward-compatible no-op retained for third-party imports.
 
-    print(
-        "UWAGA: automatyczne porównanie running/candidate jest wyłączone.\n"
-        "Administrator musi wcześniej sprawdzić diff bezpośrednio w Panoramie.\n"
-        "Zakres analizy zależności obejmuje nazwane address objects i ich "
-        "referencje w running config. Runtime DAG/FQDN/EDL/region wymaga "
-        "osobnego audytu na managed firewallach."
-    )
-    try:
-        answer = input(
-            "Potwierdzasz sprawdzenie diffu, brak oczekujących zmian, wskazany "
-            "zakres named-object i chcesz kontynuować? Wpisz dokładnie TAK: "
-        )
-    except EOFError as exc:
-        raise InputError(
-            "Brak interaktywnego potwierdzenia ręcznej kontroli diffu."
-        ) from exc
-    if answer != "TAK":
-        raise InputError(
-            "Nie potwierdzono ręcznej kontroli running/candidate; przerwano."
-        )
+    Since 1.6 candidate drift is recorded as review information and never
+    requires a typed acknowledgement during read-only plan generation.
+    """
+
+    return None
 
 
 def validate_ca_bundle(value: Optional[str]) -> Optional[str]:
@@ -324,8 +309,8 @@ def _ping_one(
         completed = subprocess.run(
             command,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=False,
             timeout=(timeout_ms / 1000.0) + 3.0,
             check=False,
@@ -348,6 +333,37 @@ def _ping_one(
     elapsed = time.perf_counter() - started
     if completed.returncode == 0:
         return PingResult(ip, PingStatus.REPLIED, "Odebrano odpowiedź ICMP", elapsed)
+    output = b" ".join(
+        value
+        for value in (completed.stdout, completed.stderr)
+        if isinstance(value, bytes)
+    ).decode(errors="replace").casefold()
+    execution_error_markers = (
+        "general failure",
+        "transmit failed",
+        "could not find host",
+        "invalid option",
+        "bad value",
+        "permission denied",
+        "operation not permitted",
+        "network is unreachable",
+        "błąd ogólny",
+        "błąd transmisji",
+        "nie można odnaleźć hosta",
+        "nie może odnaleźć hosta",
+        "odmowa dostępu",
+        "brak uprawnień",
+        "sieć jest nieosiągalna",
+    )
+    if completed.returncode != 1 or any(
+        marker in output for marker in execution_error_markers
+    ):
+        return PingResult(
+            ip,
+            PingStatus.ERROR,
+            f"Błąd wykonania ICMP (kod {completed.returncode})",
+            elapsed,
+        )
     return PingResult(
         ip,
         PingStatus.NO_REPLY,

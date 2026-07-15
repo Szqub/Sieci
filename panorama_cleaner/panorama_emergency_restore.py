@@ -7,7 +7,7 @@ import argparse
 import ipaddress
 import sys
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
@@ -21,7 +21,7 @@ from panorama_cleanup.models import (
     UnsafePlanError,
     __version__,
 )
-from panorama_cleanup.panos import parse_config
+from panorama_cleanup.panos import compare_configs, parse_config
 from panorama_cleanup.restore import (
     build_emergency_restore,
     create_restore_directory,
@@ -165,20 +165,9 @@ def _manifest_paths(args: argparse.Namespace) -> Sequence[Path]:
 
 
 def _confirm_candidate_ready() -> None:
-    print(
-        "UWAGA: generator analizuje running, ale przyszłe komendy zmienią candidate.\n"
-        "Administrator musi wcześniej sprawdzić diff w Panoramie i potwierdzić "
-        "brak oczekujących cudzych zmian."
-    )
-    try:
-        answer = input(
-            "Potwierdzasz sprawdzenie diffu i chcesz wygenerować restore? "
-            "Wpisz dokładnie TAK: "
-        )
-    except EOFError as exc:
-        raise InputError("Brak interaktywnego potwierdzenia diffu.") from exc
-    if answer != "TAK":
-        raise InputError("Nie potwierdzono ręcznej kontroli diffu; przerwano.")
+    """Compatibility no-op; restore generation is read-only."""
+
+    return None
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -213,8 +202,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "--allow-host-mismatch."
             )
 
-        _confirm_candidate_ready()
-
         password = obtain_password(args.password_env)
         if ssl_verification_disabled:
             print(
@@ -237,7 +224,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 snapshot_call_count = client.snapshot_call_count
         finally:
             password = ""
-        del candidate_config
+        comparison = compare_configs(running_config, candidate_config)
 
         model = parse_config(running_config)
         config_version = running_config.get("version", "unknown")
@@ -294,8 +281,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "running_config_version": config_version,
                 "planning_snapshot": "running",
                 "candidate_snapshot_fetched": True,
-                "candidate_snapshot_compared": False,
-                "candidate_diff_administrator_confirmed": True,
+                "candidate_snapshot_compared": True,
+                "candidate_diff_administrator_confirmed": False,
+                "candidate_comparison": asdict(comparison),
                 "host_mismatch_override": args.allow_host_mismatch,
                 "remote_snapshot_command_count": snapshot_call_count,
                 "ssl_configured": "yes" if host_settings.verify_ssl else "no",

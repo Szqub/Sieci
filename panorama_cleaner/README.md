@@ -13,11 +13,10 @@ domyślnie rozwiązywane względem położenia skryptu.
 Narzędzie jest generatorem planu dla Panorama/PAN-OS 10.2.16-h4. Samo nie
 zmienia konfiguracji i nigdy nie generuje `commit`. Dla całej listy IP:
 
-1. wymaga wpisania dokładnie `TAK`, którym administrator potwierdza wcześniejsze
-   sprawdzenie diffu running/candidate bezpośrednio w Panoramie;
-2. równolegle wykonuje domyślny ICMP i pomija adresy, które odpowiadają;
-3. przez XML API pobiera po jednym pełnym snapshotcie `running` (`action=show`)
-   i `candidate` (`action=get`), ale nie porównuje ich automatycznie;
+1. równolegle wykonuje domyślny ICMP i pomija adresy, które odpowiadają;
+2. przez XML API pobiera po jednym pełnym snapshotcie `running` (`action=show`)
+   i `candidate` (`action=get`) oraz porównuje je semantycznie;
+3. zapisuje różnicę jako informację do review, ale nie blokuje nią komend;
 4. planuje wyłącznie na podstawie `running`;
 5. lokalnie rozpoznaje prawdziwe nazwy obiektów po dokładnej wartości IP;
 6. analizuje `shared`, wszystkie widoczne device groups, dziedziczenie,
@@ -104,15 +103,14 @@ hasła: zapisuje je trwale jako tekst jawny w profilu użytkownika.
 Procesy `ping` otrzymują jawnie oczyszczone środowisko bez wskazanej zmiennej
 hasła.
 
-## Potwierdzenie diffu
+## Informacja o diffie
 
-Automatyczne porównanie running/candidate jest wyłączone. Każdy run przed ICMP
-i połączeniem z Panoramą wymaga wpisania dokładnie `TAK`. Potwierdzenie oznacza,
-że administrator sprawdził wcześniej diff w GUI/CLI Panoramy, nie ma
-oczekujących zmian, akceptuje zakres zależności nazwanych address objects z
-running config i świadomie chce kontynuować. Runtime DAG/FQDN/EDL/region nie
-jest audytowany przez ten run. Brak potwierdzenia przerywa run kodem 3. Oba
-snapshoty nadal są pobierane; plan zawsze powstaje z running.
+Planner nie pyta już o wpisanie `TAK`. Pobiera running i candidate, wykonuje
+znormalizowane porównanie pełne oraz zakresu obiektów/device groups/rulebase i
+zapisuje wynik w `candidate_comparison.json`. Różnica jest ostrzeżeniem, nie
+globalną blokadą `commands.txt`, ponieważ generator niczego nie zapisuje w
+Panoramie, a plan zawsze powstaje z running. Przed ręcznym zastosowaniem komend
+nadal sprawdź aktualny diff; runtime DAG/FQDN/EDL/region wymaga osobnego audytu.
 
 ## Uruchomienie
 
@@ -162,8 +160,9 @@ backups/groups/...
 backups/policies/...
 ```
 
-`candidate_comparison.json` zapisuje, że automatyczny diff był pominięty oraz
-że administrator go potwierdził. Ostrzeżenia o obecności DAG/FQDN/EDL/region i
+`candidate_comparison.json` zapisuje SHA256 znormalizowanego running/candidate
+oraz wynik porównania pełnego i obsługiwanego zakresu. Różnica jest informacyjna
+i nie tworzy draftu. Ostrzeżenia o obecności DAG/FQDN/EDL/region i
 niewymodelowanych, niezwiązanych nazwach nie tworzą już globalnego draftu;
 targetowane blokady nadal pomijają wyłącznie ryzykowne IP. Po wyczerpaniu
 ponowień trwały `ERROR` ICMP pomija tylko konkretne IP i oznacza je jako
@@ -222,8 +221,7 @@ IP (w tym trwałym błędem ICMP); `3` — wejście; `4` — transport/snapshot;
 Nie prosi o potwierdzenie diffu, nie tworzy komend i nie zmienia Panoramy.
 Korzysta z tych samych `panorama_host.txt`, `ip.txt`, ustawień hasła, TLS i ICMP
 co planner. Pobiera dokładnie running (`action=show`) i candidate (`action=get`),
-ale analizuje wyłącznie running; candidate jest pobrany tylko jako drugi snapshot
-i nie jest porównywany.
+ale analizuje wyłącznie running; candidate jest porównywany informacyjnie.
 
 Audyt ponownie sprawdza wszystkie IP. Adres odpowiadający na ICMP jest traktowany
 jako oczekiwany do pozostawienia, ale raport nadal pokazuje jego dokładne obiekty,
@@ -281,9 +279,9 @@ managed firewallach.
 
 `panorama_emergency_restore.py` tworzy pakiet odtworzeniowy na podstawie
 autorytatywnych XML i manifestów runów, których `commands.txt` faktycznie
-zastosowano. Nie wykonuje ICMP, zmian, commit ani push. Przed połączeniem wymaga
-wpisania `TAK`, potwierdzającego ręczne sprawdzenie diffu i pustego candidate.
-Następnie pobiera running oraz candidate, ale analizuje running.
+zastosowano. Nie wykonuje ICMP, zmian, commit ani push i nie wymaga wpisania
+`TAK`. Pobiera running oraz candidate, zapisuje ich porównanie w manifeście,
+ale zależności odtwarzania analizuje na podstawie running.
 
 Podawaj runy jawnie — w kolejności nie ma znaczenia, bo decyduje ich
 `started_utc`:

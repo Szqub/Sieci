@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -25,7 +26,7 @@ from panorama_cleanup.models import (
     TransportError,
     __version__,
 )
-from panorama_cleanup.panos import parse_config
+from panorama_cleanup.panos import compare_configs, parse_config
 from panorama_cleanup.runtime import (
     PanoramaXMLAPI,
     load_host_settings,
@@ -179,7 +180,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 snapshot_call_count = client.snapshot_call_count
         finally:
             password = ""
-        del candidate_config
+        comparison = compare_configs(running_config, candidate_config)
 
         model = parse_config(running_config)
         config_version = running_config.get("version", "unknown")
@@ -237,7 +238,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "running_config_version": config_version,
                 "planning_snapshot": "running",
                 "candidate_snapshot_fetched": True,
-                "candidate_snapshot_compared": False,
+                "candidate_snapshot_compared": True,
+                "candidate_comparison": asdict(comparison),
                 "remote_snapshot_command_count": snapshot_call_count,
                 "input_rows": len(rows),
                 "unique_valid_ips": len(valid_ips),
