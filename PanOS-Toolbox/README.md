@@ -105,6 +105,20 @@ zaznaczyć dowolne wiersze albo konkretne zależności i przygotować nowy batch
 Wydzielany jest cały atomowy komponent zależności, dzięki czemu obiekt, grupa
 lub polityka mogą być wykonane oddzielnie bez częściowego uszkodzenia grafu.
 
+Każdy wykonywalny wiersz ma również akcję **Wyklucz**, a zaznaczone wiersze
+można usunąć z wykonania zbiorczo przez **Wyklucz zaznaczone**. Toolbox tworzy
+nową, trwałą sesję-plan i pozostawia plan źródłowy bez zmian. Wykluczenie jest
+rozszerzane na cały atomowy komponent zależności; jeżeli wspólna polityka,
+grupa lub obiekt łączy kilka celów, wszystkie cele pośrednio dotknięte są jawnie
+oznaczone jako wykluczone. Pozostają widoczne w raporcie, ale nie trafiają do
+backupu wykonawczego, operacji XPath ani Candidate tej sesji. Przycisk
+**Cofnij ostatnie wykluczenie** wraca do bezpiecznie zachowanego planu
+nadrzędnego. Po rozwinięciu celu sekcja **Atomowe komponenty wykonawcze**
+pokazuje wszystkie rzeczywiste operacje na politykach, grupach i obiektach.
+Akcja **Wyklucz cały komponent** pozwala odrzucić konkretną znalezioną encję;
+Toolbox automatycznie domyka wykluczenie na zależności, aby nie pozostawić
+reguły wskazującej na usunięty obiekt ani wykonać połowy komponentu.
+
 Wiersze są rozwijane. Dla polityki pokazują DG, pre/post-rulebase, typ reguły,
 strefy from/to, source, destination, service, application, tagi, komentarz i
 rzeczywiste zależności obiektów/grup. Last Hit ma stałe kolory: zielony dla

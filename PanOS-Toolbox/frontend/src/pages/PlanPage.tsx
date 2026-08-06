@@ -3,6 +3,7 @@ import {
   AlertOctagon,
   AlertTriangle,
   ArrowRight,
+  Ban,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -16,6 +17,7 @@ import {
   RotateCcw,
   ServerCog,
   ShieldCheck,
+  Undo2,
 } from "lucide-react";
 import type { AddressAnalysis, CleanupPlan, EntityDependency, ExecutionJob, SessionState, ToolboxSession } from "../model";
 import { formatDate, shortId } from "../model";
@@ -34,6 +36,9 @@ interface PlanPageProps {
   onOpenCleanup: () => void;
   onCreateSinglePlan: (target: AddressAnalysis) => void;
   onCreateSelectionPlan: (targets: AddressAnalysis[]) => void;
+  onExcludeTargets: (targets: AddressAnalysis[]) => void;
+  onExcludeComponents: (componentIds: string[]) => void;
+  onUndoLastExclusion: () => void;
   onPlanDependencies: (dependencies: EntityDependency[], targets: AddressAnalysis[]) => void;
   onRestoreTarget: (target: AddressAnalysis) => void;
   onApplyCandidate: () => void;
@@ -52,6 +57,7 @@ const decisionLabel = {
   "skip-error": "ICMP error — pominięty",
   "not-found": "Nie znaleziono",
   blocked: "Read-only / review",
+  excluded: "Wykluczony z wykonania",
 };
 
 function hitPresentation(value: { lastHit?: string; lastHitAgeDays?: number; hitCount?: number; lastHitStatus?: string }) {
@@ -63,7 +69,7 @@ function hitPresentation(value: { lastHit?: string; lastHitAgeDays?: number; hit
   return { className: "last-hit last-hit--red", label: `${Math.floor(age)} dni`, detail: formatDate(value.lastHit) };
 }
 
-export function PlanPage({ focus = "plan", plan, executionSession, executionJob, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onCreateSelectionPlan, onPlanDependencies, onRestoreTarget, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
+export function PlanPage({ focus = "plan", plan, executionSession, executionJob, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onCreateSelectionPlan, onExcludeTargets, onExcludeComponents, onUndoLastExclusion, onPlanDependencies, onRestoreTarget, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
   const [expandedTargets, setExpandedTargets] = useState<Set<string>>(new Set());
   const [selectedTargets, setSelectedTargets] = useState<Set<string>>(new Set());
   const [selectedDependencies, setSelectedDependencies] = useState<Map<string, EntityDependency>>(new Map());
@@ -82,7 +88,7 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
   if (!plan) return <div className={`page-stack plan-page plan-page--${focus}`}><PageHeader eyebrow={`Workflow / ${focus === "execute" ? "Wykonaj" : "Plan"}`} title={focus === "execute" ? "Brak planu do wykonania" : "Plan zmian"} description="Najpierw wyszukaj cele i przygotuj plan. Żaden zapis API nie uruchamia się automatycznie." /><Card><EmptyState icon={<ListTree size={27} />} title="Nie ma jeszcze planu" description="Lista pokaże szczegóły polityk, zależności i backup każdej encji." action={<Button variant="primary" onClick={onOpenCleanup}>Utwórz plan</Button>} /></Card></div>;
 
   const selectedTargetRows = plan.addresses.filter((target) => selectedTargets.has(target.ip));
-  const canApplyCandidate = state === "PLANNED";
+  const canApplyCandidate = state === "PLANNED" && plan.operations.length > 0;
   const canCommit = state === "CANDIDATE_APPLIED" || state === "PARTIAL";
   const canPush = state === "COMMITTED";
   const canRestore = ["CANDIDATE_APPLIED", "PARTIAL", "COMMITTED", "PUSHED"].includes(state);
@@ -110,24 +116,28 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
 
       <Card className="plan-entity-card">
         <div className="plan-list-toolbar">
-          <div><strong>{plan.addresses.length} celów</strong><span>{plan.processCount} wykonywalnych · {plan.operations.length} operacji XPath · {plan.addresses.reduce((sum, target) => sum + (target.backupFiles?.length ?? 0), 0)} backupów encji</span></div>
-          <div>{selectedTargets.size > 0 && <><span className="selection-counter">{selectedTargets.size} zazn.</span><Button loading={singlePlanBusy === "selection"} disabled={Boolean(singlePlanBusy)} onClick={() => onCreateSelectionPlan(selectedTargetRows)}>Utwórz plan tylko z zaznaczonych</Button></>}</div>
+          <div><strong>{plan.addresses.length} celów</strong><span>{plan.processCount} wykonywalnych · {plan.excludedCount ?? 0} wykluczonych · {plan.operations.length} operacji XPath · {plan.addresses.reduce((sum, target) => sum + (target.backupFiles?.length ?? 0), 0)} backupów encji</span></div>
+          <div>{selectedTargets.size > 0 && <><span className="selection-counter">{selectedTargets.size} zazn.</span><Button variant="danger" icon={<Ban size={15} />} loading={singlePlanBusy === "exclude-selection" || (selectedTargetRows.length === 1 && singlePlanBusy === `exclude:${selectedTargetRows[0]?.ip}`)} disabled={Boolean(singlePlanBusy)} onClick={() => onExcludeTargets(selectedTargetRows)}>Wyklucz zaznaczone</Button><Button loading={singlePlanBusy === "selection"} disabled={Boolean(singlePlanBusy)} onClick={() => onCreateSelectionPlan(selectedTargetRows)}>Plan tylko z zaznaczonych</Button></>}</div>
         </div>
+        {(plan.excludedCount ?? 0) > 0 && <div className="exclusion-summary"><div><Ban size={18} /><span><strong>{plan.excludedCount} {plan.excludedCount === 1 ? "cel" : "celów"} poza wykonaniem</strong><small>{plan.excludedTargets?.length ?? 0} wskazano bezpośrednio · {plan.excludedComponentIds?.length ?? 0} komponentów wyłączono. Pozostałe cele wynikają ze wspólnych atomowych zależności. Nie trafią do Candidate, backupów ani operacji XPath tej sesji.</small></span></div>{plan.parentSessionId && <Button icon={<Undo2 size={15} />} loading={singlePlanBusy === "undo-exclusion"} disabled={Boolean(singlePlanBusy)} onClick={onUndoLastExclusion}>Cofnij ostatnie wykluczenie</Button>}</div>}
         <div className="responsive-table plan-table policy-plan-table"><table>
           <thead><tr><th><span className="visually-hidden">Zaznacz</span></th><th>Cel / lokalizacja</th><th>Last Hit</th><th>Zależności</th><th>Backup</th><th>Decyzja</th><th>Akcja</th><th /></tr></thead>
           <tbody>{plan.addresses.map((target, index) => {
             const expanded = expandedTargets.has(target.ip);
             const hit = hitPresentation(target);
             const locations = (target.entities ?? []).map((entity) => `${entity.scope} · ${entity.rulebase ?? entity.type}`).join(" | ");
+            const executionComponents = [...new Set(target.componentIds ?? (target.componentId ? [target.componentId] : []))]
+              .map((componentId) => ({ componentId, operations: plan.operations.filter((operation) => operation.componentId === componentId) }))
+              .filter((component) => component.operations.length > 0);
             return <Fragment key={target.ip}>
-              <tr className={target.decision === "blocked" ? "row-warning" : ""}>
+              <tr className={`${target.decision === "blocked" ? "row-warning" : ""} ${target.decision === "excluded" ? "row-excluded" : ""}`}>
                 <td><input type="checkbox" checked={selectedTargets.has(target.ip)} disabled={target.decision !== "process"} onChange={() => toggleTarget(target)} aria-label={`Zaznacz ${target.label ?? target.ip}`} /></td>
                 <td><div className="entity-cell"><span className="row-index">{index + 1}</span><span><strong>{target.label ?? target.ip}</strong><small>{target.targetType ?? "ip"} · {locations || "brak dopasowania"}</small></span></div></td>
                 <td><span className={hit.className}><b>{hit.label}</b><small>{hit.detail}</small></span></td>
                 <td><span className="reference-count" title="Rzeczywiste zależności encji, nie CLI/API">{target.references.length}</span></td>
                 <td><span className="backup-count"><FileArchive size={14} />{target.backupFiles?.length ?? 0}</span></td>
-                <td><StatusPill tone={target.decision === "process" ? "accent" : target.decision === "skip-live" ? "success" : target.decision === "blocked" ? "warning" : target.decision === "skip-error" ? "danger" : "neutral"}>{decisionLabel[target.decision]}</StatusPill></td>
-                <td><div className="row-actions"><Button variant="ghost" loading={singlePlanBusy === target.ip} disabled={target.decision !== "process" || !target.componentId || Boolean(singlePlanBusy)} onClick={() => onCreateSinglePlan(target)}>Tylko ten</Button>{canRestore && (target.backupFiles?.length ?? 0) > 0 && <Button variant="ghost" onClick={() => onRestoreTarget(target)} icon={<RotateCcw size={14} />}>Restore</Button>}</div></td>
+                <td><StatusPill tone={target.decision === "process" ? "accent" : target.decision === "skip-live" ? "success" : target.decision === "blocked" ? "warning" : target.decision === "skip-error" ? "danger" : "neutral"}>{decisionLabel[target.decision]}</StatusPill>{target.exclusionReason && <small className="exclusion-reason">{target.exclusionReason}</small>}</td>
+                <td><div className="row-actions"><Button variant="ghost" icon={<Ban size={14} />} loading={singlePlanBusy === `exclude:${target.ip}`} disabled={target.decision !== "process" || Boolean(singlePlanBusy)} onClick={() => onExcludeTargets([target])}>Wyklucz</Button><Button variant="ghost" loading={singlePlanBusy === target.ip} disabled={target.decision !== "process" || !target.componentId || Boolean(singlePlanBusy)} onClick={() => onCreateSinglePlan(target)}>Tylko ten</Button>{canRestore && (target.backupFiles?.length ?? 0) > 0 && <Button variant="ghost" onClick={() => onRestoreTarget(target)} icon={<RotateCcw size={14} />}>Restore</Button>}</div></td>
                 <td><button className="table-expand" disabled={!(target.entities?.length ?? 0) && !target.references.length && !(target.backupFiles?.length ?? 0)} onClick={() => setExpandedTargets((current) => { const next = new Set(current); if (next.has(target.ip)) next.delete(target.ip); else next.add(target.ip); return next; })} aria-label={`Rozwiń ${target.label ?? target.ip}`}>{expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}</button></td>
               </tr>
               {expanded && <tr className="expanded-row"><td colSpan={8}><div className="target-inspector">
@@ -140,6 +150,7 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
                   <div className="dependency-tree"><h4><ListTree size={16} /> Zależności ({entity.dependencies.length})</h4>{entity.dependencies.length ? entity.dependencies.map((dependency) => <label key={dependency.id} className={dependency.readOnly ? "is-read-only" : ""}><input type="checkbox" checked={selectedDependencies.has(dependency.id)} disabled={dependency.readOnly || !["address", "address-group", "policy"].includes(dependency.type)} onChange={() => toggleDependency(dependency, target)} /><span className={`entity-type-dot entity-type-dot--${dependency.type}`} /><span><strong>{dependency.name}</strong><small>{dependency.type} · {dependency.relation ?? dependency.field} · {dependency.scope}{dependency.rulebase ? ` · ${dependency.rulebase}` : ""}</small></span>{dependency.type === "policy" && <span className={hitPresentation(dependency).className}><b>{dependency.hitCount ?? 0} hit</b><small>{dependency.lastHit ? formatDate(dependency.lastHit) : "brak Last Hit"}</small></span>}{dependency.readOnly && <StatusPill tone="warning">Read-only</StatusPill>}</label>) : <p className="muted-value">Brak zależności dla tej encji.</p>}</div>
                   <code className="inspector-xpath">{entity.path}</code>
                 </section>)}
+                {executionComponents.length > 0 && <div className="execution-components"><h4><ShieldCheck size={16} /> Atomowe komponenty wykonawcze</h4>{executionComponents.map((component) => <section key={component.componentId}><div><strong>{component.operations.length} {component.operations.length === 1 ? "operacja" : "operacji"}</strong><small>{component.componentId}</small></div><ul>{component.operations.map((operation) => <li key={operation.id}><StatusPill tone={operation.action === "delete" ? "danger" : "warning"}>{operation.action.toUpperCase()}</StatusPill><span><strong>{operation.entityName}</strong><small>{operation.entityType} · {operation.scope}</small></span></li>)}</ul><Button variant="danger" icon={<Ban size={14} />} loading={singlePlanBusy === `exclude-component:${component.componentId}`} disabled={Boolean(singlePlanBusy)} onClick={() => onExcludeComponents([component.componentId])}>Wyklucz cały komponent</Button></section>)}</div>}
                 <div className="entity-backups"><h4><FileArchive size={16} /> Backup per encja / operacja</h4>{target.backupFiles?.length ? target.backupFiles.map((backup) => <div key={backup.mutationId}><span><strong>{backup.entityName}</strong><small>{backup.entityType} · {backup.mutationId}</small></span><code>{backup.file}</code></div>) : <span className="muted-value">Brak mutacji — nie utworzono pliku backupu.</span>}</div>
               </div></td></tr>}
             </Fragment>;
@@ -151,6 +162,7 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
       <section className="execution-section execute-only">
         <div className="execution-heading"><div><span className="eyebrow">Path-by-path XML API</span><h2>Wykonanie kontrolowane</h2><p>Każda operacja ma własny XPath, fingerprint, backup i wynik. Pełny config nie jest wgrywany na urządzenie.</p></div><StatusPill tone={writeEnabled ? "success" : "info"}>{writeEnabled ? "WRITE aktywny" : "READ ONLY"}</StatusPill></div>
         {!writeEnabled && <Callout severity="info" title="Przełącz górny suwak na zielony WRITE"><p>To jedyna bramka zapisu w GUI. Po potwierdzeniu Candidate, commit i push będą dostępne jako trzy osobne kroki.</p></Callout>}
+        {plan.operations.length === 0 && <Callout severity="success" title="Plan nie zawiera operacji"><p>Wszystkie wykonywalne cele zostały wykluczone. Candidate, commit i push pozostają zablokowane.</p></Callout>}
         <div className="execution-grid">
           <Card className={["CANDIDATE_APPLIED", "PARTIAL", "COMMITTED", "PUSHED"].includes(state) ? "stage-card stage-card--done" : "stage-card"}><span className="stage-number">01</span><CheckCircle2 className="done-icon" /><h3>Candidate po XPath</h3><p>Backup encji → locki → live recheck → jedna operacja API po drugiej → validate.</p><Button variant="primary" loading={busy === "candidate"} disabled={!writeEnabled || !canApplyCandidate} onClick={onApplyCandidate}>Zapisz Candidate przez API</Button></Card>
           <Card className={["COMMITTED", "PUSHED"].includes(state) ? "stage-card stage-card--done" : "stage-card"}><span className="stage-number">02</span><PackageCheck /><h3>Commit Panorama</h3><p>Osobny partial commit administratora. Przed startem zobaczysz ostrzeżenie z zakresem.</p><Button variant="primary" loading={busy === "commit"} disabled={!writeEnabled || !canCommit} onClick={() => setConfirmAction("commit")}>Commit</Button></Card>

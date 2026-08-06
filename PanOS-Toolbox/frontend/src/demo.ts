@@ -113,6 +113,58 @@ export const demoCleanupPlan: CleanupPlan = {
   ],
 };
 
+export function demoExclusionPlan(plan: CleanupPlan, targets: string[], componentIds: string[] = []): CleanupPlan {
+  const requested = new Set(targets);
+  const removedComponents = new Set(
+    [
+      ...componentIds,
+      ...plan.addresses
+      .filter((target) => requested.has(target.ip))
+      .flatMap((target) => target.componentIds ?? (target.componentId ? [target.componentId] : [])),
+    ],
+  );
+  const impacted = new Set(plan.exclusionImpactedTargets ?? []);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const target of plan.addresses) {
+      const components = target.componentIds ?? (target.componentId ? [target.componentId] : []);
+      if (!components.some((component) => removedComponents.has(component))) continue;
+      if (!impacted.has(target.ip)) { impacted.add(target.ip); changed = true; }
+      for (const component of components) {
+        if (!removedComponents.has(component)) { removedComponents.add(component); changed = true; }
+      }
+    }
+  }
+  const excluded = new Set([...(plan.excludedTargets ?? []), ...targets]);
+  const addresses = plan.addresses.map((target) => impacted.has(target.ip)
+    ? {
+        ...target,
+        decision: "excluded" as const,
+        excludedByUser: excluded.has(target.ip),
+        exclusionReason: excluded.has(target.ip)
+          ? "Wykluczony ręcznie przez operatora."
+          : "Wykluczony razem z atomowym komponentem zależności.",
+        operationIds: [],
+        backupFiles: [],
+      }
+    : target);
+  return {
+    ...plan,
+    id: `${plan.id}-excluded`,
+    sessionId: `${plan.sessionId}-excluded`,
+    parentSessionId: plan.sessionId,
+    processCount: addresses.filter((target) => target.decision === "process").length,
+    excludedCount: impacted.size,
+    excludedTargets: [...excluded],
+    exclusionImpactedTargets: [...impacted],
+    excludedComponentIds: [...new Set([...(plan.excludedComponentIds ?? []), ...removedComponents])],
+    addresses,
+    operations: plan.operations.filter((operation) => !removedComponents.has(operation.componentId)),
+    warnings: [...plan.warnings, `Wykluczono ${targets.length} wskazanych celów z wykonania.`],
+  };
+}
+
 function job(id: string, kind: JobStatus["kind"], state: JobStatus["state"], progress: number): JobStatus {
   return { id, kind, state, progress, message: state === "success" ? "Zakończono poprawnie" : "Oczekiwanie na Panorama", startedAt: stamp, finishedAt: state === "success" ? stamp : undefined };
 }

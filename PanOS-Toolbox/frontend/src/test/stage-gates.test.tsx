@@ -13,6 +13,9 @@ const baseProps = {
   onOpenCleanup: vi.fn(),
   onCreateSinglePlan: vi.fn(),
   onCreateSelectionPlan: vi.fn(),
+  onExcludeTargets: vi.fn(),
+  onExcludeComponents: vi.fn(),
+  onUndoLastExclusion: vi.fn(),
   onPlanDependencies: vi.fn(),
   onRestoreTarget: vi.fn(),
   onApplyCandidate: vi.fn(),
@@ -38,6 +41,60 @@ describe("staged execution gates", () => {
     expect(enabled).toBeDefined();
     fireEvent.click(enabled!);
     expect(onCreateSinglePlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("wyklucza pojedynczy cel bez uruchamiania zapisu", () => {
+    const onExcludeTargets = vi.fn();
+    render(<PlanPage {...baseProps} onExcludeTargets={onExcludeTargets} executionSession={null} />);
+    const buttons = screen.getAllByRole("button", { name: "Wyklucz" });
+    const enabled = buttons.find((button) => !button.hasAttribute("disabled"));
+    expect(enabled).toBeDefined();
+    fireEvent.click(enabled!);
+    expect(onExcludeTargets).toHaveBeenCalledTimes(1);
+    expect(onExcludeTargets.mock.calls[0][0]).toHaveLength(1);
+  });
+
+  it("wyklucza zbiorczo zaznaczone cele", () => {
+    const onExcludeTargets = vi.fn();
+    render(<PlanPage {...baseProps} onExcludeTargets={onExcludeTargets} executionSession={null} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Zaznacz 10.42.16.19" }));
+    fireEvent.click(screen.getByRole("button", { name: "Wyklucz zaznaczone" }));
+    expect(onExcludeTargets).toHaveBeenCalledTimes(1);
+    expect(onExcludeTargets.mock.calls[0][0][0].ip).toBe("10.42.16.19");
+  });
+
+  it("pozwala wykluczyć znalezioną politykę lub obiekt przez cały komponent", () => {
+    const onExcludeComponents = vi.fn();
+    render(<PlanPage {...baseProps} onExcludeComponents={onExcludeComponents} executionSession={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "Rozwiń 10.42.16.19" }));
+    expect(screen.getAllByText("Allow-Legacy-API")).not.toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Wyklucz cały komponent" }));
+    expect(onExcludeComponents).toHaveBeenCalledWith(["component-a"]);
+  });
+
+  it("blokuje Candidate, gdy po wykluczeniu nie zostały operacje", () => {
+    render(<PlanPage {...baseProps} plan={{ ...demoCleanupPlan, operations: [], processCount: 0, excludedCount: 3 }} executionSession={null} />);
+    expect(screen.getByRole("button", { name: "Zapisz Candidate przez API" })).toBeDisabled();
+    expect(screen.getByText("Plan nie zawiera operacji")).toBeInTheDocument();
+  });
+
+  it("pokazuje wykluczone cele i pozwala wrócić do planu nadrzędnego", () => {
+    const onUndoLastExclusion = vi.fn();
+    const excludedPlan = {
+      ...demoCleanupPlan,
+      parentSessionId: "parent-session",
+      excludedCount: 1,
+      excludedTargets: ["10.42.16.19"],
+      exclusionImpactedTargets: ["10.42.16.19"],
+      addresses: demoCleanupPlan.addresses.map((target) => target.ip === "10.42.16.19"
+        ? { ...target, decision: "excluded" as const, excludedByUser: true, exclusionReason: "Wykluczony ręcznie przez operatora." }
+        : target),
+    };
+    render(<PlanPage {...baseProps} plan={excludedPlan} onUndoLastExclusion={onUndoLastExclusion} executionSession={null} />);
+    expect(screen.getByText("1 cel poza wykonaniem")).toBeInTheDocument();
+    expect(screen.getByText("Wykluczony z wykonania")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cofnij ostatnie wykluczenie" }));
+    expect(onUndoLastExclusion).toHaveBeenCalledTimes(1);
   });
 
   it("nie pozwala ponowić candidate dla terminalnej sesji FAILED", () => {

@@ -11,7 +11,12 @@ from panos_toolbox.cleaner_adapter import build_cleanup_patchset
 from panos_toolbox.models import ApiStage
 from panos_toolbox.profile import PanoramaProfile
 from panos_toolbox.sessions import SessionStore
-from panos_toolbox.web import _apply_profile_ceiling, _wire_session, create_app
+from panos_toolbox.web import (
+    _apply_profile_ceiling,
+    _cleanup_exclusion_closure,
+    _wire_session,
+    create_app,
+)
 from panos_toolbox.xmlutil import parse_xml
 
 
@@ -129,6 +134,38 @@ class CleanerAdapterTests(unittest.TestCase):
                     any("Application Override" in item for item in result.patchset.warnings)
                 )
 
+    def test_exclusion_expands_over_the_whole_atomic_dependency_component(self):
+        result = build_cleanup_patchset(
+            self.fixture(),
+            ("192.0.2.1", "192.0.2.2", "192.0.2.3"),
+            panorama_host="pano",
+            panorama_username="admin",
+        )
+        remaining, removed_components, impacted = _cleanup_exclusion_closure(
+            result.patchset, ("192.0.2.2",)
+        )
+        self.assertEqual(set(impacted), {"192.0.2.2", "192.0.2.3"})
+        self.assertEqual(len(removed_components), 1)
+        self.assertEqual(
+            {cause for mutation in remaining for cause in mutation.causes},
+            {"192.0.2.1"},
+        )
+
+        shared_component = next(
+            mutation.component_id
+            for mutation in result.patchset.mutations
+            if "192.0.2.1" in mutation.causes
+        )
+        remaining, removed_components, impacted = _cleanup_exclusion_closure(
+            result.patchset, component_ids=(shared_component,)
+        )
+        self.assertEqual(impacted, ("192.0.2.1",))
+        self.assertEqual(removed_components, (shared_component,))
+        self.assertEqual(
+            {cause for mutation in remaining for cause in mutation.causes},
+            {"192.0.2.2", "192.0.2.3"},
+        )
+
 
 class WebBoundaryTests(unittest.TestCase):
     def test_terminal_job_hides_dispatched_breadcrumb_instead_of_staying_at_50_percent(self):
@@ -186,6 +223,9 @@ class WebBoundaryTests(unittest.TestCase):
             )
             self.assertIn("POST /sessions/{id}/commit-jobs", response.json["paths"])
             self.assertIn("POST /sessions/{id}/push-jobs", response.json["paths"])
+            self.assertIn(
+                "POST /cleanup/plans/{id}/exclusions", response.json["paths"]
+            )
             self.assertNotIn("Access-Control-Allow-Origin", response.headers)
             self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
             self.assertNotIn("unsafe-inline", response.headers["Content-Security-Policy"])
@@ -470,6 +510,47 @@ class WebBoundaryTests(unittest.TestCase):
                 self.assertEqual(split.status_code, 201, split.get_data(as_text=True))
                 self.assertEqual(split.json["sourceCount"], 1)
                 self.assertTrue(split.json["operations"])
+
+                excluded = client.post(
+                    f"/api/v1/cleanup/plans/{job['plan']['sessionId']}/exclusions",
+                    json={"targets": [target["ip"]]},
+                    headers=session_headers,
+                )
+                self.assertEqual(
+                    excluded.status_code, 201, excluded.get_data(as_text=True)
+                )
+                self.assertEqual(excluded.json["excludedCount"], 1)
+                self.assertEqual(excluded.json["excludedTargets"], [target["ip"]])
+                self.assertEqual(
+                    excluded.json["parentSessionId"], job["plan"]["sessionId"]
+                )
+                self.assertEqual(excluded.json["addresses"][0]["decision"], "excluded")
+                self.assertTrue(excluded.json["addresses"][0]["excludedByUser"])
+                self.assertFalse(excluded.json["operations"])
+
+                excluded_component = client.post(
+                    f"/api/v1/cleanup/plans/{job['plan']['sessionId']}/exclusions",
+                    json={"targets": [], "component_ids": [target["componentId"]]},
+                    headers=session_headers,
+                )
+                self.assertEqual(
+                    excluded_component.status_code,
+                    201,
+                    excluded_component.get_data(as_text=True),
+                )
+                self.assertEqual(
+                    excluded_component.json["excludedComponentIds"],
+                    [target["componentId"]],
+                )
+                self.assertEqual(excluded_component.json["excludedCount"], 1)
+                self.assertFalse(excluded_component.json["operations"])
+
+                parent = client.get(
+                    f"/api/v1/cleanup/plans/{job['plan']['sessionId']}",
+                    headers={"Host": "localhost", "X-Toolbox-Session": token},
+                )
+                self.assertEqual(parent.status_code, 200)
+                self.assertTrue(parent.json["operations"])
 
 
 if __name__ == "__main__":

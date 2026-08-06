@@ -215,6 +215,15 @@ def _wire_session(store: SessionStore, session_id: str) -> dict[str, Any]:
 def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
     manifest = store.load_manifest(session_id)
     patch = store.load_patchset(session_id)
+    excluded_targets = {
+        str(item) for item in manifest.get("excluded_targets") or ()
+    }
+    exclusion_impacted_targets = {
+        str(item) for item in manifest.get("exclusion_impacted_targets") or ()
+    }
+    excluded_component_ids = {
+        str(item) for item in manifest.get("excluded_component_ids") or ()
+    }
     ping_by_ip = {item["ip"]: item for item in manifest.get("icmp", [])}
     inventory_by_ip = manifest.get("inventory") or {}
     input_targets = manifest.get("input_targets") or {}
@@ -322,7 +331,9 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
             "blocked_reasons": [],
         }
         decision = (
-            "skip-live"
+            "excluded"
+            if target in exclusion_impacted_targets
+            else "skip-live"
             if ping_state == "responded"
             else "skip-error"
             if ping_state == "error"
@@ -399,6 +410,14 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
                 "icmp": ping_state,
                 "icmpDetail": ping.get("detail"),
                 "decision": decision,
+                "excludedByUser": target in excluded_targets,
+                "exclusionReason": (
+                    "Wykluczony ręcznie przez operatora."
+                    if target in excluded_targets
+                    else "Wykluczony razem z atomowym komponentem zależności."
+                    if target in exclusion_impacted_targets
+                    else None
+                ),
                 "lastHit": (last_hit_record or {}).get("last_hit_utc"),
                 "hitCount": (last_hit_record or {}).get("hit_count"),
                 "lastHitAgeDays": (last_hit_record or {}).get("age_days"),
@@ -433,6 +452,11 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
         "skippedLiveCount": sum(item["decision"] == "skip-live" for item in addresses),
         "skippedErrorCount": sum(item["decision"] == "skip-error" for item in addresses),
         "notFoundCount": sum(item["decision"] == "not-found" for item in addresses),
+        "excludedCount": sum(item["decision"] == "excluded" for item in addresses),
+        "excludedTargets": sorted(excluded_targets),
+        "exclusionImpactedTargets": sorted(exclusion_impacted_targets),
+        "excludedComponentIds": sorted(excluded_component_ids),
+        "parentSessionId": manifest.get("parent_session_id"),
         "recentHitCount": (manifest.get("last_hit") or {}).get("recent_hit_count", 0),
         "affectedDeviceGroups": manifest.get("affected_device_groups") or [],
         "diff": _wire_diff(manifest.get("diff_summary") or {}),
@@ -440,6 +464,53 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
         "addresses": addresses,
         "operations": _wire_operations(patch),
     }
+
+
+def _cleanup_exclusion_closure(
+    patch: PatchSet,
+    targets: Iterable[str] = (),
+    *,
+    component_ids: Iterable[str] = (),
+) -> tuple[tuple[Any, ...], tuple[str, ...], tuple[str, ...]]:
+    """Remove every atomically connected component for the excluded targets.
+
+    One target can participate in several components and one component can be
+    shared by several targets.  The seed may therefore be either a target or
+    an exact component selected from the operation inspector.  Expanding the
+    closure until it is stable guarantees that an indirectly impacted target
+    cannot still retain a mutation in the executable child plan.
+    """
+
+    impacted = {str(target) for target in targets}
+    removed_components = {str(component_id) for component_id in component_ids}
+    impacted.update(
+        cause
+        for mutation in patch.mutations
+        if mutation.component_id in removed_components
+        for cause in mutation.causes
+    )
+    while True:
+        next_components = {
+            mutation.component_id
+            for mutation in patch.mutations
+            if mutation.component_id not in removed_components
+            and impacted.intersection(mutation.causes)
+        }
+        if not next_components:
+            break
+        removed_components.update(next_components)
+        impacted.update(
+            cause
+            for mutation in patch.mutations
+            if mutation.component_id in next_components
+            for cause in mutation.causes
+        )
+    remaining = tuple(
+        mutation
+        for mutation in patch.mutations
+        if mutation.component_id not in removed_components
+    )
+    return remaining, tuple(sorted(removed_components)), tuple(sorted(impacted))
 
 
 def _create_cleanup_child_plan(
@@ -450,6 +521,10 @@ def _create_cleanup_child_plan(
     *,
     note: str,
     chosen_targets: Iterable[str],
+    allow_empty: bool = False,
+    excluded_targets: Iterable[str] = (),
+    exclusion_impacted_targets: Iterable[str] = (),
+    excluded_component_ids: Iterable[str] = (),
 ) -> str:
     parent_manifest = store.load_manifest(parent_id)
     if parent_manifest["state"] != SessionState.PLANNED.value:
@@ -461,7 +536,12 @@ def _create_cleanup_child_plan(
     ):
         raise InputError("Plan nadrzędny należy do innego hosta lub operatora.")
     mutations = tuple(selected)
-    if not mutations:
+    chosen = tuple(dict.fromkeys(chosen_targets))
+    excluded = tuple(dict.fromkeys(excluded_targets))
+    exclusion_impacted = tuple(dict.fromkeys(exclusion_impacted_targets))
+    excluded_components = tuple(dict.fromkeys(excluded_component_ids))
+    exclusion_mode = bool(excluded or exclusion_impacted or excluded_components)
+    if not mutations and not allow_empty:
         raise InputError("Wybrany podzbiór nie zawiera bezpiecznych mutacji.")
     selected_components = {mutation.component_id for mutation in mutations}
     complete = tuple(
@@ -482,7 +562,9 @@ def _create_cleanup_child_plan(
         panorama_username=parent_patch.panorama_username,
         mutations=complete,
         targets=component_targets,
-        affected_device_groups=parent_patch.affected_device_groups,
+        affected_device_groups=(
+            parent_patch.affected_device_groups if complete else ()
+        ),
         warnings=(*parent_patch.warnings, note),
     )
     child_id = store.create(
@@ -497,7 +579,7 @@ def _create_cleanup_child_plan(
     parent_icmp = parent_manifest.get("icmp") or []
     selected_entity_keys = {mutation.entity_key for mutation in complete}
     parent_hit = parent_manifest.get("last_hit") or {}
-    hit_records = [
+    hit_records = list(parent_hit.get("records") or []) if exclusion_mode else [
         record
         for record in parent_hit.get("records") or []
         if "/".join(
@@ -521,35 +603,42 @@ def _create_cleanup_child_plan(
 
     def enrich_child(manifest: dict[str, Any]) -> None:
         manifest["parent_session_id"] = parent_id
-        manifest["selected_targets"] = list(dict.fromkeys(chosen_targets))
-        manifest["icmp"] = [
+        manifest["selected_targets"] = list(component_targets if exclusion_mode else chosen)
+        manifest["excluded_targets"] = list(excluded)
+        manifest["exclusion_impacted_targets"] = list(exclusion_impacted)
+        manifest["excluded_component_ids"] = list(excluded_components)
+        manifest["icmp"] = list(parent_icmp) if exclusion_mode else [
             item for item in parent_icmp if item.get("ip") in component_targets
         ]
         manifest["last_hit"] = child_hit
-        manifest["input_targets"] = {
-            "ips": [item for item in parent_inputs.get("ips", []) if item in component_targets],
-            "address_objects": [
-                item
-                for item in parent_inputs.get("address_objects", [])
-                if f"object:{item}" in component_targets
-            ],
-            "address_groups": [
-                item
-                for item in parent_inputs.get("address_groups", [])
-                if f"group:{item}" in component_targets
-            ],
-            "policies": [
-                item
-                for item in parent_inputs.get("policies", [])
-                if f"policy:{item}" in component_targets
-            ],
-            "ordered": list(component_targets),
-        }
-        manifest["inventory"] = {
-            item: parent_inventory[item]
-            for item in component_targets
-            if item in parent_inventory
-        }
+        if exclusion_mode:
+            manifest["input_targets"] = dict(parent_inputs)
+            manifest["inventory"] = dict(parent_inventory)
+        else:
+            manifest["input_targets"] = {
+                "ips": [item for item in parent_inputs.get("ips", []) if item in component_targets],
+                "address_objects": [
+                    item
+                    for item in parent_inputs.get("address_objects", [])
+                    if f"object:{item}" in component_targets
+                ],
+                "address_groups": [
+                    item
+                    for item in parent_inputs.get("address_groups", [])
+                    if f"group:{item}" in component_targets
+                ],
+                "policies": [
+                    item
+                    for item in parent_inputs.get("policies", [])
+                    if f"policy:{item}" in component_targets
+                ],
+                "ordered": list(component_targets),
+            }
+            manifest["inventory"] = {
+                item: parent_inventory[item]
+                for item in component_targets
+                if item in parent_inventory
+            }
 
     store.update(child_id, enrich_child)
     operation_lines = [
@@ -569,7 +658,12 @@ def _create_cleanup_child_plan(
             [
                 f"Plan podzbioru: {child_id}",
                 f"Plan nadrzędny: {parent_id}",
-                "Cele wybrane w GUI: " + ", ".join(chosen_targets),
+                "Cele wybrane w GUI: " + ", ".join(chosen),
+                "Cele jawnie wykluczone: " + ", ".join(excluded),
+                "Cele wykluczone przez atomowy komponent: "
+                + ", ".join(exclusion_impacted),
+                "Komponenty wybrane do wykluczenia: "
+                + ", ".join(excluded_components),
                 "Powiązane cele atomowych komponentów: " + ", ".join(component_targets),
                 f"Komponenty: {len(selected_components)}",
                 f"Mutacje: {len(complete)}",
@@ -732,6 +826,7 @@ def _contract() -> dict[str, Any]:
             "GET /cleanup/analysis-jobs/{id}": "poll analysis progress/result",
             "POST /cleanup/plans/{id}/components/{component}": "derive isolated component plan",
             "POST /cleanup/plans/{id}/selection": "derive plan for selected target rows",
+            "POST /cleanup/plans/{id}/exclusions": "derive a safe plan without selected targets and their atomic components",
             "POST /sessions/{id}/candidate-jobs": "path-by-path candidate write with progress",
             "POST /sessions/{id}/commit-jobs": "background Panorama commit with phase timings",
             "POST /sessions/{id}/push-jobs": "background Panorama push with phase timings",
@@ -907,7 +1002,7 @@ def create_app(
     def string_list_field(
         value: dict[str, Any], key: str, *, fallback_key: Optional[str] = None
     ) -> list[str]:
-        raw = value.get(key, value.get(fallback_key, ()) if fallback_key else ())
+        raw = value.get(key, value.get(fallback_key, []) if fallback_key else [])
         if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
             raise InputError(f"Pole {key} musi być tablicą tekstów JSON.")
         return raw
@@ -1140,7 +1235,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.4.1", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.4.2", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -1466,6 +1561,105 @@ def create_app(
                 f"{len(targets)} celów i {len(selected_components)} atomowych komponentów."
             ),
             chosen_targets=targets,
+        )
+        return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
+
+    @app.post("/api/v1/cleanup/plans/<plan_id>/exclusions")
+    def cleanup_exclusion_plan(plan_id: str):
+        value = body()
+        client = reader()
+        requested = string_list_field(value, "targets")
+        requested = list(
+            dict.fromkeys(item.strip() for item in requested if item.strip())
+        )
+        requested_components = string_list_field(value, "component_ids")
+        requested_components = list(
+            dict.fromkeys(
+                item.strip() for item in requested_components if item.strip()
+            )
+        )
+        if not requested and not requested_components:
+            raise InputError(
+                "Zaznacz co najmniej jeden cel albo komponent do wykluczenia."
+            )
+
+        parent_manifest = session_store.load_manifest(plan_id)
+        if parent_manifest["state"] != SessionState.PLANNED.value:
+            raise InputError("Cele można wykluczać tylko z planu PLANNED.")
+        known_targets = set(
+            (parent_manifest.get("input_targets") or {}).get("ordered") or ()
+        )
+        unknown = sorted(set(requested) - known_targets)
+        if unknown:
+            raise InputError(
+                "Cele nie należą do planu: " + ", ".join(unknown[:10])
+            )
+
+        parent_patch = session_store.load_patchset(plan_id)
+        known_components = {
+            mutation.component_id for mutation in parent_patch.mutations
+        }
+        unknown_components = sorted(
+            set(requested_components) - known_components
+        )
+        if unknown_components:
+            raise InputError(
+                "Komponenty nie należą do aktywnego planu: "
+                + ", ".join(unknown_components[:10])
+            )
+        processable = {
+            cause for mutation in parent_patch.mutations for cause in mutation.causes
+        }
+        inactive = sorted(set(requested) - processable)
+        if inactive:
+            raise InputError(
+                "Cel nie ma aktywnych operacji do wykluczenia: "
+                + ", ".join(inactive[:10])
+            )
+
+        remaining, removed_components, newly_impacted = _cleanup_exclusion_closure(
+            parent_patch,
+            requested,
+            component_ids=requested_components,
+        )
+        existing_excluded = {
+            str(item) for item in parent_manifest.get("excluded_targets") or ()
+        }
+        existing_impacted = {
+            str(item)
+            for item in parent_manifest.get("exclusion_impacted_targets") or ()
+        }
+        existing_components = {
+            str(item)
+            for item in parent_manifest.get("excluded_component_ids") or ()
+        }
+        excluded = tuple(sorted(existing_excluded.union(requested)))
+        impacted = tuple(
+            sorted(existing_impacted.union(newly_impacted).intersection(known_targets))
+        )
+        excluded_components = tuple(
+            sorted(existing_components.union(removed_components))
+        )
+        remaining_targets = tuple(
+            sorted({cause for mutation in remaining for cause in mutation.causes})
+        )
+        note = (
+            f"Wykluczenie operatora: {len(requested)} celów i "
+            f"{len(requested_components)} komponentów; usunięto z wykonania "
+            f"{len(removed_components)} atomowych komponentów; "
+            f"{len(impacted)} celów jest poza planem wykonawczym."
+        )
+        child_id = _create_cleanup_child_plan(
+            session_store,
+            plan_id,
+            client,
+            remaining,
+            note=note,
+            chosen_targets=remaining_targets,
+            allow_empty=True,
+            excluded_targets=excluded,
+            exclusion_impacted_targets=impacted,
+            excluded_component_ids=excluded_components,
         )
         return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
 

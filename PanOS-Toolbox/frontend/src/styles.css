@@ -917,11 +917,21 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .plan-list-toolbar strong { font-size: .76rem; }
 .plan-list-toolbar span { color: var(--text-muted); font-size: .62rem; }
 .selection-counter { color: var(--accent) !important; font-weight: 750; }
+.exclusion-summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 17px; color: var(--text-soft); background: color-mix(in srgb, var(--warning) 8%, var(--surface-soft)); border-bottom: 1px solid color-mix(in srgb, var(--warning) 28%, var(--border)); }
+.exclusion-summary > div:first-child { display: flex; min-width: 0; align-items: flex-start; gap: 9px; }
+.exclusion-summary > div:first-child > svg { flex: none; color: var(--warning); }
+.exclusion-summary span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.exclusion-summary strong { color: var(--text); font-size: .7rem; }
+.exclusion-summary small { color: var(--text-muted); font-size: .59rem; line-height: 1.45; }
 .policy-plan-table .entity-cell { display: flex; align-items: center; gap: 9px; }
 .policy-plan-table .entity-cell > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .row-index { width: 22px; color: var(--text-muted); font-size: .58rem; }
 .backup-count { display: inline-flex; align-items: center; gap: 5px; color: var(--blue); font-size: .65rem; }
-.row-actions { display: flex; gap: 4px; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.plan-table .row-excluded { background: color-mix(in srgb, var(--text-muted) 7%, var(--surface)); }
+.plan-table .row-excluded > td { opacity: .68; }
+.plan-table .row-excluded .status-pill { opacity: 1; }
+.exclusion-reason { display: block; max-width: 190px; margin-top: 5px; color: var(--text-muted); font-size: .54rem; line-height: 1.35; }
 .target-inspector { display: flex; flex-direction: column; gap: 12px; padding: 4px; }
 .policy-delete-note { display: flex; align-items: flex-start; gap: 8px; padding: 10px; color: var(--blue); background: var(--blue-soft); border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--border)); border-radius: 8px; font-size: .65rem; line-height: 1.45; }
 .entity-inspection { display: flex; flex-direction: column; gap: 11px; padding: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
@@ -942,6 +952,17 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .dependency-tree strong { font-size: .64rem; }
 .dependency-tree small { color: var(--text-muted); font-size: .56rem; }
 .entity-backups { display: flex; flex-direction: column; gap: 6px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; }
+.execution-components { display: flex; flex-direction: column; gap: 7px; padding: 12px; background: color-mix(in srgb, var(--warning) 5%, var(--bg)); border: 1px solid color-mix(in srgb, var(--warning) 22%, var(--border)); border-radius: 9px; }
+.execution-components > h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 2px; color: var(--text-soft); font-size: .66rem; }
+.execution-components > section { display: grid; grid-template-columns: minmax(130px, .35fr) minmax(240px, 1fr) auto; align-items: center; gap: 12px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.execution-components > section > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.execution-components > section > div strong { font-size: .65rem; }
+.execution-components > section > div small { overflow: hidden; color: var(--text-muted); font: .54rem "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.execution-components ul { display: flex; min-width: 0; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.execution-components li { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.execution-components li > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.execution-components li strong { overflow: hidden; font-size: .61rem; text-overflow: ellipsis; white-space: nowrap; }
+.execution-components li small { color: var(--text-muted); font-size: .54rem; }
 .entity-backups > div { display: grid; grid-template-columns: minmax(200px, .7fr) minmax(300px, 1.3fr); gap: 12px; align-items: center; }
 .entity-backups > div > span { display: flex; flex-direction: column; gap: 2px; }
 .entity-backups strong { font-size: .64rem; }
@@ -1045,6 +1066,8 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
   .entity-field-grid, .analysis-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .entity-last-hit { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .entity-last-hit > small { grid-column: 1 / -1; }
+  .execution-components > section { grid-template-columns: minmax(120px, .35fr) minmax(220px, 1fr); }
+  .execution-components > section > .button { grid-column: 1 / -1; justify-self: start; }
 }
 
 @media (max-width: 760px) {
@@ -1053,6 +1076,10 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
   .inspector-fields, .entity-field-grid, .analysis-summary-grid { grid-template-columns: 1fr; }
   .entity-last-hit { grid-template-columns: 1fr; }
   .entity-backups > div { grid-template-columns: 1fr; }
+  .plan-list-toolbar, .exclusion-summary { align-items: stretch; flex-direction: column; }
+  .plan-list-toolbar > div:last-child { flex-wrap: wrap; }
+  .execution-components > section { grid-template-columns: 1fr; }
+  .execution-components > section > .button { grid-column: auto; justify-self: stretch; }
   .dependency-tree > label { grid-template-columns: auto auto minmax(0, 1fr); }
   .dependency-tree > label > span:last-child, .dependency-tree > label > small:last-child { grid-column: 3; }
   .candidate-operation-log > div { grid-template-columns: 20px minmax(0, 1fr); }

@@ -347,6 +347,62 @@ export default function App() {
     }
   };
 
+  const excludeTargets = async (targets: AddressAnalysis[]) => {
+    if (!cleanupPlan || !targets.length) return;
+    const busyKey = targets.length === 1 ? `exclude:${targets[0].ip}` : "exclude-selection";
+    setSinglePlanBusy(busyKey);
+    setError(null);
+    try {
+      const targetIds = targets.map((target) => target.ip);
+      const plan = demoMode && demoApi
+        ? demoApi.demoExclusionPlan(cleanupPlan, targetIds)
+        : await api.createExclusionPlan(cleanupPlan.sessionId, targetIds);
+      setCleanupPlan(plan);
+      setExecutionSession(null);
+      setExecutionJob(null);
+    } catch (exclusionError) {
+      setError(getErrorMessage(exclusionError));
+    } finally {
+      setSinglePlanBusy(null);
+    }
+  };
+
+  const excludeComponents = async (componentIds: string[]) => {
+    if (!cleanupPlan || !componentIds.length) return;
+    setSinglePlanBusy(`exclude-component:${componentIds[0]}`);
+    setError(null);
+    try {
+      const plan = demoMode && demoApi
+        ? demoApi.demoExclusionPlan(cleanupPlan, [], componentIds)
+        : await api.createExclusionPlan(cleanupPlan.sessionId, [], componentIds);
+      setCleanupPlan(plan);
+      setExecutionSession(null);
+      setExecutionJob(null);
+    } catch (exclusionError) {
+      setError(getErrorMessage(exclusionError));
+    } finally {
+      setSinglePlanBusy(null);
+    }
+  };
+
+  const undoLastExclusion = async () => {
+    if (!cleanupPlan?.parentSessionId) return;
+    setSinglePlanBusy("undo-exclusion");
+    setError(null);
+    try {
+      const plan = demoMode && demoApi
+        ? demoApi.demoCleanupPlan
+        : await api.getCleanupPlan(cleanupPlan.parentSessionId);
+      setCleanupPlan(plan);
+      setExecutionSession(null);
+      setExecutionJob(null);
+    } catch (undoError) {
+      setError(getErrorMessage(undoError));
+    } finally {
+      setSinglePlanBusy(null);
+    }
+  };
+
   const generateAdGroup = async () => {
     setMainBusy("ad-groups");
     setAdGroupResult(null);
@@ -552,7 +608,7 @@ export default function App() {
   else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} busy={mainBusy === "analyze"} progress={analysisJob} lookupResult={lookupResult} lookupBusy={lookupBusy} error={error} onLookup={(kind, names, deviceGroup) => void runLookup(kind, names, deviceGroup)} onAddLookupEntities={addLookupEntitiesToBatch} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;
   else if (view === "warnings") page = <WarningsPage notices={notices} />;
   else if (view === "ad-groups") page = <AdGroupsPage draft={adGroupDraft} onDraftChange={setAdGroupDraft} result={adGroupResult} busy={mainBusy === "ad-groups"} error={error} onGenerate={() => void generateAdGroup()} />;
-  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
+  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
   else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} executionJob={restoreExecutionJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;

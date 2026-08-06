@@ -247,6 +247,13 @@ export const api = {
     });
   },
 
+  async createExclusionPlan(planId: string, targets: string[] = [], componentIds: string[] = []): Promise<CleanupPlan> {
+    return request(`/cleanup/plans/${encodeURIComponent(planId)}/exclusions`, {
+      method: "POST",
+      body: { targets, component_ids: componentIds },
+    });
+  },
+
   async getCleanupPlan(planId: string): Promise<CleanupPlan> {
     return request(`/cleanup/plans/${encodeURIComponent(planId)}`);
   },

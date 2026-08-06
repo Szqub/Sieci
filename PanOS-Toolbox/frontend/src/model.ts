@@ -98,7 +98,7 @@ export interface DiffSummary {
 }
 
 export type IcmpState = "responded" | "timeout" | "error" | "not-run";
-export type Decision = "process" | "skip-live" | "skip-error" | "not-found" | "blocked";
+export type Decision = "process" | "skip-live" | "skip-error" | "not-found" | "blocked" | "excluded";
 
 export interface ReferenceLocation {
   id: string;
@@ -158,6 +158,8 @@ export interface AddressAnalysis {
   icmp: IcmpState;
   icmpDetail?: string;
   decision: Decision;
+  excludedByUser?: boolean;
+  exclusionReason?: string;
   lastHit?: string;
   hitCount?: number;
   lastHitAgeDays?: number;
@@ -198,6 +200,11 @@ export interface CleanupPlan {
   skippedLiveCount: number;
   skippedErrorCount: number;
   notFoundCount: number;
+  excludedCount?: number;
+  excludedTargets?: string[];
+  exclusionImpactedTargets?: string[];
+  excludedComponentIds?: string[];
+  parentSessionId?: string;
   recentHitCount: number;
   affectedDeviceGroups: string[];
   diff: DiffSummary;

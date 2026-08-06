@@ -135,4 +135,41 @@ describe("typed API client", () => {
       policies: ["ALLOW OLD"],
     });
   });
+
+  it("tworzy bezpieczny plan wykluczeń dla wskazanych celów", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "child", addresses: [], operations: [] }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await api.createExclusionPlan("session parent/1", ["policy:KEEP-ME", "object:KEEP-IP"]);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/cleanup/plans/session%20parent%2F1/exclusions",
+    );
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(request.body as string)).toEqual({
+      targets: ["policy:KEEP-ME", "object:KEEP-IP"],
+      component_ids: [],
+    });
+  });
+
+  it("wyklucza dokładny atomowy komponent z inspektora operacji", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "child", addresses: [], operations: [] }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await api.createExclusionPlan("session-1", [], ["component-policy-1"]);
+
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(request.body as string)).toEqual({
+      targets: [],
+      component_ids: ["component-policy-1"],
+    });
+  });
 });
