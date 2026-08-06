@@ -525,7 +525,11 @@ def create_app(
         from flask import Flask, Response, jsonify, request, send_file, send_from_directory
         from werkzeug.exceptions import HTTPException
     except ImportError as exc:  # pragma: no cover - packaging diagnostic
-        raise RuntimeError("Web GUI wymaga: python -m pip install -r backend/requirements.txt") from exc
+        raise RuntimeError(
+            "Brak spakowanego Flask/Werkzeug. Uruchom kompletną paczkę portable "
+            "z https://github.com/Szqub/Sieci/releases/latest po użyciu opcji "
+            "'Wyodrębnij wszystkie'; nie instaluj zależności przez pip."
+        ) from exc
 
     frontend = (static_dir or Path(__file__).resolve().parent / "static").resolve()
     app = Flask(__name__, static_folder=None)
@@ -674,7 +678,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.1.0", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.1.1", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")

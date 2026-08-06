@@ -133,9 +133,11 @@ foreach ($file in @(
     "panos-toolbox.py",
     "panos_toolbox.py",
     "README.md",
+    "ROZPAKUJ_I_URUCHOM.txt",
     "LAB_VALIDATION.md",
     "panorama_host.txt.example",
     "ip.txt.example",
+    "start_toolbox.cmd",
     "start_toolbox.ps1"
 )) {
     Copy-Item -LiteralPath (Join-Path $toolboxRoot $file) -Destination $packageRoot
@@ -144,6 +146,8 @@ Copy-Item -LiteralPath $requirements -Destination (Join-Path $packageRoot "backe
 
 $doctorStore = Join-Path $staging "doctor-sessions"
 Invoke-BuildPython -Arguments @(
+    "-I",
+    "-S",
     (Join-Path $packageRoot "panos-toolbox.py"),
     "doctor",
     "--session-dir", $doctorStore
@@ -151,6 +155,91 @@ Invoke-BuildPython -Arguments @(
 if (Test-Path -LiteralPath $doctorStore) {
     Remove-Item -LiteralPath $doctorStore -Recurse -Force
 }
+
+# Validate the exact double-click launcher shipped to the target machine.
+$cmdLauncher = Join-Path $packageRoot "start_toolbox.cmd"
+& $env:ComSpec /d /c ('"' + $cmdLauncher + '" doctor')
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaged start_toolbox.cmd doctor failed with exit code $LASTEXITCODE."
+}
+
+# Start the unpacked package with only its vendored runtime and verify a real
+# loopback HTTP response. This catches launchers that pass Doctor but cannot
+# import Flask while creating the web application.
+$portProbe = [System.Net.Sockets.TcpListener]::new(
+    [System.Net.IPAddress]::Loopback,
+    0
+)
+$portProbe.Start()
+$verifyPort = ([System.Net.IPEndPoint]$portProbe.LocalEndpoint).Port
+$portProbe.Stop()
+$serverStdout = Join-Path $staging "portable-server.stdout.log"
+$serverStderr = Join-Path $staging "portable-server.stderr.log"
+$serverSessions = Join-Path $staging "portable-server-sessions"
+$serverEntrypoint = Join-Path $packageRoot "panos-toolbox.py"
+$pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+if ($pyLauncher) {
+    $serverExecutable = $pyLauncher.Source
+    $serverArguments = @(
+        "-3", "-I", "-S", $serverEntrypoint,
+        "serve", "--port", [string]$verifyPort,
+        "--session-dir", $serverSessions
+    )
+}
+else {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        throw "Python 3 was not found for portable HTTP verification."
+    }
+    $serverExecutable = $python.Source
+    $serverArguments = @(
+        "-I", "-S", $serverEntrypoint,
+        "serve", "--port", [string]$verifyPort,
+        "--session-dir", $serverSessions
+    )
+}
+$serverProcessParameters = @{
+    FilePath = $serverExecutable
+    ArgumentList = $serverArguments
+    WorkingDirectory = $packageRoot
+    RedirectStandardOutput = $serverStdout
+    RedirectStandardError = $serverStderr
+    WindowStyle = "Hidden"
+    PassThru = $true
+}
+$serverProcess = Start-Process @serverProcessParameters
+$httpStatus = $null
+try {
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        if ($serverProcess.HasExited) {
+            break
+        }
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing `
+                -Uri "http://127.0.0.1:$verifyPort/api/v1/health" `
+                -TimeoutSec 2
+            $httpStatus = $response.StatusCode
+            break
+        }
+        catch {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+finally {
+    if (-not $serverProcess.HasExited) {
+        Stop-Process -Id $serverProcess.Id -Force
+        $serverProcess.WaitForExit()
+    }
+}
+if ($httpStatus -ne 200) {
+    $stderrText = if (Test-Path -LiteralPath $serverStderr) {
+        (Get-Content -LiteralPath $serverStderr -Raw -ErrorAction SilentlyContinue)
+    }
+    else { "" }
+    throw "Portable HTTP verification failed (status=$httpStatus). $stderrText"
+}
+Write-Host "Portable package HTTP verification: 127.0.0.1:$verifyPort -> 200"
 
 # The packaged doctor imports the staged application and therefore creates
 # bytecode caches. Never ship build-host bytecode or cache directories.
@@ -163,6 +252,8 @@ Get-ChildItem -LiteralPath $packageRoot -File -Filter "*.pyo" -Recurse -ErrorAct
 
 foreach ($requiredPackageFile in @(
     (Join-Path $packageRoot "panos-toolbox.py")
+    (Join-Path $packageRoot "start_toolbox.cmd")
+    (Join-Path $packageRoot "ROZPAKUJ_I_URUCHOM.txt")
     (Join-Path $packageBackend "__init__.py")
     (Join-Path $packageBackend "static\index.html")
     (Join-Path $packageVendorRoot "flask\__init__.py")

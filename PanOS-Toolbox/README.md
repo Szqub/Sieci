@@ -20,6 +20,15 @@ Wymagany jest Python 3.10+ i rozpakowana paczka zawierająca gotowy frontend.
 Paczka release zawiera zależności webowe w `backend/vendor`: nie wymaga
 Node.js, `pip install`, praw administratora ani lokalnego serwera IIS/Apache.
 
+Pobierz asset ZIP z [najnowszego GitHub Release](https://github.com/Szqub/Sieci/releases/latest).
+Checkout utworzony przez `git clone` jest kodem źródłowym i celowo nie zawiera
+`backend/vendor`; na maszynie docelowej uruchamiaj wyłącznie paczkę portable.
+
+Najprościej: wybierz w Eksploratorze **Wyodrębnij wszystkie**, wejdź do katalogu
+`PanOS-Toolbox` i uruchom dwuklikiem `start_toolbox.cmd`. Launcher sprawdza
+kompletność paczki i uruchamia Pythona z `-I -S`, więc globalny Flask nie jest
+używany.
+
 ```powershell
 Expand-Archive .\PanOS-Toolbox-YYYYMMDD-HHMMSS.zip -DestinationPath .\PanOS-Toolbox
 Set-Location .\PanOS-Toolbox
@@ -27,6 +36,14 @@ Copy-Item .\panorama_host.txt.example .\panorama_host.txt
 notepad .\panorama_host.txt
 py -3 -I -S .\panos-toolbox.py doctor --host-file .\panorama_host.txt
 .\start_toolbox.ps1 -Port 8765
+```
+
+Alternatywny launcher CMD oraz jego diagnostyka:
+
+```powershell
+.\start_toolbox.cmd
+.\start_toolbox.cmd doctor
+.\start_toolbox.cmd 9000
 ```
 
 Następnie otwórz `http://127.0.0.1:8765/`. Serwera nie uruchamiaj z bindem
