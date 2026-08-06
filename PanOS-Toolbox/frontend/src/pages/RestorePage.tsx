@@ -115,7 +115,7 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, apiM
             <div className="restore-stage-grid">
               <Card className={candidateDone ? "restore-stage restore-stage--done" : "restore-stage"}>
                 <span>1</span><ServerCog size={21} /><h3>Restore Candidate</h3><p>Powtórny fingerprint, backup bieżącego stanu, inverse patch i validation.</p>
-                {!stageAllows(apiMaxStage, "candidate") && <small className="stage-blocked"><Lock size={13} /> Zablokowane przez profil</small>}
+                {!stageAllows(apiMaxStage, "candidate") && <small className="stage-blocked"><Lock size={13} /> Zablokowane przez tryb wykonania</small>}
                 <Button variant="primary" loading={busy === "candidate"} disabled={!writeEnabled || !stageAllows(apiMaxStage, "candidate") || state !== "PLANNED"} onClick={onApplyCandidate}>Zastosuj safe subset</Button>
               </Card>
               <Card className={commitDone ? "restore-stage restore-stage--done" : "restore-stage"}>

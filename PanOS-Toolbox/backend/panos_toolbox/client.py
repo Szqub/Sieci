@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import socket
 import ssl
 import threading
@@ -144,6 +145,7 @@ class PanoramaReadClient:
         self.profile = profile
         self.transport: XMLTransport = transport or UrllibXMLTransport(profile)
         self._api_key: Optional[str] = None
+        self._config_cache: dict[str, tuple[float, ET.Element]] = {}
 
     def _post(self, params: Mapping[str, str], *, mutating: bool = False) -> ET.Element:
         headers = {"X-PAN-KEY": self._api_key} if self._api_key else {}
@@ -171,7 +173,17 @@ class PanoramaReadClient:
         root = self._post(
             {"type": "config", "action": action, "xpath": "/config"}
         )
-        return parse_api_response(ET.tostring(root), expect_config=True)
+        config = parse_api_response(ET.tostring(root), expect_config=True)
+        self._config_cache[config_type] = (time.monotonic(), copy.deepcopy(config))
+        return config
+
+    def fetch_config_cached(
+        self, config_type: str, *, max_age_seconds: float = 300.0
+    ) -> ET.Element:
+        cached = self._config_cache.get(config_type)
+        if cached and time.monotonic() - cached[0] <= max_age_seconds:
+            return copy.deepcopy(cached[1])
+        return self.fetch_config(config_type)
 
     def run_op_show(self, command: ET.Element) -> ET.Element:
         self.assert_authenticated()
@@ -199,6 +211,7 @@ class PanoramaReadClient:
 
     def close(self) -> None:
         self._api_key = None
+        self._config_cache.clear()
 
 
 class PanoramaWriteClient:

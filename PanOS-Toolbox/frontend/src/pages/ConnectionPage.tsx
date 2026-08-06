@@ -31,7 +31,7 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
       <PageHeader
         eyebrow="Workspace / Connection"
         title="Połącz Toolbox z Panorama"
-        description="Poświadczenia żyją wyłącznie w pamięci procesu. Profil określa maksymalną zdolność — zapis pozostaje domyślnie wyłączony."
+        description="Poświadczenia żyją wyłącznie w pamięci procesu. Profil opisuje sesję analityczną; jawne uprawnienie zapisu wybierzesz osobno w sekcji Wykonanie."
         actions={connection && <StatusPill tone="success">Połączono · {connection.panoramaVersion}</StatusPill>}
       />
 
@@ -40,7 +40,7 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
 
       <div className="connection-grid">
         <Card className="connection-form-card">
-          <CardHeader title="Profil połączenia" description="Żądany poziom jest dodatkowo ograniczany przez lokalny panorama_host.txt backendu." action={<Server size={20} />} />
+          <CardHeader title="Profil połączenia" description="Poziom profilu nie blokuje osobnego, tymczasowego przełącznika Wykonanie w GUI." action={<Server size={20} />} />
           <form onSubmit={(event) => { event.preventDefault(); onConnect(); }} className="form-stack" autoComplete="off">
             <div className="field-grid field-grid--2">
               <label className="field">
@@ -64,7 +64,7 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
 
             <fieldset className="capability-fieldset">
               <legend>Maksymalny poziom API</legend>
-              <p>Ten wybór nie uruchamia zapisu i nie może przekroczyć api_max_stage z lokalnego pliku serwera.</p>
+              <p>Ten wybór nie uruchamia zapisu. W GUI zakres realnego wykonania jest potwierdzany później, niezależnie i tylko dla bieżącej sesji.</p>
               <div className="capability-options">
                 {capabilities.map((capability) => (
                   <label key={capability.id} className={draft.apiMaxStage === capability.id ? "is-selected" : ""}>
@@ -117,7 +117,7 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
           </Card>
 
           <Card>
-            <CardHeader title="Efektywne uprawnienia" description={connection ? `Profil ${connection.username}` : "Wynikają z wybranego maksimum"} />
+            <CardHeader title="Profil analityczny" description={connection ? `Profil ${connection.username}` : "Wynika z wybranego maksimum"} />
             <div className="capability-ladder">
               {capabilities.map((capability, index) => {
                 const enabled = stageOrder[connection?.apiMaxStage ?? draft.apiMaxStage] >= index;

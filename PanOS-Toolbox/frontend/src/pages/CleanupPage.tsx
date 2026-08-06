@@ -1,8 +1,8 @@
 import { AlertTriangle, ArrowRight, FileText, Gauge, Network, Radar, ShieldCheck, Upload, Workflow } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
-import type { ConnectionSession } from "../model";
+import type { AnalysisJob, ConnectionSession } from "../model";
 import { parseAddressInput, parseNameInput, pluralize } from "../utils";
-import { Button, Callout, Card, CardHeader, PageHeader, StatCard, Toggle } from "../components/Primitives";
+import { Button, Callout, Card, CardHeader, PageHeader, ProgressBar, StatCard, Toggle } from "../components/Primitives";
 
 interface CleanupPageProps {
   connection: ConnectionSession | null;
@@ -13,6 +13,7 @@ interface CleanupPageProps {
   recentHitDays: number;
   onRecentHitDaysChange: (value: number) => void;
   busy: boolean;
+  progress: AnalysisJob | null;
   error: string | null;
   onAnalyze: () => void;
   onOpenConnection: () => void;
@@ -27,7 +28,7 @@ const targetOptions: Record<TargetKind, { label: string; hint: string; placehold
   policy: { label: "Polityki", hint: "Dokładna nazwa polityki w każdym wierszu; spacje w nazwie są zachowywane.", placeholder: "ALLOW LEGACY APP\nOLD-NAT-RULE" },
 };
 
-export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, busy, error, onAnalyze, onOpenConnection }: CleanupPageProps) {
+export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, busy, progress, error, onAnalyze, onOpenConnection }: CleanupPageProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [activeKind, setActiveKind] = useState<TargetKind>("ip");
   const parsed = useMemo(() => ({
@@ -121,15 +122,24 @@ export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIc
 
           <div className="analysis-preview">
             <StatCard label="Do sprawdzenia" value={total} detail="łącznie, po deduplikacji" tone="accent" />
-            <StatCard label="Tryb" value="Running" detail="źródło analizy" />
+            <StatCard label="Tryb" value={total === 1 ? "Szybki" : "Batch"} detail={total === 1 ? "dokładny cel · cache połączenia" : "pełny running config"} />
             <StatCard label="Zmiany" value="0" detail="plan nie zapisuje API" tone="success" />
           </div>
 
           <Callout severity="info" title="Diff jest informacją"><p>Natywny change-summary i diff semantyczny pojawią się w planie. Istniejący candidate nie blokuje generowania.</p></Callout>
 
+          {total === 1 && <Callout severity="success" title="Tryb pojedynczego celu"><p>Toolbox wyszuka dokładną nazwę w świeżym snapshotcie połączenia i utworzy osobną sesję. Pełny config zostanie odświeżony tylko wtedy, gdy cache zdążył wygasnąć.</p></Callout>}
+
           <Button className="analyze-button" variant="primary" onClick={onAnalyze} loading={busy} disabled={!connection || total === 0} icon={<ArrowRight size={18} />}>
-            Analizuj zależności
+            {total === 1 ? "Znajdź dokładny cel" : "Analizuj zależności"}
           </Button>
+          {busy && progress && (
+            <Card className="analysis-progress" aria-live="polite">
+              <div><strong>{progress.message}</strong><span>{progress.progress}%</span></div>
+              <ProgressBar value={progress.progress} label={`${progress.progress}%`} />
+              <small>Możesz obserwować etap pobierania running/candidate i budowania grafu zależności.</small>
+            </Card>
+          )}
           {total > 500 && <div className="inline-warning"><AlertTriangle size={16} /> Duża paczka może potrwać kilka minut. Postęp będzie raportowany przez backend.</div>}
         </div>
       </div>

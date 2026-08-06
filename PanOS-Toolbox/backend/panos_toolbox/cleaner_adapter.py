@@ -545,6 +545,59 @@ def build_cleanup_patchset(
         forced_rules=forced_rules,
         nat_translation_action=nat_translation_action,
     )
+
+    # Application Override rules are commonly inherited/read-only on Panorama.
+    # Never let one such reference fail halfway through a candidate batch.  A
+    # target touching App Override is reported as blocked and the planner is
+    # rerun without its complete dependency component.
+    app_override_paths: dict[Any, set[str]] = {}
+    for key in plan.deleted_rules:
+        if key.policy_type != "application-override":
+            continue
+        for target in plan.rule_causes.get(key, ()):
+            app_override_paths.setdefault(target, set()).add(model.rules[key].xpath)
+    for (key, _field), removals in plan.rule_field_removals.items():
+        if key.policy_type != "application-override":
+            continue
+        for affected_tokens in removals.values():
+            for target in affected_tokens:
+                app_override_paths.setdefault(target, set()).add(model.rules[key].xpath)
+
+    if app_override_paths:
+        blocked_tokens = set(app_override_paths)
+        plan = plan_cleanup_targets(
+            model,
+            set(tokens) - blocked_tokens,
+            forced_groups={
+                key: target
+                for key, target in forced_groups.items()
+                if target not in blocked_tokens
+            },
+            forced_rules={
+                key: target
+                for key, target in forced_rules.items()
+                if target not in blocked_tokens and key.policy_type != "application-override"
+            },
+            nat_translation_action=nat_translation_action,
+        )
+        for target, paths in sorted(app_override_paths.items(), key=lambda item: item[0].ip):
+            plan.blocked_ips[target.ip] = [
+                BlockReason(
+                    "APP_OVERRIDE_READ_ONLY",
+                    "Znaleziono zależność Application Override. Reguła może być "
+                    "dziedziczona/read-only, dlatego Toolbox nie wykonuje automatycznej "
+                    "mutacji ani usunięcia powiązanego celu.",
+                    sorted(paths)[0],
+                )
+            ]
+        plan.warnings.append(
+            "Application Override wykryty: powiązane cele zablokowano przed zapisem "
+            "candidate; wymagany ręczny review właściciela reguły."
+        )
+        for cause, record in discovery.items():
+            if cause in {target.ip for target in blocked_tokens}:
+                record["status"] = "blocked-app-override"
+
     for cause, keys in unsupported.items():
         plan.blocked_ips[cause] = [
             BlockReason(

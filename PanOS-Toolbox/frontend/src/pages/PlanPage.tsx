@@ -22,18 +22,21 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
-import type { CapabilityStage, CleanupPlan, SessionState, ToolboxSession } from "../model";
+import type { AddressAnalysis, CapabilityStage, CleanupPlan, SessionState, ToolboxSession } from "../model";
 import { formatDate, shortId, stageAllows } from "../model";
 import { Button, Callout, Card, CardHeader, EmptyState, PageHeader, ProgressBar, StatCard, StatusPill, Toggle } from "../components/Primitives";
 
 interface PlanPageProps {
   plan: CleanupPlan | null;
   executionSession: ToolboxSession | null;
-  apiMaxStage: CapabilityStage;
+  executionStage: CapabilityStage;
+  onExecutionStageChange: (stage: CapabilityStage) => void;
   writeEnabled: boolean;
   busy: "candidate" | "commit" | "push" | "download" | null;
+  singlePlanBusy: string | null;
   error: string | null;
   onOpenCleanup: () => void;
+  onCreateSinglePlan: (target: AddressAnalysis) => void;
   onApplyCandidate: () => void;
   onCommit: (allowUnisolated: boolean, allowFull: boolean) => void;
   onPush: () => void;
@@ -69,7 +72,7 @@ const icmpTone = {
   "not-run": "neutral",
 } as const;
 
-export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, busy, error, onOpenCleanup, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
+export function PlanPage({ plan, executionSession, executionStage, onExecutionStageChange, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
   const [tab, setTab] = useState<"addresses" | "operations">("addresses");
   const [expandedAddress, setExpandedAddress] = useState<string | null>(null);
   const [allowUnisolated, setAllowUnisolated] = useState(false);
@@ -96,9 +99,9 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
     );
   }
 
-  const candidateAllowed = stageAllows(apiMaxStage, "candidate");
-  const commitAllowed = stageAllows(apiMaxStage, "commit");
-  const pushAllowed = stageAllows(apiMaxStage, "push");
+  const candidateAllowed = stageAllows(executionStage, "candidate");
+  const commitAllowed = stageAllows(executionStage, "commit");
+  const pushAllowed = stageAllows(executionStage, "push");
   const canApplyCandidate = state === "PLANNED";
   const canCommit = state === "CANDIDATE_APPLIED" || state === "PARTIAL";
   const canPush = state === "COMMITTED";
@@ -162,7 +165,7 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
       </div>
 
       {plan.recentHitCount > 0 && <Callout severity="warning" title={`${plan.recentHitCount} polityk ma świeży Last Hit`}><p>Plan pozostaje dostępny, ale przed zapisaniem candidate zweryfikuj reguły oznaczone ikoną ostrzeżenia.</p></Callout>}
-      {plan.warnings.map((warning) => <Callout severity="info" title="Informacja z analizy" key={warning}><p>{warning}</p></Callout>)}
+      {plan.warnings.map((warning) => <Callout severity={warning.includes("Application Override") ? "warning" : "info"} title={warning.includes("Application Override") ? "Application Override — automatyczne wykonanie zablokowane" : "Informacja z analizy"} key={warning}><p>{warning}</p></Callout>)}
 
       <Card className="review-card">
         <div className="review-tabs" role="tablist">
@@ -174,7 +177,7 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
         {tab === "addresses" ? (
           <div className="responsive-table plan-table">
             <table>
-              <thead><tr><th>LP</th><th>Cel</th><th>ICMP</th><th>Last Hit polityki</th><th>Referencje</th><th>Decyzja</th><th /></tr></thead>
+              <thead><tr><th>LP</th><th>Cel</th><th>ICMP</th><th>Last Hit polityki</th><th>Referencje</th><th>Decyzja</th><th>Akcja</th><th /></tr></thead>
               <tbody>
                 {plan.addresses.map((address, index) => {
                   const expanded = expandedAddress === address.ip;
@@ -186,9 +189,10 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
                       <td>{address.recentLastHit ? <span className="recent-hit"><AlertTriangle size={14} /> {formatDate(address.lastHit)}</span> : <span className="muted-value">{address.lastHitStatus ? `${address.lastHitStatus} · ${formatDate(address.lastHit)}` : "—"}</span>}</td>
                       <td><span className="reference-count">{address.references.length}</span></td>
                       <td><StatusPill tone={address.decision === "process" ? "accent" : address.decision === "skip-live" ? "success" : address.decision === "skip-error" ? "danger" : address.decision === "blocked" ? "warning" : "neutral"}>{decisionLabel[address.decision]}</StatusPill></td>
+                      <td><Button variant="ghost" loading={singlePlanBusy === address.ip} disabled={address.decision !== "process" || !address.componentId || Boolean(singlePlanBusy)} onClick={() => onCreateSinglePlan(address)}>Osobny plan</Button></td>
                       <td><button className="table-expand" disabled={!address.references.length} onClick={() => setExpandedAddress(expanded ? null : address.ip)} aria-label={`Pokaż referencje ${address.ip}`}>{expanded ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button></td>
                     </tr>,
-                    expanded && <tr className="expanded-row" key={`${address.ip}-details`}><td colSpan={7}><div className="reference-list">{address.references.map((ref) => <div key={ref.id}><ListTree size={16} /><div><strong>{ref.name}</strong><span>{ref.deviceGroup} · {ref.rulebase}-rulebase · {ref.policyType} · {ref.field}</span><code>{ref.path}</code></div></div>)}</div></td></tr>,
+                    expanded && <tr className="expanded-row" key={`${address.ip}-details`}><td colSpan={8}><div className="reference-list">{address.references.map((ref) => <div key={ref.id}><ListTree size={16} /><div><strong>{ref.name}</strong><span>{ref.deviceGroup} · {ref.rulebase}-rulebase · {ref.policyType} · {ref.field}</span><code>{ref.path}</code></div></div>)}</div></td></tr>,
                   ];
                 })}
               </tbody>
@@ -207,14 +211,26 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
       <section className="execution-section">
         <div className="execution-heading"><div><span className="eyebrow">Staged execution</span><h2>Wykonanie kontrolowane</h2><p>Każdy etap kończy się osobnym wynikiem. Commit ani push nie uruchamiają się automatycznie.</p></div><StatusPill tone={writeEnabled ? "danger" : "neutral"}>{writeEnabled ? "API write aktywny" : "Generator only"}</StatusPill></div>
 
-        {!writeEnabled && <Callout severity="info" title="Zapis przez API jest wyłączony"><p>Plan, raporty i komendy CLI są kompletne. Aby użyć przycisków wykonawczych, profil musi zezwalać na dany poziom i runtime toggle w górnym pasku musi być włączony.</p></Callout>}
+        <Card className="execution-mode-card">
+          <CardHeader title="Uprawnienie bieżącego wykonania" description="Ten przełącznik jest niezależny od profilu użytego do analizy i obowiązuje tylko w pamięci tej sesji GUI." action={<ServerCog size={20} />} />
+          <div className="execution-stage-options">
+            {(["candidate", "commit", "push"] as CapabilityStage[]).map((stage) => (
+              <button type="button" key={stage} aria-label={`Tryb wykonania ${stage}`} className={executionStage === stage ? "is-active" : ""} onClick={() => onExecutionStageChange(stage)}>
+                <strong>{stage.toUpperCase()}</strong>
+                <small>{stage === "candidate" ? "tylko zapis candidate" : stage === "commit" ? "candidate i commit" : "candidate, commit i push"}</small>
+              </button>
+            ))}
+          </div>
+        </Card>
+
+        {!writeEnabled && <Callout severity="info" title="Zapis przez API jest wyłączony"><p>Plan, raporty i komendy CLI są kompletne. Włącz runtime toggle w górnym pasku i wybierz zakres bieżącego wykonania powyżej — profil połączenia nie blokuje już tej świadomej decyzji.</p></Callout>}
 
         <div className="execution-grid">
           <Card className={state === "CANDIDATE_APPLIED" || state === "PARTIAL" || state === "COMMITTED" || state === "PUSHED" ? "stage-card stage-card--done" : "stage-card"}>
             <span className="stage-number">01</span>
             <CardHeader title="Zapisz Candidate" description="Backup → lock → recheck XPath → patch → validate" action={state === "CANDIDATE_APPLIED" || state === "PARTIAL" || state === "COMMITTED" || state === "PUSHED" ? <CheckCircle2 className="done-icon" /> : <ServerCog />} />
             <ul><li>Nie wykonuje commit</li><li>Cofa zastosowane mutacje przy błędzie</li><li>Tworzy dziennik i inverse patch</li></ul>
-            {!candidateAllowed && <span className="stage-blocked"><Lock size={14} /> Profil read-only blokuje etap</span>}
+            {!candidateAllowed && <span className="stage-blocked"><Lock size={14} /> Tryb wykonania blokuje etap</span>}
             <Button variant="primary" loading={busy === "candidate"} disabled={!writeEnabled || !candidateAllowed || !canApplyCandidate} onClick={onApplyCandidate}>Zapisz i zwaliduj Candidate</Button>
           </Card>
 
@@ -226,7 +242,7 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
               <Toggle checked={allowFull} onChange={(value) => { setAllowFull(value); if (value) setAllowUnisolated(true); }} label="Pozwól na full commit" description="Najwyższe ryzyko: obejmuje cały bieżący candidate." danger />
             </div>
             {(allowUnisolated || allowFull) && <div className="critical-warning"><ShieldAlert size={17} /><span><strong>Rozszerzony zakres commit</strong>Zostanie trwale zapisany w manifeście audytowym.</span></div>}
-            {!commitAllowed && <span className="stage-blocked"><Lock size={14} /> Profil nie zezwala na commit</span>}
+            {!commitAllowed && <span className="stage-blocked"><Lock size={14} /> Wybierz tryb wykonania Commit lub Push</span>}
             {commitAllowed && !allowUnisolated && <span className="stage-blocked"><ShieldAlert size={14} /> Potwierdź zakres same-admin przez przełącznik Unisolated</span>}
             <Button variant={allowFull ? "danger" : "primary"} loading={busy === "commit"} disabled={!writeEnabled || !commitAllowed || !canCommit || !allowUnisolated} onClick={() => onCommit(allowUnisolated, allowFull)}>Uruchom {allowFull ? "full" : "partial"} commit</Button>
           </Card>
@@ -235,7 +251,7 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
             <span className="stage-number">03</span>
             <CardHeader title="Push do urządzeń" description="Osobny job tylko dla dotkniętych device groups" action={state === "PUSHED" ? <CheckCircle2 className="done-icon" /> : <CloudUpload />} />
             <div className="push-targets">{plan.affectedDeviceGroups.map((group) => <label key={group} title="Zakres wynika z dotkniętych ścieżek i hierarchii DG"><input type="checkbox" checked readOnly aria-label={`${group} — wymagany zakres push`} /><span><CircleDot size={13} />{group}</span></label>)}</div>
-            {!pushAllowed && <span className="stage-blocked"><Lock size={14} /> Profil nie zezwala na push</span>}
+            {!pushAllowed && <span className="stage-blocked"><Lock size={14} /> Wybierz tryb wykonania Push</span>}
             <Button variant="primary" loading={busy === "push"} disabled={!writeEnabled || !pushAllowed || !canPush} onClick={onPush}>Validate & Push</Button>
           </Card>
         </div>

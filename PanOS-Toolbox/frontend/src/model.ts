@@ -123,6 +123,15 @@ export interface CleanupPlan {
   operations: PatchOperation[];
 }
 
+export interface AnalysisJob {
+  id: string;
+  state: "queued" | "running" | "success" | "failed";
+  progress: number;
+  message: string;
+  plan?: CleanupPlan;
+  error?: ApiErrorPayload;
+}
+
 export interface JobStatus {
   id: string;
   kind: "candidate" | "validation" | "commit" | "push" | "restore";
@@ -184,6 +193,7 @@ export interface RestorePlan {
 
 export interface WriteOptions {
   enableApiWrite: boolean;
+  executionStage: CapabilityStage;
   allowUnisolatedCommit?: boolean;
   allowFullCommit?: boolean;
 }

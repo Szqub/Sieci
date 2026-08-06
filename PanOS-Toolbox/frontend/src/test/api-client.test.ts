@@ -30,21 +30,26 @@ describe("typed API client", () => {
 
   it("wysyła runtime write gate przy mutacji candidate", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ message: "ok", session: {} }), { status: 200, headers: { "Content-Type": "application/json" } }));
-    await api.applyCandidate("cleanup-1", { enableApiWrite: true });
+    await api.applyCandidate("cleanup-1", { enableApiWrite: true, executionStage: "candidate" });
     const request = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(JSON.parse(request.body as string)).toEqual({ enable_api_write: true });
+    expect(JSON.parse(request.body as string)).toEqual({
+      enable_api_write: true,
+      execution_stage: "candidate",
+    });
   });
 
   it("przekazuje osobną flagę full commit i oba jawne zezwolenia", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ message: "ok", session: {} }), { status: 200, headers: { "Content-Type": "application/json" } }));
     await api.commit("cleanup-1", {
       enableApiWrite: true,
+      executionStage: "commit",
       allowUnisolatedCommit: true,
       allowFullCommit: true,
     });
     const request = fetchMock.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(request.body as string)).toEqual({
       enable_api_write: true,
+      execution_stage: "commit",
       full: true,
       allow_unisolated_commit: true,
       allow_full_commit: true,

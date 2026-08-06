@@ -87,8 +87,9 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
         </nav>
 
         <div className="sidebar__footer">
-          <div className="safety-note"><ShieldCheck size={17} /><span>Pełny config nigdy nie jest automatycznie ładowany.</span></div>
+          <div className="safety-note"><ShieldCheck size={17} /><span>API i GUI dostępne wyłącznie na localhost.</span></div>
           <span>PanOS Toolbox · lokalnie</span>
+          <strong className="author-brand">Szymon Żołnierczyk · Devops Engineer NET</strong>
         </div>
       </aside>
 
@@ -126,7 +127,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
               type="checkbox"
               checked={writeEnabled}
               onChange={(event) => onWriteEnabledChange(event.target.checked)}
-              disabled={!connection || connection.apiMaxStage === "read-only"}
+              disabled={!connection}
               aria-label="Włącz zapis przez API"
             />
             <i aria-hidden="true" />

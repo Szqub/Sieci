@@ -24,7 +24,7 @@ from .errors import (
     OutcomeUnknownError,
     ToolboxError,
 )
-from .models import ApiStage
+from .models import ApiStage, PatchSet, SessionState
 from .profile import PanoramaProfile, load_profile, normalize_host
 from .service import (
     make_writer,
@@ -504,6 +504,9 @@ def _contract() -> dict[str, Any]:
             "POST /connections": "keygen and create memory-only connection",
             "DELETE /connections/current": "destroy current connection",
             "POST /cleanup/plans": "read snapshots, ICMP/last-hit, create PatchSet session",
+            "POST /cleanup/analysis-jobs": "asynchronous cleanup plan with progress",
+            "GET /cleanup/analysis-jobs/{id}": "poll analysis progress/result",
+            "POST /cleanup/plans/{id}/components/{component}": "derive isolated component plan",
             "POST /sessions/{id}/candidate": "candidate write with ephemeral gate",
             "POST /sessions/{id}/commit": "sequential partial/full commit job",
             "POST /sessions/{id}/push": "one sequential specific-DG commit-all job",
@@ -536,6 +539,8 @@ def create_app(
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
     session_store = store or SessionStore()
     connections = ConnectionRegistry()
+    analysis_jobs: dict[str, dict[str, Any]] = {}
+    analysis_jobs_lock = threading.Lock()
 
     @app.before_request
     def localhost_boundary():
@@ -674,11 +679,80 @@ def create_app(
     def reader() -> PanoramaReadClient:
         return connections.get(request.headers.get("X-Toolbox-Session"))
 
+    def execution_stage(value: dict[str, Any]) -> ApiStage:
+        raw = value.get("execution_stage", value.get("executionStage"))
+        if not isinstance(raw, str):
+            raise InputError(
+                "Wykonanie przez GUI wymaga jawnego execution_stage: candidate, commit albo push."
+            )
+        stage = ApiStage.parse(raw)
+        if stage is ApiStage.READ_ONLY:
+            raise InputError("execution_stage read-only nie zezwala na zapis.")
+        return stage
+
+    def plan_from_value(
+        value: dict[str, Any],
+        client: PanoramaReadClient,
+        *,
+        progress_callback=None,
+    ) -> dict[str, Any]:
+        return plan_cleanup_session(
+            session_store,
+            client,
+            string_list_field(value, "addresses", fallback_key="ips"),
+            address_objects=string_list_field(value, "address_objects"),
+            address_groups=string_list_field(value, "address_groups"),
+            policies=string_list_field(value, "policies"),
+            no_ping=not _json_bool(
+                value,
+                "run_icmp",
+                default=not _json_bool(value, "noPing", default=False),
+            ),
+            ping_timeout_ms=integer_field(
+                value,
+                "ping_timeout_ms",
+                fallback_key="pingTimeoutMs",
+                default=1000,
+                minimum=100,
+                maximum=60_000,
+            ),
+            ping_workers=integer_field(
+                value,
+                "ping_workers",
+                fallback_key="pingWorkers",
+                default=32,
+                minimum=1,
+                maximum=128,
+            ),
+            nat_translation_action=str(
+                value.get("nat_translation", value.get("natTranslation", "delete-rule"))
+            ),
+            recent_hit_days=integer_field(
+                value,
+                "recent_hit_days",
+                fallback_key="recentHitDays",
+                default=14,
+                minimum=1,
+                maximum=3650,
+            ),
+            progress_callback=progress_callback,
+        )
+
+    def wire_analysis_job(job: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": job["id"],
+            "state": job["state"],
+            "progress": job["progress"],
+            "message": job["message"],
+            "plan": job.get("plan"),
+            "error": job.get("error"),
+        }
+
     @app.get("/api/health")
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.1.1", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.2.0", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -784,52 +858,222 @@ def create_app(
     @app.post("/api/v1/cleanup/plans")
     def cleanup_plan():
         value = body()
-        result = plan_cleanup_session(
-            session_store,
-            reader(),
-            string_list_field(value, "addresses", fallback_key="ips"),
-            address_objects=string_list_field(value, "address_objects"),
-            address_groups=string_list_field(value, "address_groups"),
-            policies=string_list_field(value, "policies"),
-            no_ping=not _json_bool(
-                value,
-                "run_icmp",
-                default=not _json_bool(value, "noPing", default=False),
-            ),
-            ping_timeout_ms=integer_field(
-                value,
-                "ping_timeout_ms",
-                fallback_key="pingTimeoutMs",
-                default=1000,
-                minimum=100,
-                maximum=60_000,
-            ),
-            ping_workers=integer_field(
-                value,
-                "ping_workers",
-                fallback_key="pingWorkers",
-                default=32,
-                minimum=1,
-                maximum=128,
-            ),
-            nat_translation_action=str(
-                value.get("nat_translation", value.get("natTranslation", "delete-rule"))
-            ),
-            recent_hit_days=integer_field(
-                value,
-                "recent_hit_days",
-                fallback_key="recentHitDays",
-                default=14,
-                minimum=1,
-                maximum=3650,
-            ),
-        )
+        result = plan_from_value(value, reader())
         return jsonify(_wire_cleanup_plan(session_store, result["session_id"])), 201
+
+    @app.post("/api/v1/cleanup/analysis-jobs")
+    def cleanup_analysis_job_start():
+        value = body()
+        token = request.headers.get("X-Toolbox-Session")
+        client = connections.get(token)
+        job_id = "analysis-" + secrets.token_hex(8)
+        job = {
+            "id": job_id,
+            "owner": token,
+            "state": "queued",
+            "progress": 0,
+            "message": "Oczekiwanie na analizę",
+        }
+        with analysis_jobs_lock:
+            analysis_jobs[job_id] = job
+
+        def update(progress: int, message: str) -> None:
+            with analysis_jobs_lock:
+                current = analysis_jobs[job_id]
+                current.update(
+                    state="running",
+                    progress=max(0, min(100, int(progress))),
+                    message=message,
+                )
+
+        def worker() -> None:
+            try:
+                result = plan_from_value(value, client, progress_callback=update)
+                plan = _wire_cleanup_plan(session_store, result["session_id"])
+                with analysis_jobs_lock:
+                    analysis_jobs[job_id].update(
+                        state="success",
+                        progress=100,
+                        message="Plan jest gotowy",
+                        plan=plan,
+                    )
+            except ToolboxError as exc:
+                with analysis_jobs_lock:
+                    analysis_jobs[job_id].update(
+                        state="failed",
+                        message="Analiza nie powiodła się",
+                        error={"code": type(exc).__name__, "message": str(exc)},
+                    )
+            except Exception:
+                correlation_id = secrets.token_hex(8)
+                app.logger.exception(
+                    "Unhandled analysis error correlation=%s", correlation_id
+                )
+                with analysis_jobs_lock:
+                    analysis_jobs[job_id].update(
+                        state="failed",
+                        message="Nieoczekiwany błąd analizy",
+                        error={
+                            "code": "InternalError",
+                            "message": "Nieoczekiwany błąd backendu podczas analizy.",
+                            "correlation_id": correlation_id,
+                        },
+                    )
+
+        threading.Thread(
+            target=worker,
+            name=f"panos-toolbox-{job_id}",
+            daemon=True,
+        ).start()
+        return jsonify(wire_analysis_job(job)), 202
+
+    @app.get("/api/v1/cleanup/analysis-jobs/<job_id>")
+    def cleanup_analysis_job_get(job_id: str):
+        token = request.headers.get("X-Toolbox-Session")
+        connections.get(token)
+        with analysis_jobs_lock:
+            job = analysis_jobs.get(job_id)
+            if job is None or job["owner"] != token:
+                raise InputError("Nieznany job analizy dla tej sesji połączenia.")
+            payload = wire_analysis_job(dict(job))
+        return jsonify(payload)
 
     @app.get("/api/v1/cleanup/plans/<plan_id>")
     def cleanup_plan_get(plan_id: str):
         reader()
         return jsonify(_wire_cleanup_plan(session_store, plan_id))
+
+    @app.post("/api/v1/cleanup/plans/<plan_id>/components/<component_id>")
+    def cleanup_component_plan(plan_id: str, component_id: str):
+        value = body()
+        client = reader()
+        target = value.get("target")
+        if not isinstance(target, str) or not target.strip():
+            raise InputError("Osobny plan wymaga dokładnego pola target.")
+        target = target.strip()
+        parent_manifest = session_store.load_manifest(plan_id)
+        if parent_manifest["state"] != SessionState.PLANNED.value:
+            raise InputError("Osobny plan można wydzielić tylko z planu PLANNED.")
+        parent_patch = session_store.load_patchset(plan_id)
+        if (
+            parent_patch.panorama_host != client.profile.host
+            or parent_patch.panorama_username != client.profile.username
+        ):
+            raise InputError("Plan nadrzędny należy do innego hosta lub operatora.")
+        selected = tuple(
+            mutation
+            for mutation in parent_patch.mutations
+            if mutation.component_id == component_id
+        )
+        if not selected or not any(target in mutation.causes for mutation in selected):
+            raise InputError("Cel nie należy do wskazanego komponentu planu.")
+        component_targets = tuple(
+            sorted({cause for mutation in selected for cause in mutation.causes})
+        )
+        child_patch = PatchSet.new(
+            kind=parent_patch.kind,
+            panorama_host=parent_patch.panorama_host,
+            panorama_username=parent_patch.panorama_username,
+            mutations=selected,
+            targets=component_targets,
+            affected_device_groups=parent_patch.affected_device_groups,
+            warnings=(
+                *parent_patch.warnings,
+                f"Osobny plan wydzielony z {plan_id}; komponent {component_id}.",
+            ),
+        )
+        child_id = session_store.create(
+            child_patch,
+            client.profile,
+            planning_running=session_store.load_snapshot(plan_id, "plan_running"),
+            planning_candidate=session_store.load_snapshot(plan_id, "plan_candidate"),
+            diff_summary=parent_manifest.get("diff_summary") or {},
+        )
+        parent_inputs = parent_manifest.get("input_targets") or {}
+        parent_inventory = parent_manifest.get("inventory") or {}
+        parent_icmp = parent_manifest.get("icmp") or []
+        selected_entity_keys = {mutation.entity_key for mutation in selected}
+        parent_hit = parent_manifest.get("last_hit") or {}
+        hit_records = [
+            record
+            for record in parent_hit.get("records") or []
+            if "/".join(
+                str((record.get("rule") or {}).get(key, ""))
+                for key in ("location", "rulebase", "policy_type", "name")
+            )
+            in selected_entity_keys
+        ]
+        child_hit = {
+            **parent_hit,
+            "records": hit_records,
+            "review_count": sum(
+                str(record.get("status")) in {"RECENT", "ERROR", "INVALID", "NOT_LATEST", "NOT_FOUND"}
+                for record in hit_records
+            ),
+            "recent_hit_count": sum(
+                str(record.get("status")) == "RECENT" for record in hit_records
+            ),
+        }
+
+        def enrich_child(manifest: dict[str, Any]) -> None:
+            manifest["parent_session_id"] = plan_id
+            manifest["icmp"] = [
+                item for item in parent_icmp if item.get("ip") in component_targets
+            ]
+            manifest["last_hit"] = child_hit
+            manifest["input_targets"] = {
+                "ips": [item for item in parent_inputs.get("ips", []) if item in component_targets],
+                "address_objects": [
+                    item
+                    for item in parent_inputs.get("address_objects", [])
+                    if f"object:{item}" in component_targets
+                ],
+                "address_groups": [
+                    item
+                    for item in parent_inputs.get("address_groups", [])
+                    if f"group:{item}" in component_targets
+                ],
+                "policies": [
+                    item
+                    for item in parent_inputs.get("policies", [])
+                    if f"policy:{item}" in component_targets
+                ],
+                "ordered": list(component_targets),
+            }
+            manifest["inventory"] = {
+                item: parent_inventory[item]
+                for item in component_targets
+                if item in parent_inventory
+            }
+
+        session_store.update(child_id, enrich_child)
+        operation_lines = [
+            json.dumps(operation, ensure_ascii=False, sort_keys=True)
+            for operation in _wire_operations(child_patch)
+        ]
+        session_store.write_artifact(
+            child_id,
+            "commands.txt",
+            "\n".join(operation_lines) + ("\n" if operation_lines else ""),
+            kind="api-operation-preview",
+        )
+        session_store.write_artifact(
+            child_id,
+            "raport_szczegolowy.txt",
+            "\n".join(
+                [
+                    f"Osobny plan: {child_id}",
+                    f"Plan nadrzędny: {plan_id}",
+                    f"Cel wybrany w GUI: {target}",
+                    f"Komponent: {component_id}",
+                    "Powiązane cele komponentu: " + ", ".join(component_targets),
+                    f"Mutacje: {len(selected)}",
+                ]
+            )
+            + "\n",
+            kind="detailed-report",
+        )
+        return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
 
     @app.get("/api/v1/sessions")
     def sessions_list():
@@ -899,6 +1143,7 @@ def create_app(
             enable_api_write=_json_bool(
                 value, "enable_api_write", fallback_key="enableApiWrite", default=False
             ),
+            operator_authorized_stage=execution_stage(value),
         )
         result = apply_candidate(
             session_store,
@@ -932,6 +1177,7 @@ def create_app(
             enable_api_write=_json_bool(
                 value, "enable_api_write", fallback_key="enableApiWrite", default=False
             ),
+            operator_authorized_stage=execution_stage(value),
         )
         job = commit_session(
                 session_store,
@@ -969,6 +1215,7 @@ def create_app(
             enable_api_write=_json_bool(
                 value, "enable_api_write", fallback_key="enableApiWrite", default=False
             ),
+            operator_authorized_stage=execution_stage(value),
         )
         push_session(
                 session_store,
@@ -1006,6 +1253,7 @@ def create_app(
             client,
             ApiStage.CANDIDATE,
             enable_api_write=_json_bool(value, "enable_api_write", default=False),
+            operator_authorized_stage=execution_stage(value),
         )
         result = apply_candidate(session_store, plan_id, client, writer)
         return jsonify(

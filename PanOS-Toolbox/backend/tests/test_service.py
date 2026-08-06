@@ -162,19 +162,43 @@ class PlanningReportTests(unittest.TestCase):
                 store,
                 PlanningReader(self.fixture()),
                 (),
-                address_objects=("TARGET_A",),
+                address_objects=("PARENT_ONLY",),
                 address_groups=("G-INNER",),
                 policies=("SEC-MIX",),
                 no_ping=True,
             )
             manifest = store.load_manifest(result["session_id"])
-            self.assertEqual(manifest["input_targets"]["address_objects"], ["TARGET_A"])
+            self.assertEqual(manifest["input_targets"]["address_objects"], ["PARENT_ONLY"])
             self.assertEqual(manifest["input_targets"]["address_groups"], ["G-INNER"])
             self.assertEqual(manifest["input_targets"]["policies"], ["SEC-MIX"])
             report = (Path(temporary) / result["session_id"] / "raport_krotki.txt").read_text(encoding="utf-8")
-            self.assertIn("[address-object] TARGET_A: ZAPLANOWANO", report)
+            self.assertIn("[address-object] PARENT_ONLY: ZAPLANOWANO", report)
             self.assertIn("[address-group] G-INNER: ZAPLANOWANO", report)
             self.assertIn("[policy] SEC-MIX: ZAPLANOWANO", report)
+
+    @mock.patch("panos_toolbox.service._last_hit_summary")
+    def test_plan_reports_monotonic_progress_phases(self, hit_mock):
+        hit_mock.return_value = {
+            "recent_days": 14,
+            "records": [],
+            "review_count": 0,
+            "recent_hit_count": 0,
+            "error_or_unknown_count": 0,
+            "blocking": False,
+        }
+        updates = []
+        with tempfile.TemporaryDirectory() as temporary:
+            plan_cleanup_session(
+                SessionStore(Path(temporary), enforce_acl=False),
+                PlanningReader(self.fixture()),
+                (),
+                address_objects=("PARENT_ONLY", "OVERRIDE"),
+                no_ping=True,
+                progress_callback=lambda value, message: updates.append((value, message)),
+            )
+        self.assertEqual(updates[-1], (100, "Plan jest gotowy"))
+        self.assertEqual([value for value, _ in updates], sorted(value for value, _ in updates))
+        self.assertTrue(any("running" in message for _, message in updates))
 
     def test_named_policy_always_collects_last_hit_before_plan_publication(self):
         with tempfile.TemporaryDirectory() as temporary:

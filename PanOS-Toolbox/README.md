@@ -7,7 +7,7 @@ maszynie docelowej.
 
 Toolbox domyślnie jest **read-only/generator-only**. Zapis wymaga równocześnie:
 
-1. odpowiedniego `api_max_stage` w profilu połączenia;
+1. odpowiedniego `api_max_stage` w CLI albo jawnego etapu wykonania w GUI;
 2. jawnego `--enable-api-write` w CLI albo nietrwałego przełącznika w GUI.
 
 Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
@@ -49,10 +49,11 @@ Alternatywny launcher CMD oraz jego diagnostyka:
 Następnie otwórz `http://127.0.0.1:8765/`. Serwera nie uruchamiaj z bindem
 `0.0.0.0` ani na interfejsie sieciowym.
 
-`start_toolbox.ps1` przekazuje domyślny `panorama_host.txt` jako niezależny
-sufit uprawnień backendu. Wybór wyższego poziomu w formularzu GUI nie może go
-podnieść; brak pliku albo niedopasowanie hosta, użytkownika lub TLS wymusza
-efektywne `read-only`.
+`start_toolbox.ps1` przekazuje domyślny `panorama_host.txt` jako sufit profilu
+analitycznego i twardą granicę CLI. Brak pliku albo niedopasowanie hosta,
+użytkownika lub TLS ustawia profil połączenia na `read-only`. Lokalny GUI ma
+osobny, nietrwały grant wykonania opisany niżej; nadal wymaga zgodności hosta,
+aktywnego connection tokenu, poprawnego Origin i jawnego przełącznika zapisu.
 
 Nie instaluj Flask ani innych modułów globalnie. Paczka release ma przypięty
 Flask i jego zależności w `backend/vendor`; tryb `-I -S` w poleceniu Doctor
@@ -78,9 +79,27 @@ z polityk oraz grup nadrzędnych, usuwa grupy opróżnione przez tę zmianę, a 
 końcu wskazaną grupę. Dynamic address group jest raportowana jako blokada do
 ręcznego review — nie jest automatycznie kasowana.
 
+Analiza w GUI działa jako asynchroniczny job i pokazuje procentowy postęp dla
+ICMP, pobierania running/candidate, grafu zależności, Last Hit oraz zapisu
+artefaktów. Jeśli podano dokładnie jeden cel, Toolbox korzysta ze świeżego
+snapshotu utworzonego podczas połączenia (maksymalnie 5 minut) i nie pobiera
+ponownie pełnego configu. Po analizie przy każdym bezpiecznym celu jest przycisk
+**Osobny plan**. Wydziela on cały powiązany komponent zależności do nowej sesji,
+dzięki czemu obiekt, grupa lub polityka mogą być wykonane oddzielnie od batcha.
+
+Application Override jest traktowany fail-closed. Bezpośrednio wskazana reguła
+oraz każdy obiekt/grupa zależna od takiej reguły są oznaczone
+`APP_OVERRIDE_READ_ONLY`, raportowane w GUI i wyłączane z automatycznych mutacji.
+Chroni to batch przed zatrzymaniem na regule dziedziczonej albo read-only.
+
 Kliknięcie **Analizuj zależności** niczego nie zapisuje. Wynikiem są: plan GUI,
 komendy CLI, raport krótki, raport szczegółowy i manifest. Candidate, commit i
 push pozostają trzema osobnymi, jawnymi etapami.
+
+W sekcji **Wykonanie kontrolowane** GUI ma osobny, nietrwały wybór Candidate,
+Commit albo Push. Jest on niezależny od profilu wybranego przy połączeniu i
+działa wyłącznie razem z przełącznikiem **Zapis API** dla bieżącej sesji
+przeglądarki. CLI nadal respektuje `api_max_stage` profilu.
 
 Test read-only API (keygen, running, candidate) jest opcjonalny:
 
@@ -115,6 +134,11 @@ api_max_stage=read-only
 - `verify_ssl=yes` weryfikuje certyfikat HTTPS;
 - `api_max_stage`: `read-only`, `candidate`, `commit` albo `push`;
 - brak `api_max_stage` oznacza `read-only`.
+
+`api_max_stage` pozostaje twardą granicą CLI. Lokalny GUI może wydać osobny,
+godzinny lease wykonania dopiero po jednoczesnym włączeniu **Zapis API** i
+wybraniu jawnego etapu w ekranie planu; lease jest przechowywany wyłącznie w
+pamięci i jest związany z hostem bieżącego połączenia.
 
 Kompatybilność: jeśli w starym profilu nie ma `verify_ssl`, Toolbox zachowuje
 historyczne znaczenie `ssl` jako przełącznika weryfikacji certyfikatu i nadal

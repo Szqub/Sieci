@@ -11,6 +11,7 @@ from pathlib import Path
 from panos_toolbox.client import PanoramaReadClient, UrllibXMLTransport
 from panos_toolbox.errors import (
     CapabilityError,
+    InputError,
     IntegrityError,
     OutcomeUnknownError,
     TransportError,
@@ -24,6 +25,7 @@ from panos_toolbox.models import (
     PatchSet,
 )
 from panos_toolbox.profile import PanoramaProfile, issue_write_lease, load_profile
+from panos_toolbox.service import make_writer
 from panos_toolbox.sessions import SessionStore
 from panos_toolbox.xmlutil import parse_xml
 
@@ -101,6 +103,27 @@ class ProfileAndCapabilityTests(unittest.TestCase):
                     with self.assertRaises(CapabilityError):
                         issue_write_lease(profile, requested, enable_api_write=True)
 
+    def test_gui_runtime_stage_can_authorize_write_independently_from_read_profile(self):
+        reader = PanoramaReadClient(
+            PanoramaProfile("pano", "admin", api_max_stage=ApiStage.READ_ONLY),
+            RecordingTransport(),
+        )
+        reader._api_key = "memory-only-test-key"
+        writer = make_writer(
+            reader,
+            ApiStage.COMMIT,
+            enable_api_write=True,
+            operator_authorized_stage=ApiStage.COMMIT,
+        )
+        self.assertEqual(writer.lease.stage, ApiStage.COMMIT)
+        with self.assertRaises(InputError):
+            make_writer(
+                reader,
+                ApiStage.PUSH,
+                enable_api_write=True,
+                operator_authorized_stage=ApiStage.COMMIT,
+            )
+
     def test_xml_fragment_allows_newlines_but_rejects_forbidden_control(self):
         MutationOperation(
             MutationAction.SET,
@@ -116,6 +139,20 @@ class ProfileAndCapabilityTests(unittest.TestCase):
 
 
 class ClientSerializationTests(unittest.TestCase):
+    def test_single_target_config_cache_avoids_second_download(self):
+        transport = RecordingTransport()
+        transport.queue(
+            '<response status="success"><result><config version="10.2"><shared /></config></result></response>'
+        )
+        reader = PanoramaReadClient(
+            PanoramaProfile("pano", "admin", verify_ssl=False), transport
+        )
+        reader._api_key = "memory-only-test-key"
+        first = reader.fetch_config("running")
+        second = reader.fetch_config_cached("running")
+        self.assertEqual(first.get("version"), second.get("version"))
+        self.assertEqual(len(transport.calls), 1)
+
     def test_mutating_transport_failure_is_never_retried(self):
         profile = PanoramaProfile("pano", "admin", verify_ssl=False)
         transport = UrllibXMLTransport(profile)

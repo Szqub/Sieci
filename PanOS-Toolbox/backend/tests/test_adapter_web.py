@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -103,6 +105,29 @@ class CleanerAdapterTests(unittest.TestCase):
         self.assertEqual(result.discovery["group:DAG-RETIRE"]["status"], "unsupported-dynamic")
         self.assertIn("group:DAG-RETIRE", result.blocked_ips)
         self.assertFalse(result.patchset.mutations)
+
+    def test_application_override_blocks_related_object_and_direct_rule(self):
+        for kwargs, cause in (
+            ({"address_object_names": ("TARGET_A",)}, "object:TARGET_A"),
+            ({"policy_names": ("APP-MIX",)}, "policy:APP-MIX"),
+        ):
+            with self.subTest(cause=cause):
+                result = build_cleanup_patchset(
+                    self.fixture(),
+                    (),
+                    panorama_host="pano",
+                    panorama_username="admin",
+                    **kwargs,
+                )
+                self.assertIn(cause, result.blocked_ips)
+                self.assertEqual(
+                    result.blocked_ips[cause][0].code,
+                    "APP_OVERRIDE_READ_ONLY",
+                )
+                self.assertFalse(result.patchset.mutations)
+                self.assertTrue(
+                    any("Application Override" in item for item in result.patchset.warnings)
+                )
 
 
 class WebBoundaryTests(unittest.TestCase):
@@ -223,6 +248,100 @@ class WebBoundaryTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(disconnected.status_code, 204)
+
+    def test_async_analysis_reports_progress_and_can_split_single_component(self):
+        fixture = CleanerAdapterTests.fixture()
+
+        class FakeReadClient:
+            def __init__(self, profile):
+                self.profile = profile
+
+            def authenticate(self, _password):
+                return None
+
+            def fetch_config(self, _config_type):
+                return copy.deepcopy(fixture)
+
+            def fetch_config_cached(self, config_type):
+                return self.fetch_config(config_type)
+
+            def change_summary(self):
+                return parse_xml('<response status="success"><result /></response>')
+
+            def run_op_show(self, _command):
+                return parse_xml(
+                    '<response status="success"><result><rule-hit-count><rules>'
+                    '<entry name="result"><latest>yes</latest><hit-count>0</hit-count>'
+                    '<last-hit-timestamp>0</last-hit-timestamp></entry>'
+                    '</rules></rule-hit-count></result></response>'
+                )
+
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = PanoramaProfile(
+                "192.0.2.10",
+                "superadmin",
+                use_ssl=False,
+                verify_ssl=False,
+                api_max_stage=ApiStage.READ_ONLY,
+            )
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            app = create_app(
+                static_dir=Path(temporary) / "static",
+                store=store,
+                profile_ceiling=profile,
+            )
+            headers = {"Host": "localhost", "Origin": "http://localhost"}
+            with mock.patch("panos_toolbox.web.PanoramaReadClient", FakeReadClient):
+                client = app.test_client()
+                connected = client.post(
+                    "/api/v1/connections",
+                    json={
+                        "host": "192.0.2.10",
+                        "username": "superadmin",
+                        "password": "memory-only",
+                        "ssl": False,
+                        "verify_ssl": False,
+                        "api_max_stage": "read-only",
+                    },
+                    headers=headers,
+                )
+                token = connected.json["session_token"]
+                session_headers = {**headers, "X-Toolbox-Session": token}
+                started = client.post(
+                    "/api/v1/cleanup/analysis-jobs",
+                    json={
+                        "addresses": [],
+                        "address_objects": [],
+                        "address_groups": [],
+                        "policies": ["SEC-MIX"],
+                        "run_icmp": False,
+                    },
+                    headers=session_headers,
+                )
+                self.assertEqual(started.status_code, 202)
+                job = started.json
+                for _ in range(200):
+                    if job["state"] in {"success", "failed"}:
+                        break
+                    time.sleep(0.01)
+                    job = client.get(
+                        f"/api/v1/cleanup/analysis-jobs/{job['id']}",
+                        headers={"Host": "localhost", "X-Toolbox-Session": token},
+                    ).json
+                self.assertEqual(job["state"], "success", job.get("error"))
+                self.assertEqual(job["progress"], 100)
+                target = job["plan"]["addresses"][0]
+                split = client.post(
+                    f"/api/v1/cleanup/plans/{job['plan']['sessionId']}/components/{target['componentId']}",
+                    json={"target": target["ip"]},
+                    headers=session_headers,
+                )
+                self.assertEqual(split.status_code, 201, split.get_data(as_text=True))
+                self.assertEqual(split.json["sourceCount"], 1)
+                self.assertTrue(split.json["operations"])
 
 
 if __name__ == "__main__":

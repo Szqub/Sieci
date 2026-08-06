@@ -1,6 +1,7 @@
 import type {
   ApiActionResult,
   ApiErrorPayload,
+  AnalysisJob,
   AuditResult,
   CapabilityStage,
   CleanupPlan,
@@ -163,6 +164,40 @@ export const api = {
     });
   },
 
+  async createCleanupAnalysisJob(input: {
+    connectionId: string;
+    addresses: string[];
+    addressObjects: string[];
+    addressGroups: string[];
+    policies: string[];
+    runIcmp: boolean;
+    recentHitDays: number;
+  }): Promise<AnalysisJob> {
+    return request("/cleanup/analysis-jobs", {
+      method: "POST",
+      body: {
+        connection_id: input.connectionId,
+        addresses: input.addresses,
+        address_objects: input.addressObjects,
+        address_groups: input.addressGroups,
+        policies: input.policies,
+        run_icmp: input.runIcmp,
+        recent_hit_days: input.recentHitDays,
+      },
+    });
+  },
+
+  async getCleanupAnalysisJob(jobId: string): Promise<AnalysisJob> {
+    return request(`/cleanup/analysis-jobs/${encodeURIComponent(jobId)}`);
+  },
+
+  async createComponentPlan(planId: string, componentId: string, target: string): Promise<CleanupPlan> {
+    return request(`/cleanup/plans/${encodeURIComponent(planId)}/components/${encodeURIComponent(componentId)}`, {
+      method: "POST",
+      body: { target },
+    });
+  },
+
   async getCleanupPlan(planId: string): Promise<CleanupPlan> {
     return request(`/cleanup/plans/${encodeURIComponent(planId)}`);
   },
@@ -170,7 +205,10 @@ export const api = {
   async applyCandidate(sessionId: string, options: WriteOptions): Promise<ApiActionResult> {
     return request(`/sessions/${encodeURIComponent(sessionId)}/candidate`, {
       method: "POST",
-      body: { enable_api_write: options.enableApiWrite },
+      body: {
+        enable_api_write: options.enableApiWrite,
+        execution_stage: options.executionStage,
+      },
     });
   },
 
@@ -179,6 +217,7 @@ export const api = {
       method: "POST",
       body: {
         enable_api_write: options.enableApiWrite,
+        execution_stage: options.executionStage,
         full: Boolean(options.allowFullCommit),
         allow_unisolated_commit: Boolean(options.allowUnisolatedCommit),
         allow_full_commit: Boolean(options.allowFullCommit),
@@ -191,6 +230,7 @@ export const api = {
       method: "POST",
       body: {
         enable_api_write: options.enableApiWrite,
+        execution_stage: options.executionStage,
         device_groups: deviceGroups,
       },
     });
@@ -233,7 +273,10 @@ export const api = {
   async applyRestoreCandidate(planId: string, options: WriteOptions): Promise<ApiActionResult> {
     return request(`/restore/plans/${encodeURIComponent(planId)}/candidate`, {
       method: "POST",
-      body: { enable_api_write: options.enableApiWrite },
+      body: {
+        enable_api_write: options.enableApiWrite,
+        execution_stage: options.executionStage,
+      },
     });
   },
 };

@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 from .cleaner_adapter import (
     CleanerPlanResult,
@@ -407,7 +407,13 @@ def plan_cleanup_session(
     ping_workers: int = 32,
     nat_translation_action: str = "delete-rule",
     recent_hit_days: int = 14,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> dict[str, Any]:
+    def progress(value: int, message: str) -> None:
+        if progress_callback is not None:
+            progress_callback(value, message)
+
+    progress(3, "Walidacja listy wejściowej")
     if nat_translation_action not in {"delete-rule", "block"}:
         raise InputError("nat_translation_action musi być delete-rule albo block.")
     if not 1 <= recent_hit_days <= 3650:
@@ -418,6 +424,8 @@ def plan_cleanup_session(
     policy_names = normalize_names(policies, label="polityki")
     if not (ips or object_names or group_names or policy_names):
         raise InputError("Nie podano żadnego IP, obiektu, grupy ani polityki.")
+    single_target = len(ips) + len(object_names) + len(group_names) + len(policy_names) == 1
+    progress(8, "Kontrola ICMP")
     pings = (
         ping_ips(ips, bypass=no_ping, timeout_ms=ping_timeout_ms, workers=ping_workers)
         if ips
@@ -426,8 +434,26 @@ def plan_cleanup_session(
     eligible = tuple(
         ip for ip, result in pings.items() if result.status in {"NO_REPLY", "BYPASSED"}
     )
-    running = reader.fetch_config("running")
-    candidate = reader.fetch_config("candidate")
+    fetch_config = (
+        reader.fetch_config_cached
+        if single_target and hasattr(reader, "fetch_config_cached")
+        else reader.fetch_config
+    )
+    progress(
+        15,
+        "Szybkie wyszukiwanie pojedynczego celu w świeżym cache"
+        if single_target
+        else "Pobieranie running config z Panoramy",
+    )
+    running = fetch_config("running")
+    progress(
+        45,
+        "Sprawdzanie candidate dla pojedynczego celu"
+        if single_target
+        else "Pobrano running config; pobieranie candidate",
+    )
+    candidate = fetch_config("candidate")
+    progress(65, "Pobrano candidate; porównywanie konfiguracji")
     native = None
     native_warning: Optional[str] = None
     try:
@@ -444,6 +470,7 @@ def plan_cleanup_session(
         + [f"policy:{name}" for name in policy_names]
     )
     all_targets = tuple([*ips, *named_targets])
+    progress(72, "Budowanie grafu zależności")
     if eligible or named_targets:
         result = build_cleanup_patchset(
             running,
@@ -456,6 +483,7 @@ def plan_cleanup_session(
             nat_translation_action=nat_translation_action,
         )
         patch = result.patchset
+        progress(84, "Sprawdzanie Last Hit znalezionych polityk")
         last_hit = _last_hit_summary(
             reader, result, recent_days=recent_hit_days
         )
@@ -491,6 +519,7 @@ def plan_cleanup_session(
         )
     patch = replace(patch, warnings=tuple(warnings))
     inventory = _cleanup_inventory(result, all_targets)
+    progress(91, "Zapisywanie bezpiecznego planu i snapshotów")
     session_id = store.create(
         patch,
         reader.profile,
@@ -577,6 +606,7 @@ def plan_cleanup_session(
         + "\n",
         kind="report",
     )
+    progress(100, "Plan jest gotowy")
     return {
         "session_id": session_id,
         "state": SessionState.PLANNED.value,
@@ -1342,9 +1372,26 @@ def make_writer(
     requested_stage: ApiStage,
     *,
     enable_api_write: bool,
+    operator_authorized_stage: Optional[ApiStage] = None,
 ) -> PanoramaWriteClient:
+    authorization_profile = reader.profile
+    if operator_authorized_stage is not None:
+        if operator_authorized_stage is ApiStage.READ_ONLY:
+            raise InputError("Tryb wykonania musi wskazywać candidate, commit albo push.")
+        if requested_stage.rank > operator_authorized_stage.rank:
+            raise InputError(
+                f"Przełącznik wykonania pozwala na {operator_authorized_stage.value}, "
+                f"a operacja wymaga {requested_stage.value}."
+            )
+        # The localhost GUI has a separate, volatile execution gate.  It is
+        # intentionally independent from the profile chosen for read-only
+        # analysis; CLI callers keep the original profile ceiling because they
+        # do not pass operator_authorized_stage.
+        authorization_profile = replace(
+            reader.profile, api_max_stage=operator_authorized_stage
+        )
     lease = issue_write_lease(
-        reader.profile,
+        authorization_profile,
         requested_stage,
         enable_api_write=enable_api_write,
         ttl_seconds=3600,
