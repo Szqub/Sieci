@@ -215,8 +215,12 @@ export interface AnalysisJob {
   error?: ApiErrorPayload;
 }
 
-export interface CandidateProgressItem {
+export interface ExecutionProgressItem {
   event: string;
+  message?: string;
+  progress?: number;
+  sequence?: number;
+  timestamp?: string;
   mutationId?: string;
   entityType?: string;
   entityKey?: string;
@@ -225,19 +229,37 @@ export interface CandidateProgressItem {
   completedOperations?: number;
   totalOperations?: number;
   backupCount?: number;
+  jobId?: string;
+  status?: string;
+  result?: string;
+  panoramaProgress?: number;
+  details?: string;
+  pollCount?: number;
+  elapsedSeconds?: number;
 }
 
-export interface CandidateJob {
+export interface ExecutionJob {
   id: string;
   sessionId: string;
-  kind: "candidate";
+  kind: "candidate" | "commit" | "push";
   state: "queued" | "running" | "success" | "failed";
   progress: number;
   message: string;
-  current?: CandidateProgressItem;
-  items: CandidateProgressItem[];
+  current?: ExecutionProgressItem;
+  items: ExecutionProgressItem[];
   session?: ToolboxSession;
   error?: ApiErrorPayload;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface ToolboxNotice {
+  id: string;
+  source: string;
+  title: string;
+  detail: string;
+  severity: "info" | "warning" | "danger";
+  context?: string;
 }
 
 export type AdGroupStatus = "valid" | "empty" | "not-found" | "error";

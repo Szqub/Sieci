@@ -22,13 +22,14 @@ import type { ConnectionSession } from "../model";
 import { shortId } from "../model";
 import { Button, StatusPill } from "./Primitives";
 
-export type ViewId = "connection" | "cleanup" | "plan" | "execute" | "ad-groups" | "audit" | "history" | "restore";
+export type ViewId = "connection" | "cleanup" | "plan" | "execute" | "warnings" | "ad-groups" | "audit" | "history" | "restore";
 
 const navItems: Array<{ id: ViewId; label: string; description: string; icon: typeof Network }> = [
   { id: "connection", label: "Połączenie", description: "Panorama i Doctor", icon: LayoutDashboard },
   { id: "cleanup", label: "Cleanup", description: "Szukaj punktowo lub batch", icon: ListChecks },
   { id: "plan", label: "Plan", description: "Operacje pojedynczo", icon: ClipboardCheck },
   { id: "execute", label: "Wykonaj", description: "Candidate · Commit · Push", icon: Zap },
+  { id: "warnings", label: "Uwagi", description: "Analiza i blokady", icon: AlertTriangle },
   { id: "ad-groups", label: "Grupy AD", description: "Custom LDAP Group", icon: UsersRound },
   { id: "audit", label: "Audit", description: "Pozostałe referencje", icon: SearchCheck },
   { id: "history", label: "Backup i restore", description: "Sesje i joby", icon: History },
@@ -45,10 +46,11 @@ interface ShellProps {
   onThemeChange: () => void;
   onDisconnect: () => void;
   demoMode: boolean;
+  warningCount: number;
   children: ReactNode;
 }
 
-export function Shell({ activeView, onViewChange, connection, writeEnabled, onWriteEnabledChange, theme, onThemeChange, onDisconnect, demoMode, children }: ShellProps) {
+export function Shell({ activeView, onViewChange, connection, writeEnabled, onWriteEnabledChange, theme, onThemeChange, onDisconnect, demoMode, warningCount, children }: ShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [confirmingWrite, setConfirmingWrite] = useState(false);
 
@@ -97,6 +99,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
               <button key={item.id} className={activeView === item.id ? "is-active" : ""} onClick={() => navigate(item.id)}>
                 <Icon size={19} aria-hidden="true" />
                 <span><strong>{item.label}</strong><small>{item.description}</small></span>
+                {item.id === "warnings" && warningCount > 0 && <b className="nav-warning-badge" aria-label={`${warningCount} uwag`}>{warningCount > 99 ? "99+" : warningCount}</b>}
               </button>
             );
           })}
@@ -105,7 +108,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
         <div className="sidebar__footer">
           <div className="safety-note"><ShieldCheck size={17} /><span>API i GUI dostępne wyłącznie na localhost.</span></div>
           <div className="paloalto-brand"><span>Built for</span><img src="/paloalto-logo-light.png" alt="Palo Alto Networks" /><small>{connection ? `PAN-OS ${connection.panoramaVersion}` : "Panorama XML API"}</small></div>
-          <span>Open source · ByteTech · v0.4.0</span>
+          <span>Open source · ByteTech · v0.4.1</span>
           <strong className="author-brand">Szymon Żołnierczyk · Devops Engineer NET</strong>
         </div>
       </aside>

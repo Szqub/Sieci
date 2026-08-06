@@ -129,7 +129,20 @@ class StatefulWriter:
         self.events.append("push:" + ",".join(device_groups))
         return "102"
 
-    def poll_job(self, job_id):
+    def poll_job(self, job_id, **kwargs):
+        callback = kwargs.get("progress_callback")
+        if callback:
+            callback(
+                {
+                    "event": "panorama-job-finished",
+                    "jobId": job_id,
+                    "status": "FIN",
+                    "result": "OK",
+                    "panoramaProgress": 100,
+                    "pollCount": 1,
+                    "elapsedSeconds": 0.1,
+                }
+            )
         return JobResult(job_id, "FIN", "OK", "done")
 
 
@@ -138,7 +151,7 @@ class FailedCommitWriter(StatefulWriter):
         self.events.append("commit")
         return "201"
 
-    def poll_job(self, job_id):
+    def poll_job(self, job_id, **_kwargs):
         return JobResult(job_id, "FIN", "FAIL", "injected commit failure")
 
 
@@ -147,7 +160,7 @@ class FailedPushWriter(StatefulWriter):
         self.events.append("push:" + ",".join(device_groups))
         return "202"
 
-    def poll_job(self, job_id):
+    def poll_job(self, job_id, **_kwargs):
         return JobResult(job_id, "FIN", "FAIL", "injected push failure")
 
 
@@ -168,7 +181,7 @@ class InterruptAfterWriteWriter(StatefulWriter):
 
 
 class InterruptPollingWriter(StatefulWriter):
-    def poll_job(self, job_id):
+    def poll_job(self, job_id, **_kwargs):
         raise KeyboardInterrupt(f"injected interrupt while polling {job_id}")
 
 
@@ -301,19 +314,53 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(CapabilityError):
                 commit_session(store, session_id, reader, writer)
             self.assertEqual(store.load_manifest(session_id)["state"], "CANDIDATE_APPLIED")
-            commit_session(
+            reader.events.clear()
+            commit_updates = []
+            commit_result = commit_session(
                 store,
                 session_id,
                 reader,
                 writer,
                 allow_unisolated_commit=True,
+                progress_callback=lambda value, message, detail: commit_updates.append(
+                    (value, message, detail)
+                ),
             )
             self.assertEqual(store.load_manifest(session_id)["state"], "COMMITTED")
+            self.assertEqual(
+                [event for event in reader.events if event.startswith("fetch:")],
+                ["fetch:running", "fetch:candidate", "fetch:running"],
+            )
+            self.assertEqual(commit_updates[-1][0], 100)
+            self.assertIn("stage-finished", commit_result["phase_timeline_seconds"])
+            self.assertTrue(
+                any(
+                    detail and detail.get("event") == "panorama-job-finished"
+                    for _value, _message, detail in commit_updates
+                )
+            )
             with self.assertRaises(CapabilityError):
                 push_session(store, session_id, reader, writer, device_groups=())
             self.assertEqual(store.load_manifest(session_id)["state"], "COMMITTED")
-            push_session(store, session_id, reader, writer, device_groups=("DG-A",))
+            reader.events.clear()
+            push_updates = []
+            push_result = push_session(
+                store,
+                session_id,
+                reader,
+                writer,
+                device_groups=("DG-A",),
+                progress_callback=lambda value, message, detail: push_updates.append(
+                    (value, message, detail)
+                ),
+            )
             self.assertEqual(store.load_manifest(session_id)["state"], "PUSHED")
+            self.assertEqual(
+                [event for event in reader.events if event.startswith("fetch:")],
+                ["fetch:running"],
+            )
+            self.assertEqual(push_updates[-1][0], 100)
+            self.assertIn("stage-finished", push_result["phase_timeline_seconds"])
 
     def test_partial_apply_commit_checks_only_applied_mutations(self):
         profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)

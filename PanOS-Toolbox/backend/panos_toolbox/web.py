@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
@@ -113,7 +114,20 @@ def _wire_session(store: SessionStore, session_id: str) -> dict[str, Any]:
     manifest = store.load_manifest(session_id)
     patch = store.load_patchset(session_id)
     jobs = []
-    for index, record in enumerate(manifest.get("jobs", []), 1):
+    job_records = list(manifest.get("jobs", []))
+    finished_job_kinds = {
+        str(record.get("stage", "")).split("-", 1)[0]
+        for record in job_records
+        if str(record.get("status", "")).upper() == "FIN"
+    }
+    for index, record in enumerate(job_records, 1):
+        stage = str(record.get("stage", "candidate"))
+        kind = "candidate" if stage == "validation" else stage.split("-", 1)[0]
+        # ``*-dispatched`` is only an audit breadcrumb.  Once the matching
+        # terminal Panorama result exists, exposing both records left a fake
+        # 50% running row in the GUI forever.
+        if stage.endswith("-dispatched") and kind in finished_job_kinds:
+            continue
         result = str(record.get("result", "")).upper()
         status = str(record.get("status", "")).upper()
         state = (
@@ -126,9 +140,7 @@ def _wire_session(store: SessionStore, session_id: str) -> dict[str, Any]:
         jobs.append(
             {
                 "id": str(record.get("job_id") or record.get("jobId") or f"local-{index}"),
-                "kind": "candidate"
-                if record.get("stage") == "validation"
-                else str(record.get("stage", "candidate")).split("-", 1)[0],
+                "kind": kind,
                 "state": state,
                 "progress": 100 if state in {"success", "failed"} else 50,
                 "message": str(record.get("details") or record.get("stage") or ""),
@@ -721,7 +733,9 @@ def _contract() -> dict[str, Any]:
             "POST /cleanup/plans/{id}/components/{component}": "derive isolated component plan",
             "POST /cleanup/plans/{id}/selection": "derive plan for selected target rows",
             "POST /sessions/{id}/candidate-jobs": "path-by-path candidate write with progress",
-            "GET /execution-jobs/{id}": "poll candidate operation progress",
+            "POST /sessions/{id}/commit-jobs": "background Panorama commit with phase timings",
+            "POST /sessions/{id}/push-jobs": "background Panorama push with phase timings",
+            "GET /execution-jobs/{id}": "poll candidate, commit or push progress",
             "POST /sessions/{id}/candidate": "candidate write with ephemeral gate",
             "POST /sessions/{id}/commit": "sequential partial/full commit job",
             "POST /sessions/{id}/push": "one sequential specific-DG commit-all job",
@@ -982,13 +996,151 @@ def create_app(
             "items": list(job.get("items") or ()),
             "session": job.get("session"),
             "error": job.get("error"),
+            "startedAt": job.get("started_at"),
+            "finishedAt": job.get("finished_at"),
         }
+
+    def utc_timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def start_execution_job(
+        *,
+        session_id: str,
+        owner: Optional[str],
+        kind: str,
+        initial_message: str,
+        runner,
+    ) -> dict[str, Any]:
+        """Run a write stage outside the HTTP request and retain live evidence."""
+
+        with execution_jobs_lock:
+            active = next(
+                (
+                    item
+                    for item in execution_jobs.values()
+                    if item["session_id"] == session_id
+                    and item["state"] in {"queued", "running"}
+                ),
+                None,
+            )
+            if active is not None:
+                raise ConflictError(
+                    f"Sesja ma już aktywną operację {active['kind']}: {active['id']}."
+                )
+            job_id = f"{kind}-{secrets.token_hex(8)}"
+            job = {
+                "id": job_id,
+                "owner": owner,
+                "session_id": session_id,
+                "kind": kind,
+                "state": "queued",
+                "progress": 0,
+                "message": initial_message,
+                "items": [],
+                "started_at": utc_timestamp(),
+            }
+            execution_jobs[job_id] = job
+
+        sequence = 0
+
+        def update(
+            progress: int, message: str, detail: Optional[dict[str, Any]]
+        ) -> None:
+            nonlocal sequence
+            sequence += 1
+            value = max(0, min(100, int(progress)))
+            event = {
+                **dict(detail or {}),
+                "message": message,
+                "progress": value,
+                "sequence": sequence,
+                "timestamp": utc_timestamp(),
+            }
+            with execution_jobs_lock:
+                current = execution_jobs[job_id]
+                current.update(
+                    state="running",
+                    progress=max(int(current.get("progress", 0)), value),
+                    message=message,
+                    current=event,
+                )
+                items = current.setdefault("items", [])
+                if (
+                    event.get("event") == "panorama-job-poll"
+                    and items
+                    and items[-1].get("event") == "panorama-job-poll"
+                ):
+                    # Keep one live polling row and update its elapsed time /
+                    # poll count.  Hundreds of identical ACT/PEND rows would
+                    # hide the useful phase transitions without adding signal.
+                    items[-1] = event
+                else:
+                    items.append(event)
+                # A large path-by-path batch must not grow process memory
+                # without limit, while the durable session journal remains
+                # the complete source of truth.
+                if len(items) > 400:
+                    del items[:-400]
+
+        def session_payload() -> Optional[dict[str, Any]]:
+            try:
+                return _wire_session(session_store, session_id)
+            except Exception:
+                return None
+
+        def worker() -> None:
+            try:
+                outcome = runner(update) or {}
+                finished_session = outcome.get("session") or session_payload()
+                with execution_jobs_lock:
+                    execution_jobs[job_id].update(
+                        state="success",
+                        progress=100,
+                        message=str(outcome.get("message") or f"Etap {kind} zakończony poprawnie"),
+                        session=finished_session,
+                        finished_at=utc_timestamp(),
+                    )
+            except ToolboxError as exc:
+                failed_session = session_payload()
+                with execution_jobs_lock:
+                    execution_jobs[job_id].update(
+                        state="failed",
+                        message=f"Etap {kind} został zatrzymany",
+                        error={"code": type(exc).__name__, "message": str(exc)},
+                        session=failed_session,
+                        finished_at=utc_timestamp(),
+                    )
+            except Exception:
+                correlation_id = secrets.token_hex(8)
+                app.logger.exception(
+                    "Unhandled %s job error correlation=%s", kind, correlation_id
+                )
+                failed_session = session_payload()
+                with execution_jobs_lock:
+                    execution_jobs[job_id].update(
+                        state="failed",
+                        message=f"Nieoczekiwany błąd etapu {kind}",
+                        error={
+                            "code": "InternalError",
+                            "message": f"Nieoczekiwany błąd backendu podczas etapu {kind}.",
+                            "correlation_id": correlation_id,
+                        },
+                        session=failed_session,
+                        finished_at=utc_timestamp(),
+                    )
+
+        threading.Thread(
+            target=worker,
+            name=f"panos-toolbox-{job_id}",
+            daemon=True,
+        ).start()
+        return job
 
     @app.get("/api/health")
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.4.0", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.4.1", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -1457,98 +1609,35 @@ def create_app(
         )
         # Validate the target before detaching work from the request context.
         session_store.load_manifest(session_id)
-        with execution_jobs_lock:
-            active = next(
-                (
-                    job
-                    for job in execution_jobs.values()
-                    if job["session_id"] == session_id
-                    and job["state"] in {"queued", "running"}
-                ),
-                None,
+        save_server_snapshot = _json_bool(
+            value,
+            "save_server_snapshot",
+            fallback_key="saveServerSnapshot",
+            default=True,
+        )
+
+        def run_candidate(update):
+            result = apply_candidate(
+                session_store,
+                session_id,
+                client,
+                writer,
+                save_server_snapshot=save_server_snapshot,
+                acquire_locks=True,
+                progress_callback=update,
             )
-            if active is not None:
-                raise ConflictError(
-                    f"Sesja ma już aktywny zapis candidate: {active['id']}."
-                )
-            job_id = "candidate-" + secrets.token_hex(8)
-            job = {
-                "id": job_id,
-                "owner": token,
-                "session_id": session_id,
-                "kind": "candidate",
-                "state": "queued",
-                "progress": 0,
-                "message": "Oczekiwanie na bezpieczny zapis candidate",
-                "items": [],
+            return {
+                "message": f"Candidate zakończony stanem {result.state.value}",
+                "session": _wire_session(session_store, session_id),
             }
-            execution_jobs[job_id] = job
 
-        def update(
-            progress: int, message: str, detail: Optional[dict[str, Any]]
-        ) -> None:
-            with execution_jobs_lock:
-                current = execution_jobs[job_id]
-                current.update(
-                    state="running",
-                    progress=max(0, min(100, int(progress))),
-                    message=message,
-                    current=detail,
-                )
-                if detail and detail.get("event") == "operation-ok":
-                    current.setdefault("items", []).append(dict(detail))
-
-        def worker() -> None:
-            try:
-                result = apply_candidate(
-                    session_store,
-                    session_id,
-                    client,
-                    writer,
-                    save_server_snapshot=_json_bool(
-                        value,
-                        "save_server_snapshot",
-                        fallback_key="saveServerSnapshot",
-                        default=True,
-                    ),
-                    acquire_locks=True,
-                    progress_callback=update,
-                )
-                with execution_jobs_lock:
-                    execution_jobs[job_id].update(
-                        state="success",
-                        progress=100,
-                        message=f"Candidate zakończony stanem {result.state.value}",
-                        session=_wire_session(session_store, session_id),
-                    )
-            except ToolboxError as exc:
-                with execution_jobs_lock:
-                    execution_jobs[job_id].update(
-                        state="failed",
-                        message="Zapis candidate został zatrzymany",
-                        error={"code": type(exc).__name__, "message": str(exc)},
-                    )
-            except Exception:
-                correlation_id = secrets.token_hex(8)
-                app.logger.exception(
-                    "Unhandled candidate job error correlation=%s", correlation_id
-                )
-                with execution_jobs_lock:
-                    execution_jobs[job_id].update(
-                        state="failed",
-                        message="Nieoczekiwany błąd zapisu candidate",
-                        error={
-                            "code": "InternalError",
-                            "message": "Nieoczekiwany błąd backendu podczas zapisu candidate.",
-                            "correlation_id": correlation_id,
-                        },
-                    )
-
-        threading.Thread(
-            target=worker,
-            name=f"panos-toolbox-{job_id}",
-            daemon=True,
-        ).start()
+        job = start_execution_job(
+            session_id=session_id,
+            owner=token,
+            kind="candidate",
+            initial_message="Oczekiwanie na bezpieczny zapis candidate",
+            runner=run_candidate,
+        )
         return jsonify(wire_execution_job(job)), 202
 
     @app.get("/api/v1/execution-jobs/<job_id>")
@@ -1559,8 +1648,114 @@ def create_app(
             job = execution_jobs.get(job_id)
             if job is None or job["owner"] != token:
                 raise InputError("Nieznany job wykonania dla tej sesji połączenia.")
-            payload = wire_execution_job(dict(job))
+            snapshot = dict(job)
+        if snapshot.get("state") in {"queued", "running"}:
+            try:
+                snapshot["session"] = _wire_session(
+                    session_store, snapshot["session_id"]
+                )
+            except ToolboxError:
+                pass
+        payload = wire_execution_job(snapshot)
         return jsonify(payload)
+
+    @app.post("/api/v1/sessions/<session_id>/commit-jobs")
+    def session_commit_job_start(session_id: str):
+        value = body()
+        token = request.headers.get("X-Toolbox-Session")
+        client = connections.get(token)
+        writer = make_writer(
+            client,
+            ApiStage.COMMIT,
+            enable_api_write=_json_bool(
+                value, "enable_api_write", fallback_key="enableApiWrite", default=False
+            ),
+            operator_authorized_stage=execution_stage(value),
+        )
+        session_store.load_manifest(session_id)
+        partial = not _json_bool(value, "full", default=False)
+        allow_unisolated = _json_bool(
+            value,
+            "allow_unisolated_commit",
+            fallback_key="allowUnisolatedCommit",
+            default=False,
+        )
+        allow_full = _json_bool(
+            value,
+            "allow_full_commit",
+            fallback_key="allowFullCommit",
+            default=False,
+        )
+
+        def run_commit(update):
+            result = commit_session(
+                session_store,
+                session_id,
+                client,
+                writer,
+                partial=partial,
+                allow_unisolated_commit=allow_unisolated,
+                allow_full_commit=allow_full,
+                progress_callback=update,
+            )
+            elapsed = result.get("total_duration_seconds")
+            suffix = f" w {elapsed:.1f} s" if isinstance(elapsed, (int, float)) else ""
+            return {
+                "message": f"Commit zakończony poprawnie{suffix}",
+                "session": _wire_session(session_store, session_id),
+            }
+
+        job = start_execution_job(
+            session_id=session_id,
+            owner=token,
+            kind="commit",
+            initial_message="Oczekiwanie na uruchomienie commit",
+            runner=run_commit,
+        )
+        return jsonify(wire_execution_job(job)), 202
+
+    @app.post("/api/v1/sessions/<session_id>/push-jobs")
+    def session_push_job_start(session_id: str):
+        value = body()
+        token = request.headers.get("X-Toolbox-Session")
+        client = connections.get(token)
+        writer = make_writer(
+            client,
+            ApiStage.PUSH,
+            enable_api_write=_json_bool(
+                value, "enable_api_write", fallback_key="enableApiWrite", default=False
+            ),
+            operator_authorized_stage=execution_stage(value),
+        )
+        session_store.load_manifest(session_id)
+        device_groups = string_list_field(
+            value, "device_groups", fallback_key="deviceGroups"
+        )
+
+        def run_push(update):
+            result = push_session(
+                session_store,
+                session_id,
+                client,
+                writer,
+                device_groups=device_groups,
+                progress_callback=update,
+            )
+            elapsed = result.get("total_duration_seconds")
+            suffix = f" w {elapsed:.1f} s" if isinstance(elapsed, (int, float)) else ""
+            return {
+                "message": f"Push zakończony poprawnie{suffix}",
+                "session": _wire_session(session_store, session_id),
+            }
+
+        job = start_execution_job(
+            session_id=session_id,
+            owner=token,
+            kind="push",
+            initial_message="Oczekiwanie na uruchomienie push",
+            runner=run_push,
+        )
+        return jsonify(wire_execution_job(job)), 202
 
     @app.post("/api/v1/sessions/<session_id>/commit")
     def session_commit(session_id: str):

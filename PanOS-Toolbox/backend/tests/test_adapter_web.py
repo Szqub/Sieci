@@ -11,7 +11,7 @@ from panos_toolbox.cleaner_adapter import build_cleanup_patchset
 from panos_toolbox.models import ApiStage
 from panos_toolbox.profile import PanoramaProfile
 from panos_toolbox.sessions import SessionStore
-from panos_toolbox.web import _apply_profile_ceiling, create_app
+from panos_toolbox.web import _apply_profile_ceiling, _wire_session, create_app
 from panos_toolbox.xmlutil import parse_xml
 
 
@@ -131,6 +131,29 @@ class CleanerAdapterTests(unittest.TestCase):
 
 
 class WebBoundaryTests(unittest.TestCase):
+    def test_terminal_job_hides_dispatched_breadcrumb_instead_of_staying_at_50_percent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
+            patch = build_cleanup_patchset(
+                CleanerAdapterTests.fixture(),
+                (),
+                policy_names=("SEC-MIX",),
+                panorama_host="pano",
+                panorama_username="admin",
+            ).patchset
+            session_id = store.create(patch, profile)
+            store.add_job(session_id, "commit-dispatched", {"job_id": "77"})
+            store.add_job(
+                session_id,
+                "commit",
+                {"job_id": "77", "status": "FIN", "result": "OK", "details": "done"},
+            )
+            wired = _wire_session(store, session_id)
+            self.assertEqual(len(wired["jobs"]), 1)
+            self.assertEqual(wired["jobs"][0]["state"], "success")
+            self.assertEqual(wired["jobs"][0]["progress"], 100)
+
     def test_gui_profile_always_allows_runtime_write_gate(self):
         requested = PanoramaProfile(
             "pano", "admin", api_max_stage=ApiStage.PUSH
@@ -161,6 +184,8 @@ class WebBoundaryTests(unittest.TestCase):
                 response.json["authentication"]["connectionTokenHeader"],
                 "X-Toolbox-Session",
             )
+            self.assertIn("POST /sessions/{id}/commit-jobs", response.json["paths"])
+            self.assertIn("POST /sessions/{id}/push-jobs", response.json["paths"])
             self.assertNotIn("Access-Control-Allow-Origin", response.headers)
             self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
             self.assertNotIn("unsafe-inline", response.headers["Content-Security-Policy"])
@@ -252,6 +277,98 @@ class WebBoundaryTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(disconnected.status_code, 204)
+
+    def test_commit_endpoint_runs_as_background_job_with_live_phase_log(self):
+        fixture = CleanerAdapterTests.fixture()
+
+        class FakeReadClient:
+            def __init__(self, profile):
+                self.profile = profile
+
+            def authenticate(self, _password):
+                return None
+
+            def system_info(self):
+                return parse_xml(
+                    '<response status="success"><result><system>'
+                    '<sw-version>10.2.16-h4</sw-version>'
+                    '</system></result></response>'
+                )
+
+            def change_summary(self):
+                return parse_xml('<response status="success"><result /></response>')
+
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            profile = PanoramaProfile("192.0.2.10", "admin", api_max_stage=ApiStage.PUSH)
+            patchset = build_cleanup_patchset(
+                fixture,
+                (),
+                policy_names=("SEC-MIX",),
+                panorama_host=profile.host,
+                panorama_username=profile.username,
+            ).patchset
+            session_id = store.create(patchset, profile)
+            app = create_app(
+                static_dir=Path(temporary) / "static",
+                store=store,
+                profile_ceiling=profile,
+            )
+            headers = {"Host": "localhost", "Origin": "http://localhost"}
+
+            def fake_commit(_store, _session_id, _reader, _writer, **kwargs):
+                callback = kwargs["progress_callback"]
+                callback(44, "Panorama przyjęła commit job 88", {"event": "panorama-job-dispatched", "jobId": "88"})
+                callback(100, "Commit zakończony poprawnie", {"event": "stage-finished", "jobId": "88", "elapsedSeconds": 1.2})
+                return {"total_duration_seconds": 1.2}
+
+            with (
+                mock.patch("panos_toolbox.web.PanoramaReadClient", FakeReadClient),
+                mock.patch("panos_toolbox.web.make_writer", return_value=object()),
+                mock.patch("panos_toolbox.web.commit_session", side_effect=fake_commit),
+            ):
+                client = app.test_client()
+                connected = client.post(
+                    "/api/v1/connections",
+                    json={
+                        "host": profile.host,
+                        "username": profile.username,
+                        "password": "memory-only",
+                        "ssl": True,
+                        "verify_ssl": False,
+                        "api_max_stage": "push",
+                    },
+                    headers=headers,
+                )
+                token = connected.json["session_token"]
+                session_headers = {**headers, "X-Toolbox-Session": token}
+                started = client.post(
+                    f"/api/v1/sessions/{session_id}/commit-jobs",
+                    json={
+                        "enable_api_write": True,
+                        "execution_stage": "push",
+                        "allow_unisolated_commit": True,
+                    },
+                    headers=session_headers,
+                )
+                self.assertEqual(started.status_code, 202, started.get_data(as_text=True))
+                job = started.json
+                for _ in range(100):
+                    if job["state"] in {"success", "failed"}:
+                        break
+                    time.sleep(0.01)
+                    job = client.get(
+                        f"/api/v1/execution-jobs/{job['id']}",
+                        headers={"Host": "localhost", "X-Toolbox-Session": token},
+                    ).json
+                self.assertEqual(job["state"], "success", job.get("error"))
+                self.assertEqual(job["kind"], "commit")
+                self.assertEqual(job["progress"], 100)
+                self.assertTrue(any(item["event"] == "stage-finished" for item in job["items"]))
+                self.assertIsNotNone(job["finishedAt"])
 
     def test_async_analysis_reports_progress_and_can_split_single_component(self):
         fixture = CleanerAdapterTests.fixture()

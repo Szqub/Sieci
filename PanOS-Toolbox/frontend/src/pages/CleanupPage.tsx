@@ -38,6 +38,7 @@ interface CleanupPageProps {
   onAddLookupEntities: (entities: LookupEntity[]) => void;
   onAnalyze: () => void;
   onOpenConnection: () => void;
+  onOpenWarnings: () => void;
 }
 
 type TargetKind = "ip" | "object" | "group" | "policy";
@@ -66,7 +67,7 @@ function lastHitClass(item: Pick<LookupEntity, "lastHit" | "lastHitAgeDays" | "h
   return "last-hit last-hit--red";
 }
 
-export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, busy, progress, lookupResult, lookupBusy, error, onLookup, onAddLookupEntities, onAnalyze, onOpenConnection }: CleanupPageProps) {
+export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, busy, progress, lookupResult, lookupBusy, error, onLookup, onAddLookupEntities, onAnalyze, onOpenConnection, onOpenWarnings }: CleanupPageProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<WorkMode>("point");
   const [activeKind, setActiveKind] = useState<TargetKind>("policy");
@@ -135,7 +136,7 @@ export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIc
 
           <Card className="lookup-results-pane">
             <CardHeader title="Wyniki" description={lookupResult ? `${lookupResult.found.length} znalezionych · ${lookupResult.apiCalls} zapytań · ${(lookupResult.elapsedMs / 1000).toLocaleString("pl-PL", { maximumFractionDigits: 2 })} s` : "Uruchom wyszukiwanie po dokładnej nazwie."} action={lookupResult && <StatusPill tone={lookupResult.partial ? "warning" : "success"}>{lookupResult.partial ? "wynik częściowy" : "exact match"}</StatusPill>} />
-            {lookupResult?.warnings.map((warning) => <Callout key={warning} severity="warning" title="Informacja z lookup"><p>{warning}</p></Callout>)}
+            {Boolean(lookupResult?.warnings.length) && <button type="button" className="inline-notice-link" onClick={onOpenWarnings}><AlertTriangle size={15} /><span><strong>{lookupResult?.warnings.length} uwag z lookup</strong><small>Otwórz wspólny panel Uwagi</small></span><ArrowRight size={15} /></button>}
             {!lookupResult?.found.length ? <div className="lookup-empty"><Search size={28} /><strong>{lookupResult ? "Nie znaleziono dokładnego dopasowania" : "Wyniki pojawią się tutaj"}</strong><span>Możesz ograniczyć wyszukiwanie do konkretnego DG.</span></div> : <div className="lookup-result-list">
               {lookupResult.found.map((item) => {
                 const expanded = expandedLookup.has(item.id);
@@ -159,7 +160,7 @@ export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIc
             <CardHeader title="Inspektor" description="Pola zwrócone przez Panorama." action={<ListTree size={20} />} />
             {!inspected ? <div className="lookup-empty"><ListTree size={28} /><strong>Wybierz wynik</strong><span>Zobaczysz DG, rulebase, strefy, tagi, adresy, service, app i komentarz.</span></div> : <>
               <div className="inspector-title"><div><span className={`entity-type-dot entity-type-dot--${inspected.type}`} /><span><strong>{inspected.name}</strong><small>{inspected.type}</small></span></div>{inspected.readOnly ? <StatusPill tone="warning">Read-only</StatusPill> : <StatusPill tone="success">Planowalny</StatusPill>}</div>
-              {inspected.blockedReason && <Callout severity="warning" title="Automatyczne usunięcie zablokowane"><p>{inspected.blockedReason}</p></Callout>}
+              {inspected.blockedReason && <button type="button" className="inline-notice-link" onClick={onOpenWarnings}><AlertTriangle size={15} /><span><strong>Automatyczne usunięcie zablokowane</strong><small>Szczegół jest w panelu Uwagi</small></span><ArrowRight size={15} /></button>}
               <dl className="inspector-fields">{inspected.fields.map((field, index) => <div key={`${field.k}-${index}`}><dt>{field.k}</dt><dd>{field.v}</dd></div>)}</dl>
               {inspected.type === "policy" && <div className={`inspector-hit ${lastHitClass(inspected)}`}><span><strong>Last Hit</strong><b>{inspected.hitCount ?? 0} trafień</b></span><p>{inspected.lastHit ? formatDate(inspected.lastHit) : "Brak Last Hit / brak hitów"}</p><small>{inspected.lastHitDetail}</small></div>}
               <div className="inspector-dependencies"><h3>Zależności ({inspected.dependencies.length})</h3>{inspected.dependencies.map((dependency) => <div key={dependency.id}><ListTree size={15} /><span><strong>{dependency.name}</strong><small>{dependency.relation} · {dependency.scope}</small></span></div>)}</div>

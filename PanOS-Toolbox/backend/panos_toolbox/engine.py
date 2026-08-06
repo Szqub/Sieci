@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
@@ -927,6 +928,9 @@ def commit_session(
     partial: bool = True,
     allow_unisolated_commit: bool = False,
     allow_full_commit: bool = False,
+    progress_callback: Optional[
+        Callable[[int, str, Optional[dict[str, Any]]], None]
+    ] = None,
 ) -> dict[str, Any]:
     with store.operation_lock(session_id):
         with store.panorama_job_lock(reader.profile.host, session_id):
@@ -938,6 +942,7 @@ def commit_session(
                 partial=partial,
                 allow_unisolated_commit=allow_unisolated_commit,
                 allow_full_commit=allow_full_commit,
+                progress_callback=progress_callback,
             )
 
 
@@ -950,7 +955,29 @@ def _commit_session_unlocked(
     partial: bool = True,
     allow_unisolated_commit: bool = False,
     allow_full_commit: bool = False,
+    progress_callback: Optional[
+        Callable[[int, str, Optional[dict[str, Any]]], None]
+    ] = None,
 ) -> dict[str, Any]:
+    started = time.monotonic()
+    phase_timeline: dict[str, float] = {}
+
+    def progress(
+        value: int, message: str, detail: Optional[dict[str, Any]] = None
+    ) -> None:
+        payload = dict(detail or {})
+        payload.setdefault("elapsedSeconds", round(time.monotonic() - started, 1))
+        event = str(payload.get("event") or "")
+        if event and (event not in phase_timeline or event == "panorama-job-finished"):
+            phase_timeline[event] = float(payload["elapsedSeconds"])
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(max(0, min(100, value)), message, payload)
+        except Exception:
+            pass
+
+    progress(1, "Weryfikacja sesji przed commitem", {"event": "stage-start"})
     manifest = store.load_manifest(session_id)
     allowed = {
         SessionState.CANDIDATE_APPLIED.value,
@@ -974,12 +1001,12 @@ def _commit_session_unlocked(
     if not applied_ids:
         raise SessionError("Manifest nie zawiera listy zastosowanych mutacji candidate.")
 
-    # Backup before lock, then refresh after lock immediately before the
-    # touched-XPath gate.  The owned lock remains held through commit FIN.
-    pre_running = reader.fetch_config("running")
-    pre_candidate = reader.fetch_config("candidate")
-    store.write_snapshot(session_id, "pre_commit_running", pre_running)
-    store.write_snapshot(session_id, "pre_commit_candidate", pre_candidate)
+    # Acquiring a config lock does not mutate configuration.  The old workflow
+    # downloaded running and candidate both before and after the lock (four
+    # full snapshots).  Read each tree once after the lock instead: the backup
+    # is newer, the fingerprint gate remains live, and large Panorama configs
+    # avoid two redundant downloads.
+    progress(5, "Sprawdzanie locków konfiguracji i commit", {"event": "lock-check"})
     reader.show_config_locks()
     reader.show_commit_locks()
     acquired: list[Optional[str]] = []
@@ -987,14 +1014,18 @@ def _commit_session_unlocked(
     terminal_job_result = False
     job_succeeded = False
     try:
+        progress(9, "Zakładanie locków dla dotkniętych zakresów", {"event": "lock-acquire"})
         for scope in _direct_lock_scopes(patch):
             writer.acquire_config_lock(scope, f"PanOS Toolbox commit {session_id}")
             acquired.append(scope)
             store.append_event(session_id, "CONFIG_LOCK_ACQUIRED", {"scope": scope or "shared"})
+        progress(15, "Pobieranie live running (1/2)", {"event": "snapshot-running"})
         pre_running = reader.fetch_config("running")
+        progress(23, "Pobieranie live candidate (2/2)", {"event": "snapshot-candidate"})
         candidate = reader.fetch_config("candidate")
         store.write_snapshot(session_id, "pre_commit_running", pre_running)
         store.write_snapshot(session_id, "pre_commit_candidate", candidate)
+        progress(32, "Sprawdzanie fingerprintów zastosowanych zmian", {"event": "fingerprint-check"})
         try:
             _check_expected_post_state(patch, candidate, applied_ids)
         except ConflictError as exc:
@@ -1014,6 +1045,7 @@ def _commit_session_unlocked(
                 "Full commit może objąć oczekujące zmiany innych administratorów.",
             )
         store.transition(session_id, SessionState.COMMITTING)
+        progress(40, "Wysyłanie żądania commit do Panorama", {"event": "panorama-job-dispatch"})
         job_id = writer.commit(
             partial=partial,
             allow_unisolated_commit=allow_unisolated_commit,
@@ -1021,10 +1053,37 @@ def _commit_session_unlocked(
         )
         dispatched = True
         store.add_job(session_id, "commit-dispatched", {"job_id": job_id})
-        result = writer.poll_job(job_id)
+        progress(
+            44,
+            f"Panorama przyjęła commit job {job_id}",
+            {"event": "panorama-job-dispatched", "jobId": job_id},
+        )
+
+        def job_progress(detail: dict[str, Any]) -> None:
+            panorama_value = detail.get("panoramaProgress")
+            mapped = (
+                44 + int(46 * int(panorama_value) / 100)
+                if isinstance(panorama_value, int)
+                else 46
+            )
+            status = str(detail.get("status") or "UNKNOWN")
+            suffix = (
+                f" · {panorama_value}%"
+                if isinstance(panorama_value, int)
+                else " · Panorama nie podała procentu"
+            )
+            progress(mapped, f"Commit job {job_id}: {status}{suffix}", detail)
+
+        panorama_job_started = time.monotonic()
+        result = writer.poll_job(job_id, progress_callback=job_progress)
         terminal_job_result = True
         job_succeeded = result.succeeded
-        store.add_job(session_id, "commit", result.__dict__)
+        job_record = {
+            **result.__dict__,
+            "duration_seconds": round(time.monotonic() - panorama_job_started, 1),
+            "phase_timeline_seconds": dict(phase_timeline),
+        }
+        store.add_job(session_id, "commit", job_record)
         if not result.succeeded:
             store.record_recoverable_stage_failure(
                 session_id,
@@ -1032,11 +1091,25 @@ def _commit_session_unlocked(
                 detail=f"Commit job {job_id} zakończył się {result.result}.",
             )
             raise PanoramaResponseError(f"Commit job zakończył się {result.result}.")
+        progress(92, "Commit zakończony; pobieranie kontrolnego post-running", {"event": "post-running"})
         post_running = reader.fetch_config("running")
         store.write_snapshot(session_id, "post_running", post_running)
         store.transition(session_id, SessionState.COMMITTED)
         _release_locks(store, session_id, writer, acquired)
-        return result.__dict__
+        progress(100, "Commit zakończony poprawnie", {"event": "stage-finished", "jobId": job_id})
+        total_duration = round(time.monotonic() - started, 1)
+        store.append_event(
+            session_id,
+            "COMMIT_PERFORMANCE",
+            {
+                "job_id": job_id,
+                "total_duration_seconds": total_duration,
+                "panorama_job_duration_seconds": job_record["duration_seconds"],
+                "phase_timeline_seconds": dict(phase_timeline),
+                "full_config_reads": 3,
+            },
+        )
+        return {**job_record, "phase_timeline_seconds": dict(phase_timeline), "total_duration_seconds": total_duration}
     except OutcomeUnknownError:
         store.force_terminal_state(
             session_id,
@@ -1097,6 +1170,9 @@ def push_session(
     writer: PanoramaWriteClient,
     *,
     device_groups: Iterable[str],
+    progress_callback: Optional[
+        Callable[[int, str, Optional[dict[str, Any]]], None]
+    ] = None,
 ) -> dict[str, Any]:
     with store.operation_lock(session_id):
         with store.panorama_job_lock(reader.profile.host, session_id):
@@ -1106,6 +1182,7 @@ def push_session(
                 reader,
                 writer,
                 device_groups=device_groups,
+                progress_callback=progress_callback,
             )
 
 
@@ -1116,7 +1193,29 @@ def _push_session_unlocked(
     writer: PanoramaWriteClient,
     *,
     device_groups: Iterable[str],
+    progress_callback: Optional[
+        Callable[[int, str, Optional[dict[str, Any]]], None]
+    ] = None,
 ) -> dict[str, Any]:
+    started = time.monotonic()
+    phase_timeline: dict[str, float] = {}
+
+    def progress(
+        value: int, message: str, detail: Optional[dict[str, Any]] = None
+    ) -> None:
+        payload = dict(detail or {})
+        payload.setdefault("elapsedSeconds", round(time.monotonic() - started, 1))
+        event = str(payload.get("event") or "")
+        if event and (event not in phase_timeline or event == "panorama-job-finished"):
+            phase_timeline[event] = float(payload["elapsedSeconds"])
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(max(0, min(100, value)), message, payload)
+        except Exception:
+            pass
+
+    progress(1, "Weryfikacja sesji przed push", {"event": "stage-start"})
     manifest = store.load_manifest(session_id)
     if manifest["state"] != SessionState.COMMITTED.value:
         raise SessionError("Push jest dozwolony wyłącznie po potwierdzonym COMMITTED.")
@@ -1132,10 +1231,11 @@ def _push_session_unlocked(
         )
     application = manifest.get("candidate_application") or {}
     applied_ids = application.get("applied_mutation_ids") or []
-    pre_push_running = reader.fetch_config("running")
-    pre_push_candidate = reader.fetch_config("candidate")
-    store.write_snapshot(session_id, "pre_push_running", pre_push_running)
-    store.write_snapshot(session_id, "pre_push_candidate", pre_push_candidate)
+    # Push sends committed running state.  Candidate is not part of commit-all,
+    # so downloading it twice added latency without strengthening the gate.
+    # One live running snapshot after config locks is sufficient for the
+    # postcondition check and durable pre-push evidence.
+    progress(5, "Sprawdzanie locków konfiguracji i commit", {"event": "lock-check"})
     reader.show_config_locks()
     reader.show_commit_locks()
     acquired: list[Optional[str]] = []
@@ -1143,14 +1243,15 @@ def _push_session_unlocked(
     terminal_job_result = False
     job_succeeded = False
     try:
+        progress(10, "Zakładanie locków dla zakresu push", {"event": "lock-acquire"})
         for scope in _direct_lock_scopes(patch):
             writer.acquire_config_lock(scope, f"PanOS Toolbox push {session_id}")
             acquired.append(scope)
             store.append_event(session_id, "CONFIG_LOCK_ACQUIRED", {"scope": scope or "shared"})
+        progress(18, "Pobieranie jednego live running przed push", {"event": "snapshot-running"})
         pre_push_running = reader.fetch_config("running")
-        pre_push_candidate = reader.fetch_config("candidate")
         store.write_snapshot(session_id, "pre_push_running", pre_push_running)
-        store.write_snapshot(session_id, "pre_push_candidate", pre_push_candidate)
+        progress(30, "Sprawdzanie fingerprintów committed state", {"event": "fingerprint-check"})
         try:
             _check_expected_post_state(patch, pre_push_running, applied_ids)
         except ConflictError as exc:
@@ -1164,13 +1265,41 @@ def _push_session_unlocked(
         )
         store.transition(session_id, SessionState.PUSHING)
         # One batch job for the full DG set: never per-IP and never parallel.
+        progress(38, "Wysyłanie commit-all do Panorama", {"event": "panorama-job-dispatch"})
         job_id = writer.push(selected)
         dispatched = True
         store.add_job(session_id, "push-dispatched", {"job_id": job_id})
-        result = writer.poll_job(job_id)
+        progress(
+            42,
+            f"Panorama przyjęła push job {job_id}",
+            {"event": "panorama-job-dispatched", "jobId": job_id},
+        )
+
+        def job_progress(detail: dict[str, Any]) -> None:
+            panorama_value = detail.get("panoramaProgress")
+            mapped = (
+                42 + int(55 * int(panorama_value) / 100)
+                if isinstance(panorama_value, int)
+                else 44
+            )
+            status = str(detail.get("status") or "UNKNOWN")
+            suffix = (
+                f" · {panorama_value}%"
+                if isinstance(panorama_value, int)
+                else " · Panorama nie podała procentu"
+            )
+            progress(mapped, f"Push job {job_id}: {status}{suffix}", detail)
+
+        panorama_job_started = time.monotonic()
+        result = writer.poll_job(job_id, progress_callback=job_progress)
         terminal_job_result = True
         job_succeeded = result.succeeded
-        store.add_job(session_id, "push", result.__dict__)
+        job_record = {
+            **result.__dict__,
+            "duration_seconds": round(time.monotonic() - panorama_job_started, 1),
+            "phase_timeline_seconds": dict(phase_timeline),
+        }
+        store.add_job(session_id, "push", job_record)
         if not result.succeeded:
             store.record_recoverable_stage_failure(
                 session_id,
@@ -1180,7 +1309,20 @@ def _push_session_unlocked(
             raise PanoramaResponseError(f"Push job zakończył się {result.result}.")
         store.transition(session_id, SessionState.PUSHED)
         _release_locks(store, session_id, writer, acquired)
-        return result.__dict__
+        progress(100, "Push zakończony poprawnie", {"event": "stage-finished", "jobId": job_id})
+        total_duration = round(time.monotonic() - started, 1)
+        store.append_event(
+            session_id,
+            "PUSH_PERFORMANCE",
+            {
+                "job_id": job_id,
+                "total_duration_seconds": total_duration,
+                "panorama_job_duration_seconds": job_record["duration_seconds"],
+                "phase_timeline_seconds": dict(phase_timeline),
+                "full_config_reads": 1,
+            },
+        )
+        return {**job_record, "phase_timeline_seconds": dict(phase_timeline), "total_duration_seconds": total_duration}
     except OutcomeUnknownError:
         store.force_terminal_state(
             session_id,

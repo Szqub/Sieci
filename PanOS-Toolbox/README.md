@@ -96,8 +96,10 @@ Ekran ma dwa tryby:
 
 Analiza batch działa jako asynchroniczny job i pokazuje procentowy postęp dla
 ICMP, pobierania/cache running i candidate, grafu zależności, Last Hit oraz
-zapisu artefaktów. Przed każdym realnym WRITE cache nie jest zaufany: Toolbox
-ponownie pobiera live running/candidate, sprawdza locki, fingerprinty i graf.
+zapisu artefaktów. Przed realnym WRITE cache nie jest zaufany: Candidate
+ponownie sprawdza live running/candidate i graf, commit pobiera po locku jeden
+live running i jeden live candidate, a push tylko jeden live running.
+Fingerprinty dotkniętych ścieżek pozostają sprawdzane przed wysłaniem joba.
 Po analizie przy każdym bezpiecznym celu jest przycisk **Tylko ten**. Można też
 zaznaczyć dowolne wiersze albo konkretne zależności i przygotować nowy batch.
 Wydzielany jest cały atomowy komponent zależności, dzięki czemu obiekt, grupa
@@ -114,6 +116,11 @@ oraz każdy obiekt/grupa zależna od takiej reguły są oznaczone
 `APP_OVERRIDE_READ_ONLY`, raportowane w GUI i wyłączane z automatycznych mutacji.
 Chroni to batch przed zatrzymaniem na regule dziedziczonej albo read-only.
 
+Wszystkie ostrzeżenia analizy, blokady read-only, puste/brakujące grupy AD i
+konflikty Restore są dodatkowo zebrane w jednej sekcji **Uwagi** w sidebarze.
+Pomarańczowy badge pokazuje liczbę aktywnych uwag; lista główna nie jest przez
+nie zasłaniana. Szczegóły planu i operacji pozostają w rozwijanym panelu na dole.
+
 Kliknięcie **Analizuj zależności** niczego nie zapisuje. Wynikiem są: plan GUI,
 komendy CLI, raport krótki, raport szczegółowy i manifest. Candidate, commit i
 push pozostają trzema osobnymi, jawnymi etapami.
@@ -123,7 +130,18 @@ odblokowuje trzy osobne przyciski zgodnie ze stanem sesji. Candidate wykonuje
 po XML API każdą operację XPath osobno; pasek pokazuje backup, locki, live
 recheck, bieżącą encję, liczbę operacji i walidację. Toolbox nie wgrywa całego
 pliku konfiguracji. Commit ma osobne ostrzeżenie, a push mocniejsze ostrzeżenie
-z listą device groups. CLI nadal respektuje `api_max_stage` profilu.
+z listą device groups. Commit i push działają jako joby w tle: GUI pokazuje
+bieżącą fazę, czas od startu, job ID, status i procent raportowany przez
+Panoramę. Gdy PAN-OS nie zwraca procentu, pasek jest animowany, a log pokazuje
+kolejne odpytywania zamiast zatrzymywać się na pozornych 50%. Wpis techniczny
+`*-dispatched` znika z listy aktywnych po pojawieniu się terminalnego `FIN`.
+CLI nadal respektuje `api_max_stage` profilu.
+
+Optymalizacja v0.4.1 usuwa zbędne pełne transfery konfiguracji: commit wykonuje
+trzy odczyty zamiast pięciu (running + candidate przed jobem oraz kontrolny
+running po jobie), a push jeden zamiast czterech. Sam partial commit i
+specific-DG commit-all pozostają pojedynczymi jobami Panoramy — rozbijanie ich
+na commit per obiekt byłoby wolniejsze i zwiększałoby ryzyko częściowego stanu.
 
 ## Generator Custom LDAP Group z Active Directory
 
@@ -260,8 +278,9 @@ raportu restore.
 
 - analiza zależności powstaje z running; diff z candidate i natywny
   `change-summary` są informacją;
-- tuż przed mutacją Toolbox ponownie pobiera running i candidate oraz sprawdza
-  fingerprint każdego dotkniętego XPath;
+- tuż przed candidate Toolbox pobiera live running/candidate; commit po locku
+  pobiera po jednym live running/candidate, a push jeden live running, zawsze
+  sprawdzając fingerprint każdego dotkniętego XPath;
 - dla cleanupu planner jest ponownie uruchamiany na aktualnym candidate;
   zmieniony zestaw zależności lub zakres DG konfliktuje tylko powiązany
   komponent zamiast wykonywać nieaktualny plan z running;

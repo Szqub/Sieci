@@ -5,7 +5,7 @@ import { PlanPage } from "../pages/PlanPage";
 
 const baseProps = {
   plan: demoCleanupPlan,
-  candidateJob: null,
+  executionJob: null,
   writeEnabled: true,
   busy: null,
   singlePlanBusy: null,

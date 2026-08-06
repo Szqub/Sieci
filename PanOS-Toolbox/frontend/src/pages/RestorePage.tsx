@@ -16,16 +16,17 @@ import {
   ShieldCheck,
   ShieldX,
 } from "lucide-react";
-import type { CandidateJob, RestorePlan, ToolboxSession } from "../model";
+import type { ExecutionJob, RestorePlan, ToolboxSession } from "../model";
 import { formatDate, shortId } from "../model";
-import { Button, Callout, Card, CardHeader, EmptyState, PageHeader, ProgressBar, StatCard, StatusPill } from "../components/Primitives";
+import { ExecutionProgress } from "../components/ExecutionProgress";
+import { Button, Callout, Card, CardHeader, EmptyState, PageHeader, StatCard, StatusPill } from "../components/Primitives";
 
 interface RestorePageProps {
   query: string;
   onQueryChange: (query: string) => void;
   plan: RestorePlan | null;
   executionSession: ToolboxSession | null;
-  candidateJob: CandidateJob | null;
+  executionJob: ExecutionJob | null;
   writeEnabled: boolean;
   connected: boolean;
   busy: "plan" | "candidate" | "commit" | "push" | "download" | null;
@@ -36,9 +37,10 @@ interface RestorePageProps {
   onPush: () => void;
   onDownloadConflicts: () => void;
   onOpenConnection: () => void;
+  onOpenWarnings: () => void;
 }
 
-export function RestorePage({ query, onQueryChange, plan, executionSession, candidateJob, writeEnabled, connected, busy, error, onCreatePlan, onApplyCandidate, onCommit, onPush, onDownloadConflicts, onOpenConnection }: RestorePageProps) {
+export function RestorePage({ query, onQueryChange, plan, executionSession, executionJob, writeEnabled, connected, busy, error, onCreatePlan, onApplyCandidate, onCommit, onPush, onDownloadConflicts, onOpenConnection, onOpenWarnings }: RestorePageProps) {
   const sessionQuery = (value: string) => !value.includes("\n") && /^(session-|cleanup-)/.test(value.trim());
   const [mode, setMode] = useState<"target" | "session">(() => sessionQuery(query) ? "session" : "target");
   const [confirmAction, setConfirmAction] = useState<"commit" | "push" | null>(null);
@@ -93,7 +95,7 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, cand
             </div>
           </Card>
 
-          {plan.warnings.map((warning) => <Callout severity="warning" title="Wykryto konflikt bieżącego stanu" key={warning} actions={<Button icon={<Download size={15} />} onClick={onDownloadConflicts} loading={busy === "download"}>Pakiet ręczny</Button>}><p>{warning}</p></Callout>)}
+          {plan.warnings.length > 0 && <div className="notice-actions"><button type="button" className="inline-notice-link" onClick={onOpenWarnings}><AlertTriangle size={15} /><span><strong>{plan.warnings.length} uwag z Restore</strong><small>Konflikty i szczegóły są w panelu Uwagi</small></span></button><Button icon={<Download size={15} />} onClick={onDownloadConflicts} loading={busy === "download"}>Pakiet ręczny</Button></div>}
 
           <Card>
             <CardHeader title="Encje w closure zależności" description="Konflikt pomija cały zależny komponent; pozostałe komponenty mogą być przywrócone." action={<StatusPill tone="info">3-way verified</StatusPill>} />
@@ -126,7 +128,7 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, cand
                 <Button variant="primary" loading={busy === "push"} disabled={!writeEnabled || state !== "COMMITTED"} onClick={() => setConfirmAction("push")}>Validate & Push Restore</Button>
               </Card>
             </div>
-            {candidateJob && <Card className="candidate-progress-card" aria-live="polite"><div className="candidate-progress-head"><span><strong>{candidateJob.message}</strong><small>{candidateJob.current?.entityKey ?? "Backup i kontrola live stanu"}</small></span><b>{candidateJob.progress}%</b></div><ProgressBar value={candidateJob.progress} label={`${candidateJob.progress}%`} /><div className="candidate-operation-log">{candidateJob.items.slice(-6).map((item, index) => <div key={`${item.mutationId}-${index}`}><CheckCircle2 className="is-complete" size={14} /><strong>{item.entityKey}</strong><code>{item.action} · {item.completedOperations}/{item.totalOperations}</code></div>)}</div></Card>}
+            {executionJob && <ExecutionProgress job={executionJob} />}
             {state === "RESTORED" ? <Callout severity="success" title="Restore zapisany do Candidate"><p>Safe subset został zastosowany i zwalidowany. Commit ani push nie zostały jeszcze uruchomione.</p></Callout> : null}
             {state === "PARTIAL" ? <Callout severity="warning" title="Częściowy Restore zapisany do Candidate"><p>Bezpieczne komponenty zostały zastosowane; konfliktowe komponenty pominięto. Po przejrzeniu pakietu ręcznego możesz commitować safe subset.</p></Callout> : null}
             {state === "PUSHED" ? <Callout severity="success" title="Restore zakończony"><p>Bezpieczne komponenty zostały odtworzone. Zmiany niezależne pozostały nietknięte, a konflikty są dostępne w pakiecie ręcznym.</p></Callout> : null}

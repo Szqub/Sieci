@@ -56,6 +56,20 @@ describe("typed API client", () => {
     });
   });
 
+  it("uruchamia commit i push jako joby w tle", async () => {
+    const response = () => new Response(JSON.stringify({ id: "job-1", state: "queued", progress: 0, items: [] }), { status: 202, headers: { "Content-Type": "application/json" } });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response())
+      .mockResolvedValueOnce(response());
+
+    await api.startCommitJob("cleanup-1", { enableApiWrite: true, executionStage: "push", allowUnisolatedCommit: true });
+    await api.startPushJob("cleanup-1", ["DG-A"], { enableApiWrite: true, executionStage: "push" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/sessions/cleanup-1/commit-jobs");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/sessions/cleanup-1/push-jobs");
+    expect(JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)).toMatchObject({ device_groups: ["DG-A"] });
+  });
+
   it("uruchamia lokalny Doctor bez hosta Panorama", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ ok: true, checks: [], generatedAt: "2026-07-15T10:00:00Z" }), {

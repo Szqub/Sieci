@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Mapping, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 
 from .errors import (
     CapabilityError,
@@ -79,7 +79,7 @@ class UrllibXMLTransport:
             self.profile.base_url,
             data=urllib.parse.urlencode(params).encode("utf-8"),
             headers={
-                "User-Agent": "ByteTech-PanOS-Toolbox/0.4.0",
+                "User-Agent": "ByteTech-PanOS-Toolbox/0.4.1",
                 "Content-Type": "application/x-www-form-urlencoded",
                 **headers,
             },
@@ -463,11 +463,15 @@ class PanoramaWriteClient:
         *,
         timeout_seconds: float = 900,
         interval_seconds: float = 2,
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> JobResult:
         if not job_id.isdigit():
             raise ValueError("job_id musi być liczbą.")
+        started = time.monotonic()
         deadline = time.monotonic() + timeout_seconds
+        poll_count = 0
         while True:
+            poll_count += 1
             show = ET.Element("show")
             jobs = ET.SubElement(show, "jobs")
             ET.SubElement(jobs, "id").text = job_id
@@ -478,6 +482,28 @@ class PanoramaWriteClient:
             status = (job.findtext("./status") or "").strip().upper()
             result = (job.findtext("./result") or "").strip().upper()
             details = " ".join(text.strip() for text in job.itertext() if text.strip())[:2000]
+            raw_progress = (job.findtext("./progress") or "").strip().rstrip("%")
+            panorama_progress: Optional[int]
+            try:
+                panorama_progress = max(0, min(100, int(float(raw_progress))))
+            except (TypeError, ValueError):
+                panorama_progress = None
+            progress_event = {
+                "event": "panorama-job-finished" if status == "FIN" else "panorama-job-poll",
+                "jobId": job_id,
+                "status": status or "UNKNOWN",
+                "result": result or None,
+                "panoramaProgress": panorama_progress,
+                "details": details,
+                "pollCount": poll_count,
+                "elapsedSeconds": round(time.monotonic() - started, 1),
+            }
+            if progress_callback is not None:
+                # UI telemetry must never influence the outcome of a Panorama job.
+                try:
+                    progress_callback(progress_event)
+                except Exception:
+                    pass
             if status == "FIN":
                 result_value = JobResult(job_id, status, result, details)
                 if self._active_jobs.get(self.profile.host) == job_id:

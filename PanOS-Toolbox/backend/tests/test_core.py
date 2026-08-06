@@ -255,6 +255,34 @@ class ClientSerializationTests(unittest.TestCase):
         )
         writer.poll_job("12", interval_seconds=0)
 
+    def test_panorama_job_poll_exposes_live_progress_and_terminal_event(self):
+        profile = PanoramaProfile(
+            "pano", "admin", verify_ssl=False, api_max_stage=ApiStage.COMMIT
+        )
+        transport = RecordingTransport()
+        reader = PanoramaReadClient(profile, transport)
+        reader._api_key = "memory-only-test-key"
+        writer = reader.enable_write(
+            issue_write_lease(profile, ApiStage.COMMIT, enable_api_write=True)
+        )
+        transport.queue(
+            '<response status="success"><result><job><id>42</id><status>PEND</status>'
+            '<result>PEND</result><progress>37</progress></job></result></response>'
+        )
+        transport.queue(
+            '<response status="success"><result><job><id>42</id><status>FIN</status>'
+            '<result>OK</result><progress>100</progress></job></result></response>'
+        )
+        events = []
+        result = writer.poll_job(
+            "42", interval_seconds=0, progress_callback=events.append
+        )
+        self.assertTrue(result.succeeded)
+        self.assertEqual([event["panoramaProgress"] for event in events], [37, 100])
+        self.assertEqual(events[-1]["event"], "panorama-job-finished")
+        self.assertEqual(events[-1]["pollCount"], 2)
+        self.assertGreaterEqual(events[-1]["elapsedSeconds"], 0)
+
     def test_expired_lease_blocks_forward_but_allows_rollback_and_unlock(self):
         profile = PanoramaProfile(
             "pano", "admin", verify_ssl=False, api_max_stage=ApiStage.CANDIDATE

@@ -4,7 +4,7 @@ import type {
   AdGroupGenerationResult,
   AnalysisJob,
   AuditResult,
-  CandidateJob,
+  ExecutionJob,
   CapabilityStage,
   CleanupPlan,
   ConnectionDraft,
@@ -261,7 +261,7 @@ export const api = {
     });
   },
 
-  async startCandidateJob(sessionId: string, options: WriteOptions): Promise<CandidateJob> {
+  async startCandidateJob(sessionId: string, options: WriteOptions): Promise<ExecutionJob> {
     return request(`/sessions/${encodeURIComponent(sessionId)}/candidate-jobs`, {
       method: "POST",
       body: {
@@ -271,7 +271,31 @@ export const api = {
     });
   },
 
-  async getExecutionJob(jobId: string): Promise<CandidateJob> {
+  async startCommitJob(sessionId: string, options: WriteOptions): Promise<ExecutionJob> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/commit-jobs`, {
+      method: "POST",
+      body: {
+        enable_api_write: options.enableApiWrite,
+        execution_stage: options.executionStage,
+        full: Boolean(options.allowFullCommit),
+        allow_unisolated_commit: Boolean(options.allowUnisolatedCommit),
+        allow_full_commit: Boolean(options.allowFullCommit),
+      },
+    });
+  },
+
+  async startPushJob(sessionId: string, deviceGroups: string[], options: WriteOptions): Promise<ExecutionJob> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/push-jobs`, {
+      method: "POST",
+      body: {
+        enable_api_write: options.enableApiWrite,
+        execution_stage: options.executionStage,
+        device_groups: deviceGroups,
+      },
+    });
+  },
+
+  async getExecutionJob(jobId: string): Promise<ExecutionJob> {
     return request(`/execution-jobs/${encodeURIComponent(jobId)}`);
   },
 

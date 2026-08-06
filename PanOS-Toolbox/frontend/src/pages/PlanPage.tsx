@@ -17,15 +17,16 @@ import {
   ServerCog,
   ShieldCheck,
 } from "lucide-react";
-import type { AddressAnalysis, CandidateJob, CleanupPlan, EntityDependency, SessionState, ToolboxSession } from "../model";
+import type { AddressAnalysis, CleanupPlan, EntityDependency, ExecutionJob, SessionState, ToolboxSession } from "../model";
 import { formatDate, shortId } from "../model";
+import { ExecutionProgress } from "../components/ExecutionProgress";
 import { Button, Callout, Card, EmptyState, PageHeader, ProgressBar, StatusPill } from "../components/Primitives";
 
 interface PlanPageProps {
   focus?: "plan" | "execute";
   plan: CleanupPlan | null;
   executionSession: ToolboxSession | null;
-  candidateJob: CandidateJob | null;
+  executionJob: ExecutionJob | null;
   writeEnabled: boolean;
   busy: "candidate" | "commit" | "push" | "download" | null;
   singlePlanBusy: string | null;
@@ -62,7 +63,7 @@ function hitPresentation(value: { lastHit?: string; lastHitAgeDays?: number; hit
   return { className: "last-hit last-hit--red", label: `${Math.floor(age)} dni`, detail: formatDate(value.lastHit) };
 }
 
-export function PlanPage({ focus = "plan", plan, executionSession, candidateJob, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onCreateSelectionPlan, onPlanDependencies, onRestoreTarget, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
+export function PlanPage({ focus = "plan", plan, executionSession, executionJob, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onCreateSelectionPlan, onPlanDependencies, onRestoreTarget, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
   const [expandedTargets, setExpandedTargets] = useState<Set<string>>(new Set());
   const [selectedTargets, setSelectedTargets] = useState<Set<string>>(new Set());
   const [selectedDependencies, setSelectedDependencies] = useState<Map<string, EntityDependency>>(new Map());
@@ -155,7 +156,7 @@ export function PlanPage({ focus = "plan", plan, executionSession, candidateJob,
           <Card className={["COMMITTED", "PUSHED"].includes(state) ? "stage-card stage-card--done" : "stage-card"}><span className="stage-number">02</span><PackageCheck /><h3>Commit Panorama</h3><p>Osobny partial commit administratora. Przed startem zobaczysz ostrzeżenie z zakresem.</p><Button variant="primary" loading={busy === "commit"} disabled={!writeEnabled || !canCommit} onClick={() => setConfirmAction("commit")}>Commit</Button></Card>
           <Card className={state === "PUSHED" ? "stage-card stage-card--done" : "stage-card"}><span className="stage-number">03</span><CloudUpload /><h3>Push do urządzeń</h3><p>Osobny job tylko do device groups wynikających z planu.</p><div className="push-targets">{plan.affectedDeviceGroups.map((group) => <StatusPill key={group}>{group}</StatusPill>)}</div><Button variant="primary" loading={busy === "push"} disabled={!writeEnabled || !canPush} onClick={() => setConfirmAction("push")}>Validate & Push</Button></Card>
         </div>
-        {candidateJob && <Card className="candidate-progress-card" aria-live="polite"><div className="candidate-progress-head"><div><ServerCog className={candidateJob.state === "running" ? "spin" : ""} size={19} /><span><strong>{candidateJob.message}</strong><small>{candidateJob.current?.entityKey ?? "Bezpieczne przygotowanie sesji"}</small></span></div><b>{candidateJob.progress}%</b></div><ProgressBar value={candidateJob.progress} label={`${candidateJob.progress}%`} /><div className="candidate-operation-log">{candidateJob.items.slice(-6).map((item, index) => <div key={`${item.mutationId}-${index}`}><CheckCircle2 size={14} /><span><strong>{item.entityKey}</strong><small>{item.action} · operacja {item.completedOperations}/{item.totalOperations}</small></span></div>)}</div></Card>}
+        {executionJob && <ExecutionProgress job={executionJob} />}
         {executionSession?.jobs.length ? <Card className="jobs-card">{executionSession.jobs.map((job) => <div className="job-row" key={job.id}><div><StatusPill tone={job.state === "success" ? "success" : job.state === "failed" ? "danger" : "warning"}>{job.state}</StatusPill><div><strong>{job.kind.toUpperCase()} · {job.id}</strong><span>{job.message}</span></div></div><ProgressBar value={job.progress} label={`${job.progress}%`} /></div>)}</Card> : null}
       </section>
 
