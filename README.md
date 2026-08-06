@@ -215,5 +215,10 @@ candidate, commit oraz push wymagają osobnego zezwolenia profilu i jawnego
 włączenia dla danej operacji. GUI obejmuje cleanup, audit, historię sesji i
 Emergency Restore.
 
+Cleanup przyjmuje teraz w jednym planie duże listy IP/literali, dokładnych nazw
+obiektów adresowych, statycznych grup adresowych oraz polityk. Dla polityk
+odnajduje DG/rulebase i sprawdza Last Hit; dla grup domyka usuwanie referencji
+przed usunięciem samej grupy. Dynamic groups pozostają fail-closed do review.
+
 Instrukcja uruchomienia, zabezpieczenia i budowania paczki niewymagającej
 Node.js na maszynie docelowej: `PanOS-Toolbox/README.md`.

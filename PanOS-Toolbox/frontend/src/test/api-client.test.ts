@@ -64,4 +64,29 @@ describe("typed API client", () => {
     const request = fetchMock.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(request.body as string)).toEqual({});
   });
+
+  it("wysyła cztery niezależne listy celów cleanup", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "p", addresses: [], operations: [] }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await api.createCleanupPlan({
+      connectionId: "conn",
+      addresses: ["192.0.2.1"],
+      addressObjects: ["OLD OBJECT"],
+      addressGroups: ["OLD-GROUP"],
+      policies: ["ALLOW OLD"],
+      runIcmp: false,
+      recentHitDays: 30,
+    });
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(request.body as string)).toMatchObject({
+      addresses: ["192.0.2.1"],
+      address_objects: ["OLD OBJECT"],
+      address_groups: ["OLD-GROUP"],
+      policies: ["ALLOW OLD"],
+    });
+  });
 });

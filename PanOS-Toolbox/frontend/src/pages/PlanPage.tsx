@@ -91,7 +91,7 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
     return (
       <div className="page-stack">
         <PageHeader eyebrow="Workflow / Plan" title="Plan i wykonanie" description="Weryfikuj każdą mutację przed zapisaniem candidate." />
-        <Card><EmptyState icon={<ListTree size={27} />} title="Nie ma jeszcze planu" description="Wklej adresy i uruchom analizę. Ten ekran pokaże dokładne zależności, backupy i operacje odwrotne." action={<Button variant="primary" onClick={onOpenCleanup}>Utwórz plan</Button>} /></Card>
+        <Card><EmptyState icon={<ListTree size={27} />} title="Nie ma jeszcze planu" description="Wklej IP lub nazwy encji i uruchom analizę. Ten ekran pokaże dokładne zależności, backupy i operacje odwrotne." action={<Button variant="primary" onClick={onOpenCleanup}>Utwórz plan</Button>} /></Card>
       </div>
     );
   }
@@ -132,7 +132,7 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
       </Card>
 
       <div className="stats-grid stats-grid--6">
-        <StatCard label="Wejście" value={plan.sourceCount} detail="adresów" />
+        <StatCard label="Wejście" value={plan.sourceCount} detail="celów" />
         <StatCard label="Do usunięcia" value={plan.processCount} detail={`${plan.operations.length} operacji`} tone="accent" />
         <StatCard label="Live" value={plan.skippedLiveCount} detail="pominięte" tone="success" />
         <StatCard label="ICMP error" value={plan.skippedErrorCount} detail="pominięte" tone={plan.skippedErrorCount ? "warning" : "neutral"} />
@@ -161,12 +161,12 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
         </Card>
       </div>
 
-      {plan.recentHitCount > 0 && <Callout severity="warning" title={`${plan.recentHitCount} obiekt ma świeży Last Hit`}><p>Plan pozostaje dostępny, ale przed zapisaniem candidate zweryfikuj reguły oznaczone ikoną ostrzeżenia. Próg bezpieczeństwa: 14 dni.</p></Callout>}
+      {plan.recentHitCount > 0 && <Callout severity="warning" title={`${plan.recentHitCount} polityk ma świeży Last Hit`}><p>Plan pozostaje dostępny, ale przed zapisaniem candidate zweryfikuj reguły oznaczone ikoną ostrzeżenia.</p></Callout>}
       {plan.warnings.map((warning) => <Callout severity="info" title="Informacja z analizy" key={warning}><p>{warning}</p></Callout>)}
 
       <Card className="review-card">
         <div className="review-tabs" role="tablist">
-          <button className={tab === "addresses" ? "is-active" : ""} onClick={() => setTab("addresses")} role="tab"><Radio size={16} /> Adresy <span>{plan.addresses.length}</span></button>
+          <button className={tab === "addresses" ? "is-active" : ""} onClick={() => setTab("addresses")} role="tab"><Radio size={16} /> Cele <span>{plan.addresses.length}</span></button>
           <button className={tab === "operations" ? "is-active" : ""} onClick={() => setTab("operations")} role="tab"><Code2 size={16} /> Operacje API <span>{plan.operations.length}</span></button>
           <div className="review-tabs__actions"><Button variant="ghost" icon={<Download size={15} />} onClick={() => onDownload("report")}>Raport</Button><Button variant="ghost" icon={<Download size={15} />} onClick={() => onDownload("manifest")}>Manifest</Button></div>
         </div>
@@ -174,16 +174,16 @@ export function PlanPage({ plan, executionSession, apiMaxStage, writeEnabled, bu
         {tab === "addresses" ? (
           <div className="responsive-table plan-table">
             <table>
-              <thead><tr><th>LP</th><th>Adres / obiekt</th><th>ICMP</th><th>Last Hit</th><th>Referencje</th><th>Decyzja</th><th /></tr></thead>
+              <thead><tr><th>LP</th><th>Cel</th><th>ICMP</th><th>Last Hit polityki</th><th>Referencje</th><th>Decyzja</th><th /></tr></thead>
               <tbody>
                 {plan.addresses.map((address, index) => {
                   const expanded = expandedAddress === address.ip;
                   return [
                     <tr key={address.ip} className={address.recentLastHit ? "row-warning" : ""}>
                       <td>{index + 1}</td>
-                      <td><div className="entity-cell"><strong>{address.ip}</strong><small>{address.objectNames.join(", ") || "brak obiektu"}</small></div></td>
+                      <td><div className="entity-cell"><strong>{address.label ?? address.ip}</strong><small>{address.targetType ?? "ip"} · {address.objectNames.join(", ") || "brak dopasowania"}</small></div></td>
                       <td><StatusPill tone={icmpTone[address.icmp]}>{address.icmp}{address.icmp === "responded" && " · live"}</StatusPill></td>
-                      <td>{address.recentLastHit ? <span className="recent-hit"><AlertTriangle size={14} /> {formatDate(address.lastHit)}</span> : <span className="muted-value">{formatDate(address.lastHit)}</span>}</td>
+                      <td>{address.recentLastHit ? <span className="recent-hit"><AlertTriangle size={14} /> {formatDate(address.lastHit)}</span> : <span className="muted-value">{address.lastHitStatus ? `${address.lastHitStatus} · ${formatDate(address.lastHit)}` : "—"}</span>}</td>
                       <td><span className="reference-count">{address.references.length}</span></td>
                       <td><StatusPill tone={address.decision === "process" ? "accent" : address.decision === "skip-live" ? "success" : address.decision === "skip-error" ? "danger" : address.decision === "blocked" ? "warning" : "neutral"}>{decisionLabel[address.decision]}</StatusPill></td>
                       <td><button className="table-expand" disabled={!address.references.length} onClick={() => setExpandedAddress(expanded ? null : address.ip)} aria-label={`Pokaż referencje ${address.ip}`}>{expanded ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button></td>

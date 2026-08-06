@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_plan = cleanup_commands.add_parser("plan", help="Utwórz plan bez zapisu API.")
     cleanup_plan.add_argument("--ip-file", default=str(PROJECT_DIR / "ip.txt"))
     cleanup_plan.add_argument("--ip", action="append", default=[])
+    cleanup_plan.add_argument("--object", action="append", default=[], help="Dokładna nazwa obiektu adresowego; opcję można powtarzać.")
+    cleanup_plan.add_argument("--group", action="append", default=[], help="Dokładna nazwa statycznej address group; opcję można powtarzać.")
+    cleanup_plan.add_argument("--policy", action="append", default=[], help="Dokładna nazwa polityki; opcję można powtarzać.")
     cleanup_plan.add_argument("--no-ping", action="store_true")
     cleanup_plan.add_argument("--ping-timeout-ms", type=int, default=1000)
     cleanup_plan.add_argument("--ping-workers", type=int, default=32)
@@ -144,7 +147,7 @@ def _input_ips(args: argparse.Namespace) -> list[str]:
     path = Path(args.ip_file)
     if path.is_file():
         values.extend(path.read_text(encoding="utf-8-sig").splitlines())
-    elif not values:
+    elif not values and not (args.object or args.group or args.policy):
         raise ToolboxError(f"Brak pliku IP i argumentów --ip: {path}.")
     return values
 
@@ -191,6 +194,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 store,
                 reader,
                 _input_ips(args),
+                address_objects=args.object,
+                address_groups=args.group,
+                policies=args.policy,
                 no_ping=args.no_ping,
                 ping_timeout_ms=args.ping_timeout_ms,
                 ping_workers=args.ping_workers,

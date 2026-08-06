@@ -4,6 +4,33 @@ export interface ParsedAddressInput {
   ignored: number;
 }
 
+export interface ParsedNameInput {
+  names: string[];
+  duplicates: number;
+  ignored: number;
+}
+
+export function parseNameInput(value: string): ParsedNameInput {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  let duplicates = 0;
+  let ignored = 0;
+  for (const rawLine of value.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      if (line) ignored += 1;
+      continue;
+    }
+    if (seen.has(line)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(line);
+    names.push(line);
+  }
+  return { names, duplicates, ignored };
+}
+
 export function parseAddressInput(value: string): ParsedAddressInput {
   const seen = new Set<string>();
   const addresses: string[] = [];

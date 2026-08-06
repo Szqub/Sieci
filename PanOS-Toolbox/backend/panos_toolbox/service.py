@@ -53,7 +53,7 @@ class PingObservation:
     elapsed_seconds: float
 
 
-def normalize_ips(values: Iterable[str]) -> tuple[str, ...]:
+def normalize_ips(values: Iterable[str], *, allow_empty: bool = False) -> tuple[str, ...]:
     result: list[str] = []
     seen: set[str] = set()
     for index, raw in enumerate(values, 1):
@@ -67,8 +67,23 @@ def normalize_ips(values: Iterable[str]) -> tuple[str, ...]:
         if normalized not in seen:
             result.append(normalized)
             seen.add(normalized)
-    if not result:
+    if not result and not allow_empty:
         raise InputError("Nie podano żadnego poprawnego IP.")
+    return tuple(result)
+
+
+def normalize_names(values: Iterable[str], *, label: str) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(values, 1):
+        value = raw.strip()
+        if not value or value.startswith("#"):
+            continue
+        if any(character in value for character in ("\r", "\n", "\x00")):
+            raise InputError(f"Pozycja {label} {index} zawiera niedozwolony znak sterujący.")
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
     return tuple(result)
 
 
@@ -189,10 +204,11 @@ def _last_hit_summary(
 
 
 def _cleanup_inventory(
-    result: Optional[CleanerPlanResult], ips: Iterable[str]
+    result: Optional[CleanerPlanResult], targets: Iterable[str]
 ) -> dict[str, Any]:
     inventory: dict[str, Any] = {
-        ip: {"objects": [], "blocked_reasons": []} for ip in ips
+        target: {"objects": [], "matches": [], "blocked_reasons": []}
+        for target in targets
     }
     if result is None:
         return inventory
@@ -203,14 +219,34 @@ def _cleanup_inventory(
         for match in result.matches.values()
         for key in match.exact_objects + match.containing_objects
     }
+    selected_object_identities = {
+        (str(found.get("location")), str(found.get("name")))
+        for discovered in result.discovery.values()
+        if discovered.get("kind") == "address-object"
+        for found in discovered.get("matches") or ()
+    }
+    keys.update(
+        key
+        for key in result.model.addresses
+        if (key.location, key.name) in selected_object_identities
+    )
     dependencies = dependency_inventories(result.model, keys)
-    for ip in ips:
-        match = result.matches.get(ip)
+    for target in targets:
+        discovered = result.discovery.get(target) or {}
+        inventory[target].update(
+            {
+                "kind": discovered.get("kind", "ip"),
+                "label": discovered.get("label", target),
+                "status": discovered.get("status", "not-found"),
+                "matches": list(discovered.get("matches") or ()),
+            }
+        )
+        match = result.matches.get(target)
         if match is not None:
             exact = set(match.exact_objects)
             for key in match.exact_objects + match.containing_objects:
                 groups, rules, warnings = dependencies[key]
-                inventory[ip]["objects"].append(
+                inventory[target]["objects"].append(
                     {
                         "location": key.location,
                         "name": key.name,
@@ -231,14 +267,61 @@ def _cleanup_inventory(
                         "warnings": list(warnings),
                     }
                 )
-        inventory[ip]["blocked_reasons"] = [
-            dataclasses.asdict(reason) for reason in result.blocked_ips.get(ip, ())
+        elif discovered.get("kind") == "address-object":
+            for found in discovered.get("matches") or ():
+                key = next(
+                    (
+                        candidate
+                        for candidate in result.model.addresses
+                        if candidate.location == found.get("location")
+                        and candidate.name == found.get("name")
+                    ),
+                    None,
+                )
+                if key is None:
+                    continue
+                groups, rules, warnings = dependencies[key]
+                inventory[target]["objects"].append(
+                    {
+                        **found,
+                        "match": "exact",
+                        "groups": [
+                            {"location": item.location, "name": item.name}
+                            for item in sorted(groups)
+                        ],
+                        "policies": [
+                            {
+                                "location": item.location,
+                                "rulebase": item.rulebase,
+                                "policy_type": item.policy_type,
+                                "name": item.name,
+                            }
+                            for item in sorted(rules)
+                        ],
+                        "warnings": list(warnings),
+                    }
+                )
+        else:
+            inventory[target]["objects"] = [
+                {
+                    **found,
+                    "match": "exact",
+                    "groups": [],
+                    "policies": (
+                        [found] if discovered.get("kind") == "policy" else []
+                    ),
+                    "warnings": [],
+                }
+                for found in discovered.get("matches") or ()
+            ]
+        inventory[target]["blocked_reasons"] = [
+            dataclasses.asdict(reason) for reason in result.blocked_ips.get(target, ())
         ]
     return inventory
 
 
 def _planned_reports(
-    ips: Iterable[str],
+    targets: Iterable[str],
     pings: dict[str, PingObservation],
     patch: PatchSet,
     inventory: dict[str, Any],
@@ -250,9 +333,14 @@ def _planned_reports(
         "Plan nie oznacza jeszcze zapisu do candidate, commit ani push.",
         "",
     ]
-    for lp, ip in enumerate(ips, 1):
-        observation = pings[ip]
-        record = inventory.get(ip) or {"objects": [], "blocked_reasons": []}
+    for lp, target in enumerate(targets, 1):
+        observation = pings.get(
+            target,
+            PingObservation(target, "BYPASSED", "ICMP nie dotyczy tego typu celu", 0.0),
+        )
+        record = inventory.get(target) or {"objects": [], "blocked_reasons": []}
+        label = str(record.get("label") or target)
+        kind = str(record.get("kind") or "ip")
         blocked = record.get("blocked_reasons") or []
         if observation.status == "REPLIED":
             status = "POMINIĘTO_ICMP_ODPOWIEDŹ"
@@ -262,17 +350,17 @@ def _planned_reports(
             status = "REVIEW/BLOKADA: " + ", ".join(
                 str(item.get("code", "UNKNOWN")) for item in blocked
             )
+        elif target in patch.targets:
+            status = "ZAPLANOWANO"
         elif not record.get("objects"):
             status = "OBIEKT_NIE_ISTNIEJE"
-        elif ip in patch.targets:
-            status = "ZAPLANOWANO"
         else:
             status = "BRAK_BEZPIECZNEJ_MUTACJI"
-        short_lines.append(f"{lp}. {ip}: {status}")
+        short_lines.append(f"{lp}. [{kind}] {label}: {status}")
 
         detail_lines.extend(
             [
-                f"{lp}. IP {ip}",
+                f"{lp}. CEL [{kind}] {label}",
                 f"   ICMP: {observation.status} — {observation.detail}",
                 f"   Decyzja: {status}",
             ]
@@ -298,7 +386,7 @@ def _planned_reports(
             detail_lines.append(
                 f"   Blokada {reason.get('code')}: {reason.get('message')}{suffix}"
             )
-        commands = commands_by_ip.get(ip) or []
+        commands = commands_by_ip.get(target) or []
         if commands:
             detail_lines.append("   Komendy CLI planu:")
             detail_lines.extend(f"     {command}" for command in commands)
@@ -311,6 +399,9 @@ def plan_cleanup_session(
     reader: PanoramaReadClient,
     raw_ips: Iterable[str],
     *,
+    address_objects: Iterable[str] = (),
+    address_groups: Iterable[str] = (),
+    policies: Iterable[str] = (),
     no_ping: bool = False,
     ping_timeout_ms: int = 1000,
     ping_workers: int = 32,
@@ -321,9 +412,16 @@ def plan_cleanup_session(
         raise InputError("nat_translation_action musi być delete-rule albo block.")
     if not 1 <= recent_hit_days <= 3650:
         raise InputError("recent_hit_days musi być w zakresie 1..3650.")
-    ips = normalize_ips(raw_ips)
-    pings = ping_ips(
-        ips, bypass=no_ping, timeout_ms=ping_timeout_ms, workers=ping_workers
+    ips = normalize_ips(raw_ips, allow_empty=True)
+    object_names = normalize_names(address_objects, label="obiektu")
+    group_names = normalize_names(address_groups, label="grupy")
+    policy_names = normalize_names(policies, label="polityki")
+    if not (ips or object_names or group_names or policy_names):
+        raise InputError("Nie podano żadnego IP, obiektu, grupy ani polityki.")
+    pings = (
+        ping_ips(ips, bypass=no_ping, timeout_ms=ping_timeout_ms, workers=ping_workers)
+        if ips
+        else {}
     )
     eligible = tuple(
         ip for ip, result in pings.items() if result.status in {"NO_REPLY", "BYPASSED"}
@@ -340,10 +438,19 @@ def plan_cleanup_session(
     if native_warning:
         diff["warnings"].append(native_warning)
 
-    if eligible:
+    named_targets = tuple(
+        [f"object:{name}" for name in object_names]
+        + [f"group:{name}" for name in group_names]
+        + [f"policy:{name}" for name in policy_names]
+    )
+    all_targets = tuple([*ips, *named_targets])
+    if eligible or named_targets:
         result = build_cleanup_patchset(
             running,
             eligible,
+            address_object_names=object_names,
+            address_group_names=group_names,
+            policy_names=policy_names,
             panorama_host=reader.profile.host,
             panorama_username=reader.profile.username,
             nat_translation_action=nat_translation_action,
@@ -383,7 +490,7 @@ def plan_cleanup_session(
             f"{last_hit['review_count']} polityk ma last-hit/status wymagający review; nie blokuje planu."
         )
     patch = replace(patch, warnings=tuple(warnings))
-    inventory = _cleanup_inventory(result, ips)
+    inventory = _cleanup_inventory(result, all_targets)
     session_id = store.create(
         patch,
         reader.profile,
@@ -397,6 +504,14 @@ def plan_cleanup_session(
         manifest["icmp"] = ping_records
         manifest["last_hit"] = last_hit
         manifest["input_ips"] = list(ips)
+        manifest["eligible_input_ips"] = list(eligible)
+        manifest["input_targets"] = {
+            "ips": list(ips),
+            "address_objects": list(object_names),
+            "address_groups": list(group_names),
+            "policies": list(policy_names),
+            "ordered": list(all_targets),
+        }
         manifest["inventory"] = inventory
         manifest["nat_translation_action"] = nat_translation_action
 
@@ -426,7 +541,7 @@ def plan_cleanup_session(
             )
     store.write_artifact(session_id, "commands.txt", commands_text, kind="cli-preview")
     short_report, detailed_report = _planned_reports(
-        ips, pings, patch, inventory, commands_by_ip
+        all_targets, pings, patch, inventory, commands_by_ip
     )
     store.write_artifact(
         session_id, "raport_krotki.txt", short_report, kind="report"
@@ -448,6 +563,12 @@ def plan_cleanup_session(
                 "last_hit": last_hit,
                 "diff": diff,
                 "inventory": inventory,
+                "input_targets": {
+                    "ips": list(ips),
+                    "address_objects": list(object_names),
+                    "address_groups": list(group_names),
+                    "policies": list(policy_names),
+                },
             },
             ensure_ascii=False,
             indent=2,

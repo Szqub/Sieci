@@ -64,7 +64,7 @@ class RuleKey:
 class TargetToken:
     """One removable definition or a direct literal IP reference."""
 
-    kind: str  # address | literal
+    kind: str  # address | literal | group | policy
     ip: str
     location: str = ""
     name: str = ""

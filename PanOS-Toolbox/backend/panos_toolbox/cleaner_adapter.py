@@ -87,6 +87,8 @@ class CleanerPlanResult:
     plan: Any
     matches: Mapping[str, Any]
     blocked_ips: Mapping[str, Any]
+    discovery: Mapping[str, Mapping[str, Any]]
+    target_order: tuple[str, ...]
 
 
 @dataclass
@@ -424,15 +426,25 @@ def build_cleanup_patchset(
     running_config: ET.Element,
     ips: Iterable[str],
     *,
+    address_object_names: Iterable[str] = (),
+    address_group_names: Iterable[str] = (),
+    policy_names: Iterable[str] = (),
     panorama_host: str,
     panorama_username: str,
     nat_translation_action: str = "delete-rule",
 ) -> CleanerPlanResult:
     _legacy_root()
+    from panorama_cleanup.models import BlockReason, TargetToken  # type: ignore[import-not-found]
     from panorama_cleanup.panos import match_ip_objects, parse_config  # type: ignore[import-not-found]
-    from panorama_cleanup.planner import plan_cleanup  # type: ignore[import-not-found]
+    from panorama_cleanup.planner import (  # type: ignore[import-not-found]
+        build_target_tokens,
+        plan_cleanup_targets,
+    )
 
-    normalized = tuple(sorted(set(ips)))
+    normalized = tuple(dict.fromkeys(ips))
+    object_names = tuple(dict.fromkeys(address_object_names))
+    group_names = tuple(dict.fromkeys(address_group_names))
+    rule_names = tuple(dict.fromkeys(policy_names))
     model = parse_config(running_config)
     warnings, blockers = _completeness_findings(model, running_config)
     model.warnings.extend(item for item in warnings if item not in model.warnings)
@@ -441,16 +453,118 @@ def build_cleanup_patchset(
             "Snapshot nie pozwala na kompletny bezpieczny plan: " + "; ".join(blockers)
         )
     matches = match_ip_objects(model, normalized)
-    plan = plan_cleanup(
+    tokens = build_target_tokens(matches, normalized)
+    forced_groups: dict[Any, Any] = {}
+    forced_rules: dict[Any, Any] = {}
+    discovery: dict[str, dict[str, Any]] = {}
+    target_order = tuple(
+        [*normalized]
+        + [f"object:{name}" for name in object_names]
+        + [f"group:{name}" for name in group_names]
+        + [f"policy:{name}" for name in rule_names]
+    )
+
+    for ip in normalized:
+        discovery[ip] = {
+            "kind": "ip",
+            "label": ip,
+            "status": "found" if matches[ip].exact_objects else "not-found",
+            "matches": [
+                {"location": key.location, "name": key.name, "entity_type": "address"}
+                for key in matches[ip].exact_objects
+            ],
+        }
+
+    for name in object_names:
+        cause = f"object:{name}"
+        found = sorted(key for key in model.addresses if key.name == name)
+        token_records = [TargetToken.address(cause, key) for key in found]
+        tokens.update(token_records)
+        discovery[cause] = {
+            "kind": "address-object",
+            "label": name,
+            "status": "found" if found else "not-found",
+            "matches": [
+                {"location": key.location, "name": key.name, "entity_type": "address"}
+                for key in found
+            ],
+        }
+
+    unsupported: dict[str, list[Any]] = {}
+    for name in group_names:
+        cause = f"group:{name}"
+        static = sorted(key for key in model.static_groups if key.name == name)
+        dynamic = sorted(key for key in model.dynamic_groups if key.name == name)
+        token = TargetToken("group", cause, name=name)
+        if dynamic:
+            unsupported[cause] = dynamic
+        elif static:
+            tokens.add(token)
+            forced_groups.update({key: token for key in static})
+        discovery[cause] = {
+            "kind": "address-group",
+            "label": name,
+            "status": "unsupported-dynamic" if dynamic else "found" if static else "not-found",
+            "matches": [
+                {
+                    "location": key.location,
+                    "name": key.name,
+                    "entity_type": "dynamic-address-group" if key in model.dynamic_groups else "address-group",
+                }
+                for key in [*static, *dynamic]
+            ],
+        }
+
+    for name in rule_names:
+        cause = f"policy:{name}"
+        found = sorted(key for key in model.rules if key.name == name)
+        token = TargetToken("policy", cause, name=name)
+        if found:
+            tokens.add(token)
+            forced_rules.update({key: token for key in found})
+        discovery[cause] = {
+            "kind": "policy",
+            "label": name,
+            "status": "found" if found else "not-found",
+            "matches": [
+                {
+                    "location": key.location,
+                    "rulebase": key.rulebase,
+                    "policy_type": key.policy_type,
+                    "name": key.name,
+                    "entity_type": "policy",
+                }
+                for key in found
+            ],
+        }
+
+    plan = plan_cleanup_targets(
         model,
-        matches,
-        normalized,
+        tokens,
+        forced_groups=forced_groups,
+        forced_rules=forced_rules,
         nat_translation_action=nat_translation_action,
     )
+    for cause, keys in unsupported.items():
+        plan.blocked_ips[cause] = [
+            BlockReason(
+                "DYNAMIC_GROUP_DELETE_REQUIRES_REVIEW",
+                "Dynamic address group nie jest automatycznie usuwana; wymagany review filtra i runtime membership.",
+                model.dynamic_groups[keys[0]].xpath,
+            )
+        ]
     patchset = patchset_from_cleaner_plan(
         model,
         plan,
         panorama_host=panorama_host,
         panorama_username=panorama_username,
     )
-    return CleanerPlanResult(patchset, model, plan, matches, plan.blocked_ips)
+    return CleanerPlanResult(
+        patchset,
+        model,
+        plan,
+        matches,
+        plan.blocked_ips,
+        discovery,
+        target_order,
+    )

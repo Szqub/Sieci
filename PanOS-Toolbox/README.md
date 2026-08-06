@@ -21,10 +21,11 @@ Paczka release zawiera zależności webowe w `backend/vendor`: nie wymaga
 Node.js, `pip install`, praw administratora ani lokalnego serwera IIS/Apache.
 
 ```powershell
+Expand-Archive .\PanOS-Toolbox-YYYYMMDD-HHMMSS.zip -DestinationPath .\PanOS-Toolbox
+Set-Location .\PanOS-Toolbox
 Copy-Item .\panorama_host.txt.example .\panorama_host.txt
-Copy-Item .\ip.txt.example .\ip.txt
 notepad .\panorama_host.txt
-python .\panos-toolbox.py doctor --host-file .\panorama_host.txt
+py -3 -I -S .\panos-toolbox.py doctor --host-file .\panorama_host.txt
 .\start_toolbox.ps1 -Port 8765
 ```
 
@@ -35,6 +36,34 @@ Następnie otwórz `http://127.0.0.1:8765/`. Serwera nie uruchamiaj z bindem
 sufit uprawnień backendu. Wybór wyższego poziomu w formularzu GUI nie może go
 podnieść; brak pliku albo niedopasowanie hosta, użytkownika lub TLS wymusza
 efektywne `read-only`.
+
+Nie instaluj Flask ani innych modułów globalnie. Paczka release ma przypięty
+Flask i jego zależności w `backend/vendor`; tryb `-I -S` w poleceniu Doctor
+potwierdza, że Toolbox nie korzysta z przypadkowych pakietów użytkownika.
+
+## Cele cleanupu w GUI
+
+Po połączeniu wpisz host, login i hasło w ekranie **Połączenie**, a następnie
+przejdź do **Cleanup**. Edytor ma cztery niezależne zakładki i przyjmuje duże
+listy wklejane z clipboardu lub z pliku `.txt`:
+
+- **IP / literal** — adresy IP; opcjonalny ICMP kwalifikuje je do analizy;
+- **Obiekty** — dokładne nazwy obiektów adresowych, po jednej w wierszu;
+- **Grupy** — dokładne nazwy statycznych address groups, po jednej w wierszu;
+- **Polityki** — dokładne nazwy reguł, po jednej w wierszu; spacje w nazwie są
+  zachowywane.
+
+Toolbox szuka wszystkich dokładnych trafień we wszystkich obsługiwanych
+device groups, `shared`, pre/post-rulebase oraz typach Security, NAT i
+Application Override. Dla polityki raportuje znaleziony DG/rulebase i pobiera
+Last Hit przed wygenerowaniem operacji. Dla grupy najpierw planuje zdjęcie jej
+z polityk oraz grup nadrzędnych, usuwa grupy opróżnione przez tę zmianę, a na
+końcu wskazaną grupę. Dynamic address group jest raportowana jako blokada do
+ręcznego review — nie jest automatycznie kasowana.
+
+Kliknięcie **Analizuj zależności** niczego nie zapisuje. Wynikiem są: plan GUI,
+komendy CLI, raport krótki, raport szczegółowy i manifest. Candidate, commit i
+push pozostają trzema osobnymi, jawnymi etapami.
 
 Test read-only API (keygen, running, candidate) jest opcjonalny:
 
@@ -81,6 +110,10 @@ Plan niczego nie zapisuje w Panoramie:
 ```powershell
 python .\panos-toolbox.py cleanup plan --ip-file .\ip.txt
 python .\panos-toolbox.py cleanup plan --ip 10.0.0.10 --ip 10.0.0.11
+python .\panos-toolbox.py cleanup plan --object "OLD-WEB-SERVER"
+python .\panos-toolbox.py cleanup plan --group "GRP-LEGACY-SERVERS"
+python .\panos-toolbox.py cleanup plan --policy "ALLOW LEGACY APP"
+python .\panos-toolbox.py cleanup plan --ip 10.0.0.10 --object "OLD-WEB-SERVER" --group "GRP-LEGACY-SERVERS" --policy "ALLOW LEGACY APP"
 ```
 
 Etapy zapisu wymagają profilu z odpowiednim limitem i jawnej flagi:
@@ -90,6 +123,11 @@ python .\panos-toolbox.py cleanup apply --session SESSION_ID --enable-api-write
 python .\panos-toolbox.py session commit --session SESSION_ID --enable-api-write --allow-unisolated-commit
 python .\panos-toolbox.py session push --session SESSION_ID --enable-api-write --device-group DG1
 ```
+
+Po `cleanup plan` skopiuj `session_id` z wyniku. Przed `apply`, `commit` i
+`push` przejrzyj `commands.txt`, `raport_szczegolowy.txt`, ostrzeżenia Last Hit
+oraz wyliczony zakres device groups. Nazwy przekazane przez `--object`,
+`--group` i `--policy` są dokładne i każdą opcję można powtarzać.
 
 Full commit jest osobnym, najwyższym ryzykiem:
 

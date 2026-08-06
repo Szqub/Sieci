@@ -1,13 +1,13 @@
 import { AlertTriangle, ArrowRight, FileText, Gauge, Network, Radar, ShieldCheck, Upload, Workflow } from "lucide-react";
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ConnectionSession } from "../model";
-import { parseAddressInput, pluralize } from "../utils";
+import { parseAddressInput, parseNameInput, pluralize } from "../utils";
 import { Button, Callout, Card, CardHeader, PageHeader, StatCard, Toggle } from "../components/Primitives";
 
 interface CleanupPageProps {
   connection: ConnectionSession | null;
-  addressText: string;
-  onAddressTextChange: (value: string) => void;
+  targetTexts: Record<TargetKind, string>;
+  onTargetTextChange: (kind: TargetKind, value: string) => void;
   runIcmp: boolean;
   onRunIcmpChange: (value: boolean) => void;
   recentHitDays: number;
@@ -18,21 +18,45 @@ interface CleanupPageProps {
   onOpenConnection: () => void;
 }
 
-export function CleanupPage({ connection, addressText, onAddressTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, busy, error, onAnalyze, onOpenConnection }: CleanupPageProps) {
+type TargetKind = "ip" | "object" | "group" | "policy";
+
+const targetOptions: Record<TargetKind, { label: string; hint: string; placeholder: string }> = {
+  ip: { label: "IP / literal", hint: "Adresy IP; można rozdzielać spacją, przecinkiem lub nową linią.", placeholder: "10.20.30.41\n10.20.30.42\n# wycofane serwery" },
+  object: { label: "Obiekty", hint: "Dokładna nazwa obiektu adresowego w każdym wierszu.", placeholder: "OLD-WEB-SERVER\nOLD-DATABASE" },
+  group: { label: "Grupy", hint: "Dokładna nazwa statycznej address group w każdym wierszu.", placeholder: "GRP-LEGACY-SERVERS\nGRP-OLD-DMZ" },
+  policy: { label: "Polityki", hint: "Dokładna nazwa polityki w każdym wierszu; spacje w nazwie są zachowywane.", placeholder: "ALLOW LEGACY APP\nOLD-NAT-RULE" },
+};
+
+export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, busy, error, onAnalyze, onOpenConnection }: CleanupPageProps) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const parsed = useMemo(() => parseAddressInput(addressText), [addressText]);
+  const [activeKind, setActiveKind] = useState<TargetKind>("ip");
+  const parsed = useMemo(() => ({
+    ip: parseAddressInput(targetTexts.ip),
+    object: parseNameInput(targetTexts.object),
+    group: parseNameInput(targetTexts.group),
+    policy: parseNameInput(targetTexts.policy),
+  }), [targetTexts]);
+  const activeParsed = parsed[activeKind];
+  const counts: Record<TargetKind, number> = {
+    ip: parsed.ip.addresses.length,
+    object: parsed.object.names.length,
+    group: parsed.group.names.length,
+    policy: parsed.policy.names.length,
+  };
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const activeCount = counts[activeKind];
 
   const loadFile = async (file?: File) => {
     if (!file) return;
-    onAddressTextChange(await file.text());
+    onTargetTextChange(activeKind, await file.text());
   };
 
   return (
     <div className="page-stack">
       <PageHeader
         eyebrow="Workflow / Cleanup"
-        title="Wskaż adresy do analizy"
-        description="Toolbox rozwiąże dokładne nazwy obiektów, pełną sieć zależności oraz bezpieczny plan zmian na podstawie running config."
+        title="Wskaż cele do analizy"
+        description="Wklej IP, nazwy obiektów, grup lub polityk. Toolbox odnajdzie DG/rulebase, zależności i Last Hit przed wygenerowaniem planu."
       />
 
       {!connection && <Callout severity="warning" title="Najpierw połącz się z Panorama" actions={<Button onClick={onOpenConnection}>Przejdź do połączenia</Button>}><p>Analiza wymaga aktywnej sesji odczytowej. Włączenie zapisu nie jest potrzebne.</p></Callout>}
@@ -40,28 +64,35 @@ export function CleanupPage({ connection, addressText, onAddressTextChange, runI
 
       <div className="cleanup-layout">
         <Card className="address-input-card">
-          <CardHeader title="Lista wejściowa" description="Jeden adres w wierszu; komentarze po # są ignorowane." action={<FileText size={20} />} />
+          <CardHeader title="Lista wejściowa" description="Duże paczki można wkleić bezpośrednio albo wczytać z pliku tekstowego." action={<FileText size={20} />} />
+          <div className="target-kind-tabs" role="tablist">
+            {(Object.keys(targetOptions) as TargetKind[]).map((kind) => {
+              const count = counts[kind];
+              return <button key={kind} type="button" role="tab" className={activeKind === kind ? "is-active" : ""} onClick={() => setActiveKind(kind)}>{targetOptions[kind].label}<span>{count}</span></button>;
+            })}
+          </div>
           <div className="address-editor-wrap">
             <div className="address-editor__toolbar">
               <div>
-                <span className="editor-count">{parsed.addresses.length}</span>
-                <span>{pluralize(parsed.addresses.length, ["unikalny adres", "unikalne adresy", "unikalnych adresów"])}</span>
+                <span className="editor-count">{activeCount}</span>
+                <span>{activeKind === "ip" ? pluralize(activeCount, ["unikalny adres", "unikalne adresy", "unikalnych adresów"]) : pluralize(activeCount, ["unikalna nazwa", "unikalne nazwy", "unikalnych nazw"])}</span>
               </div>
               <button type="button" onClick={() => fileRef.current?.click()}><Upload size={15} /> Wczytaj ip.txt</button>
               <input ref={fileRef} type="file" accept=".txt,text/plain" hidden onChange={(event) => void loadFile(event.target.files?.[0])} />
             </div>
             <textarea
               className="address-editor"
-              value={addressText}
-              onChange={(event) => onAddressTextChange(event.target.value)}
-              placeholder={"10.20.30.41\n10.20.30.42\n# wycofane serwery"}
+              value={targetTexts[activeKind]}
+              onChange={(event) => onTargetTextChange(activeKind, event.target.value)}
+              placeholder={targetOptions[activeKind].placeholder}
               spellCheck={false}
-              aria-label="Adresy IP do cleanupu"
+              aria-label={`${targetOptions[activeKind].label} do cleanupu`}
             />
+            <p className="editor-hint">{targetOptions[activeKind].hint}</p>
             <div className="address-editor__footer">
-              <span>Duplikaty: <strong>{parsed.duplicates}</strong></span>
-              <span>Komentarze: <strong>{parsed.ignored}</strong></span>
-              <button type="button" onClick={() => onAddressTextChange("")} disabled={!addressText}>Wyczyść</button>
+              <span>Duplikaty: <strong>{activeParsed.duplicates}</strong></span>
+              <span>Komentarze: <strong>{activeParsed.ignored}</strong></span>
+              <button type="button" onClick={() => onTargetTextChange(activeKind, "")} disabled={!targetTexts[activeKind]}>Wyczyść</button>
             </div>
           </div>
         </Card>
@@ -89,17 +120,17 @@ export function CleanupPage({ connection, addressText, onAddressTextChange, runI
           </Card>
 
           <div className="analysis-preview">
-            <StatCard label="Do sprawdzenia" value={parsed.addresses.length} detail="po deduplikacji" tone="accent" />
+            <StatCard label="Do sprawdzenia" value={total} detail="łącznie, po deduplikacji" tone="accent" />
             <StatCard label="Tryb" value="Running" detail="źródło analizy" />
             <StatCard label="Zmiany" value="0" detail="plan nie zapisuje API" tone="success" />
           </div>
 
           <Callout severity="info" title="Diff jest informacją"><p>Natywny change-summary i diff semantyczny pojawią się w planie. Istniejący candidate nie blokuje generowania.</p></Callout>
 
-          <Button className="analyze-button" variant="primary" onClick={onAnalyze} loading={busy} disabled={!connection || parsed.addresses.length === 0} icon={<ArrowRight size={18} />}>
+          <Button className="analyze-button" variant="primary" onClick={onAnalyze} loading={busy} disabled={!connection || total === 0} icon={<ArrowRight size={18} />}>
             Analizuj zależności
           </Button>
-          {parsed.addresses.length > 500 && <div className="inline-warning"><AlertTriangle size={16} /> Duża paczka może potrwać kilka minut. Postęp będzie raportowany przez backend.</div>}
+          {total > 500 && <div className="inline-warning"><AlertTriangle size={16} /> Duża paczka może potrwać kilka minut. Postęp będzie raportowany przez backend.</div>}
         </div>
       </div>
     </div>

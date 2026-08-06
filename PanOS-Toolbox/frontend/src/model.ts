@@ -75,11 +75,15 @@ export interface ReferenceLocation {
 
 export interface AddressAnalysis {
   ip: string;
+  label?: string;
+  targetType?: "ip" | "address-object" | "address-group" | "policy";
   objectNames: string[];
   icmp: IcmpState;
   icmpDetail?: string;
   decision: Decision;
   lastHit?: string;
+  lastHitStatus?: string;
+  lastHitDetail?: string;
   recentLastHit: boolean;
   componentId?: string;
   references: ReferenceLocation[];

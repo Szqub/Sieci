@@ -129,9 +129,18 @@ def _cleanup_candidate_replan_conflicts(
 
     components = {mutation.component_id for mutation in patch.mutations}
     try:
+        input_targets = manifest.get("input_targets") or {}
+        replan_ips = (
+            manifest.get("eligible_input_ips")
+            if "eligible_input_ips" in manifest
+            else patch.targets
+        )
         replanned = build_cleanup_patchset(
             candidate,
-            patch.targets,
+            replan_ips or (),
+            address_object_names=input_targets.get("address_objects") or (),
+            address_group_names=input_targets.get("address_groups") or (),
+            policy_names=input_targets.get("policies") or (),
             panorama_host=patch.panorama_host,
             panorama_username=patch.panorama_username,
             nat_translation_action=str(
