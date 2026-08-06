@@ -70,6 +70,33 @@ describe("typed API client", () => {
     expect(JSON.parse(request.body as string)).toEqual({});
   });
 
+  it("wysyła grupy AD i metadane miejsca docelowego bez sesji Panorama", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ outputGroupName: "AD__VPN", groups: [], blocks: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await api.generateAdGroup({
+      groups: ["GG-VPN", "GG-ADMINS"],
+      outputName: "VPN",
+      mappingName: "LDAP_GM1",
+      vsys: "vsys1",
+      templateName: "TPL-NET",
+    });
+
+    const request = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(request.body as string)).toEqual({
+      groups: ["GG-VPN", "GG-ADMINS"],
+      output_name: "VPN",
+      mapping_name: "LDAP_GM1",
+      vsys: "vsys1",
+      template_name: "TPL-NET",
+    });
+    expect(new Headers(request.headers).get("X-Toolbox-Session")).toBeNull();
+  });
+
   it("wysyła cztery niezależne listy celów cleanup", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ id: "p", addresses: [], operations: [] }), {

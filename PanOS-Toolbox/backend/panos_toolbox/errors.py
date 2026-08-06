@@ -17,6 +17,12 @@ class TransportError(ToolboxError):
     pass
 
 
+class DependencyError(ToolboxError):
+    """A required local runtime dependency is unavailable."""
+
+    pass
+
+
 class PanoramaResponseError(TransportError):
     pass
 

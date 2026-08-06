@@ -3,6 +3,7 @@ import { api, ToolboxApiError } from "./api/client";
 import { Shell, type ViewId } from "./components/Shell";
 import type {
   AddressAnalysis,
+  AdGroupGenerationResult,
   AnalysisJob,
   AuditResult,
   CapabilityStage,
@@ -15,6 +16,7 @@ import type {
 } from "./model";
 import { parseAddressInput, parseNameInput } from "./utils";
 import { AuditPage } from "./pages/AuditPage";
+import { AdGroupsPage, type AdGroupDraft } from "./pages/AdGroupsPage";
 import { CleanupPage } from "./pages/CleanupPage";
 import { ConnectionPage } from "./pages/ConnectionPage";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -30,7 +32,15 @@ const initialConnection: ConnectionDraft = {
   apiMaxStage: "read-only",
 };
 
-type MainBusy = "connect" | "doctor" | "analyze" | "audit" | "history" | null;
+const initialAdGroupDraft: AdGroupDraft = {
+  groupsText: "",
+  outputName: "",
+  mappingName: "LDAP_GM1",
+  vsys: "vsys1",
+  templateName: "",
+};
+
+type MainBusy = "connect" | "doctor" | "analyze" | "ad-groups" | "audit" | "history" | null;
 type StageBusy = "candidate" | "commit" | "push" | "download" | null;
 type RestoreBusy = "plan" | "candidate" | "commit" | "push" | "download" | null;
 type DemoModule = typeof import("./demo");
@@ -80,6 +90,9 @@ export default function App() {
   const [recentHitDays, setRecentHitDays] = useState(14);
   const [cleanupPlan, setCleanupPlan] = useState<CleanupPlan | null>(null);
   const [executionSession, setExecutionSession] = useState<ToolboxSession | null>(null);
+
+  const [adGroupDraft, setAdGroupDraft] = useState<AdGroupDraft>(initialAdGroupDraft);
+  const [adGroupResult, setAdGroupResult] = useState<AdGroupGenerationResult | null>(null);
 
   const [auditQuery, setAuditQuery] = useState("");
   const [auditResult, setAuditResult] = useState<AuditResult | null>(null);
@@ -226,6 +239,26 @@ export default function App() {
     }
   };
 
+  const generateAdGroup = async () => {
+    setMainBusy("ad-groups");
+    setAdGroupResult(null);
+    setError(null);
+    try {
+      const result = await api.generateAdGroup({
+        groups: parseNameInput(adGroupDraft.groupsText).names,
+        outputName: adGroupDraft.outputName,
+        mappingName: adGroupDraft.mappingName,
+        vsys: adGroupDraft.vsys,
+        templateName: adGroupDraft.templateName,
+      });
+      setAdGroupResult(result);
+    } catch (generationError) {
+      setError(getErrorMessage(generationError));
+    } finally {
+      setMainBusy(null);
+    }
+  };
+
   const applyCandidate = async () => {
     if (!cleanupPlan) return;
     setStageBusy("candidate"); setError(null);
@@ -343,7 +376,8 @@ export default function App() {
   let page;
   if (view === "connection") page = <ConnectionPage draft={draft} onDraftChange={setDraft} connection={connection} doctor={doctor} busy={mainBusy === "connect" || mainBusy === "doctor" ? mainBusy : null} error={error} onConnect={() => void connect()} onDoctor={() => void runDoctor()} onDemo={enableDemo} demoAvailable={import.meta.env.DEV} />;
   else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} busy={mainBusy === "analyze"} progress={analysisJob} error={error} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} />;
-  else if (view === "plan") page = <PlanPage plan={cleanupPlan} executionSession={executionSession} executionStage={executionStage} onExecutionStageChange={setExecutionStage} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onApplyCandidate={() => void applyCandidate()} onCommit={(unisolated, full) => void commitCleanup(unisolated, full)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
+  else if (view === "ad-groups") page = <AdGroupsPage draft={adGroupDraft} onDraftChange={setAdGroupDraft} result={adGroupResult} busy={mainBusy === "ad-groups"} error={error} onGenerate={() => void generateAdGroup()} />;
+  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionStage={executionStage} onExecutionStageChange={setExecutionStage} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onApplyCandidate={() => void applyCandidate()} onCommit={(unisolated, full) => void commitCleanup(unisolated, full)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} />;
   else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} apiMaxStage={executionStage} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={(unisolated, full) => void commitRestore(unisolated, full)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => navigate("connection")} />;

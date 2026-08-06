@@ -1,6 +1,7 @@
 import type {
   ApiActionResult,
   ApiErrorPayload,
+  AdGroupGenerationResult,
   AnalysisJob,
   AuditResult,
   CapabilityStage,
@@ -97,6 +98,25 @@ async function download(path: string): Promise<Blob> {
 export const api = {
   async health(): Promise<{ status: string; version: string }> {
     return request("/health");
+  },
+
+  async generateAdGroup(input: {
+    groups: string[];
+    outputName: string;
+    mappingName: string;
+    vsys: string;
+    templateName: string;
+  }): Promise<AdGroupGenerationResult> {
+    return request("/ad-groups/generate", {
+      method: "POST",
+      body: {
+        groups: input.groups,
+        output_name: input.outputName,
+        mapping_name: input.mappingName,
+        vsys: input.vsys,
+        template_name: input.templateName,
+      },
+    });
   },
 
   async doctor(connection?: Pick<ConnectionDraft, "host" | "ssl" | "verifySsl">): Promise<DoctorResult> {

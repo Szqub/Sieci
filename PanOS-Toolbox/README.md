@@ -101,6 +101,38 @@ Commit albo Push. Jest on niezależny od profilu wybranego przy połączeniu i
 działa wyłącznie razem z przełącznikiem **Zapis API** dla bieżącej sesji
 przeglądarki. CLI nadal respektuje `api_max_stage` profilu.
 
+## Generator Custom LDAP Group z Active Directory
+
+Sekcja **Grupy AD** przenosi do GUI workflow ze skryptu
+`pa_ad_group_generator.ps1`. Nie wymaga połączenia z Panorama. Przyjmuje dużą
+listę nazw grup AD, nazwę wynikową, Device Template (opcjonalnie), nazwę Group
+Mapping i VSYS. Domyślne miejsce docelowe to `LDAP_GM1` oraz `vsys1`.
+
+Toolbox wykonuje lokalnie `Get-ADGroup -Properties Members` dla każdej
+unikalnej nazwy. Do wyniku trafiają wyłącznie grupy, które istnieją i mają co
+najmniej jednego bezpośredniego członka. Brakujące, puste oraz grupy z błędem
+odczytu są pokazane osobno i pomijane. Distinguished Name jest zamieniany na
+filtr `(memberof=...)`; filtry są grupowane operatorem OR po maksymalnie sześć
+wpisów, tak jak w dotychczasowym skrypcie. Znaki specjalne wartości filtra są
+escapowane zgodnie z RFC 4515.
+
+Nazwa wynikowa zawsze otrzymuje kanoniczny prefiks `AD__`. Wpisanie `VPN_USERS`
+da `AD__VPN_USERS`; istniejący prefiks nie zostanie zdublowany. GUI pokazuje
+gotowe bloki i pozwala kopiować każdy osobno albo wszystkie naraz.
+
+Walidacja wymaga Windows PowerShell i modułu `ActiveDirectory` z RSAT na stacji
+uruchamiającej Toolbox. Paczka nie instaluje RSAT ani żadnego modułu globalnie.
+Generator jest read-only: nie tworzy ani nie modyfikuje grup w AD i nie zapisuje
+konfiguracji Panoramy. Bloki należy wkleić ręcznie w:
+
+```text
+Device Templates > [template] > User Identification > Group Mapping Settings
+> LDAP_GM1 > Custom Group (VSYS: vsys1)
+```
+
+Automatyczny zapis tej sekcji przez XML API zostanie dodany dopiero po
+potwierdzeniu dokładnego XPath i semantyki commit/push dla używanego template.
+
 Test read-only API (keygen, running, candidate) jest opcjonalny:
 
 ```powershell

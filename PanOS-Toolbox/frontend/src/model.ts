@@ -132,6 +132,39 @@ export interface AnalysisJob {
   error?: ApiErrorPayload;
 }
 
+export type AdGroupStatus = "valid" | "empty" | "not-found" | "error";
+
+export interface AdGroupValidation {
+  name: string;
+  status: AdGroupStatus;
+  memberCount: number;
+  distinguishedName?: string;
+  detail: string;
+}
+
+export interface AdFilterBlock {
+  index: number;
+  filter: string;
+  sourceGroups: string[];
+}
+
+export interface AdGroupGenerationResult {
+  generatedAt: string;
+  outputGroupName: string;
+  mappingName: string;
+  vsys: string;
+  templateName: string;
+  panoramaPath: string;
+  chunkSize: number;
+  inputCount: number;
+  validCount: number;
+  skippedCount: number;
+  groups: AdGroupValidation[];
+  blocks: AdFilterBlock[];
+  clipboardText: string;
+  warnings: string[];
+}
+
 export interface JobStatus {
   id: string;
   kind: "candidate" | "validation" | "commit" | "push" | "restore";

@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   ClipboardCheck,
   History,
   LayoutDashboard,
@@ -12,6 +13,7 @@ import {
   ShieldCheck,
   Sun,
   Unplug,
+  UsersRound,
   X,
   Zap,
 } from "lucide-react";
@@ -20,14 +22,16 @@ import type { ConnectionSession } from "../model";
 import { shortId } from "../model";
 import { Button, StatusPill } from "./Primitives";
 
-export type ViewId = "connection" | "cleanup" | "plan" | "audit" | "history" | "restore";
+export type ViewId = "connection" | "cleanup" | "plan" | "execute" | "ad-groups" | "audit" | "history" | "restore";
 
 const navItems: Array<{ id: ViewId; label: string; description: string; icon: typeof Network }> = [
   { id: "connection", label: "Połączenie", description: "Panorama i Doctor", icon: LayoutDashboard },
-  { id: "cleanup", label: "Cleanup", description: "Adresy i analiza", icon: ListChecks },
-  { id: "plan", label: "Plan i wykonanie", description: "Candidate · Commit · Push", icon: ClipboardCheck },
+  { id: "cleanup", label: "Cleanup", description: "Szukaj punktowo lub batch", icon: ListChecks },
+  { id: "plan", label: "Plan", description: "Operacje pojedynczo", icon: ClipboardCheck },
+  { id: "execute", label: "Wykonaj", description: "Candidate · Commit · Push", icon: Zap },
+  { id: "ad-groups", label: "Grupy AD", description: "Custom LDAP Group", icon: UsersRound },
   { id: "audit", label: "Audit", description: "Pozostałe referencje", icon: SearchCheck },
-  { id: "history", label: "Historia", description: "Sesje i joby", icon: History },
+  { id: "history", label: "Backup i restore", description: "Sesje i joby", icon: History },
   { id: "restore", label: "Emergency Restore", description: "Bezpieczne odtworzenie", icon: RefreshCcw },
 ];
 
@@ -46,18 +50,30 @@ interface ShellProps {
 
 export function Shell({ activeView, onViewChange, connection, writeEnabled, onWriteEnabledChange, theme, onThemeChange, onDisconnect, demoMode, children }: ShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [confirmingWrite, setConfirmingWrite] = useState(false);
 
   const navigate = (view: ViewId) => {
     onViewChange(view);
     setMobileOpen(false);
   };
 
+  const requestWrite = (enabled: boolean) => {
+    if (!enabled) {
+      onWriteEnabledChange(false);
+      setConfirmingWrite(false);
+      return;
+    }
+    if (connection) setConfirmingWrite(true);
+  };
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileOpen ? "sidebar--open" : ""}`}>
         <div className="brand">
-          <div className="brand__mark"><Network size={22} strokeWidth={2.2} /></div>
-          <div><strong>PanOS</strong><span>Toolbox</span></div>
+          <div className="bytetech-brand" title="ByteTech">
+            <span className="brand__mark"><b>BT</b></span>
+            <span className="brand__copy"><strong>ByteTech</strong><small><i /> PanOS ToolBox <i /></small></span>
+          </div>
           <button className="sidebar__close" onClick={() => setMobileOpen(false)} aria-label="Zamknij nawigację"><X size={20} /></button>
         </div>
 
@@ -88,7 +104,8 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
 
         <div className="sidebar__footer">
           <div className="safety-note"><ShieldCheck size={17} /><span>API i GUI dostępne wyłącznie na localhost.</span></div>
-          <span>PanOS Toolbox · lokalnie</span>
+          <div className="paloalto-brand"><span>Built for</span><img src="/paloalto-logo-light.png" alt="Palo Alto Networks" /><small>PAN-OS 10.2.16-h4 · Panorama</small></div>
+          <span>Open source · ByteTech · v0.3.0</span>
           <strong className="author-brand">Szymon Żołnierczyk · Devops Engineer NET</strong>
         </div>
       </aside>
@@ -106,6 +123,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
           </div>
           <div className="topbar__actions">
             {demoMode && <StatusPill tone="info">Tryb demo</StatusPill>}
+            {connection && <StatusPill tone="info">profil: {connection.apiMaxStage}</StatusPill>}
             <StatusPill tone={!connection ? "neutral" : connection.candidateDirty ? "warning" : "success"}>
               {!connection ? "Offline" : connection.candidateDirty ? "Candidate dirty" : "Candidate clean"}
             </StatusPill>
@@ -116,26 +134,42 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
           </div>
         </header>
 
-        <div className={`write-gate ${writeEnabled ? "write-gate--enabled" : ""}`}>
-          <div>
-            <Zap size={17} />
-            <span><strong>Zapis API</strong>{writeEnabled ? " aktywny dla tej sesji przeglądarki" : " wyłączony — generator/read-only"}</span>
+        {activeView === "ad-groups" ? (
+          <div className="write-gate write-gate--local">
+            <div><UsersRound size={17} /><span><strong>Lokalna walidacja AD</strong> · bez zapisu do AD i Panorama</span></div>
           </div>
-          <label className="compact-switch">
-            <span>{writeEnabled ? "ON" : "OFF"}</span>
-            <input
-              type="checkbox"
-              checked={writeEnabled}
-              onChange={(event) => onWriteEnabledChange(event.target.checked)}
-              disabled={!connection}
-              aria-label="Włącz zapis przez API"
-            />
-            <i aria-hidden="true" />
-          </label>
-        </div>
+        ) : (
+          <div className={`write-gate ${writeEnabled ? "write-gate--enabled" : ""}`}>
+            <div>
+              <Zap size={17} />
+              <span><strong>Zapis API</strong>{writeEnabled ? " aktywny dla tej sesji przeglądarki" : " wyłączony — generator/read-only"}</span>
+            </div>
+            <label className="compact-switch">
+              <span>{writeEnabled ? "ON" : "OFF"}</span>
+              <input
+                type="checkbox"
+                checked={writeEnabled}
+                onChange={(event) => requestWrite(event.target.checked)}
+                disabled={!connection}
+                aria-label="Włącz zapis przez API"
+              />
+              <i aria-hidden="true" />
+            </label>
+          </div>
+        )}
 
         <main className="page-content">{children}</main>
       </div>
+
+      {confirmingWrite && connection && (
+        <div className="write-confirm-backdrop" role="presentation">
+          <div className="write-confirm" role="dialog" aria-modal="true" aria-labelledby="write-confirm-title">
+            <div><AlertTriangle size={21} /><strong id="write-confirm-title">Czy na pewno chcesz włączyć WRITE?</strong></div>
+            <p>Toolbox przejdzie z generatora do realnego zapisu API na <code>{connection.host}</code> jako <code>{connection.username}</code>. Candidate, commit i push nadal pozostają osobnymi etapami.</p>
+            <div><Button onClick={() => setConfirmingWrite(false)}>Anuluj</Button><Button variant="primary" onClick={() => { onWriteEnabledChange(true); setConfirmingWrite(false); }}>Tak, włącz WRITE</Button></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

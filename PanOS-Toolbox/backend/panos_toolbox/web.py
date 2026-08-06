@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from .ad_groups import generate_ad_group_definition
 from .client import PanoramaReadClient
 from .diffing import compare_configs
 from .doctor import run_doctor
@@ -19,6 +20,7 @@ from .engine import apply_candidate, commit_session, push_session
 from .errors import (
     CapabilityError,
     ConflictError,
+    DependencyError,
     InputError,
     IntegrityError,
     OutcomeUnknownError,
@@ -503,6 +505,7 @@ def _contract() -> dict[str, Any]:
         "paths": {
             "POST /connections": "keygen and create memory-only connection",
             "DELETE /connections/current": "destroy current connection",
+            "POST /ad-groups/generate": "validate local AD groups and build custom LDAP filters",
             "POST /cleanup/plans": "read snapshots, ICMP/last-hit, create PatchSet session",
             "POST /cleanup/analysis-jobs": "asynchronous cleanup plan with progress",
             "GET /cleanup/analysis-jobs/{id}": "poll analysis progress/result",
@@ -603,6 +606,9 @@ def create_app(
     @app.errorhandler(ToolboxError)
     def expected_error(error):
         status = (
+            503
+            if isinstance(error, DependencyError)
+            else
             409
             if isinstance(error, (ConflictError, IntegrityError, OutcomeUnknownError))
             or "aktywną operację" in str(error)
@@ -752,7 +758,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.2.0", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.3.0", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -787,6 +793,22 @@ def create_app(
                 session_dir=session_store.root,
                 probe_profile=probe_profile,
                 static_dir=frontend,
+            )
+        )
+
+    @app.post("/api/v1/ad-groups/generate")
+    def ad_groups_generate():
+        value = body()
+        raw_groups = value.get("groups")
+        if not isinstance(raw_groups, list) or any(not isinstance(item, str) for item in raw_groups):
+            raise InputError("Pole groups musi być tablicą nazw grup AD.")
+        return jsonify(
+            generate_ad_group_definition(
+                raw_groups,
+                output_name=value.get("output_name", value.get("outputName", "")),
+                mapping_name=value.get("mapping_name", value.get("mappingName", "LDAP_GM1")),
+                vsys=value.get("vsys", "vsys1"),
+                template_name=value.get("template_name", value.get("templateName", "")),
             )
         )
 

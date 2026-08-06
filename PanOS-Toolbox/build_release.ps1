@@ -9,6 +9,7 @@ $frontend = Join-Path $toolboxRoot "frontend"
 $backendRoot = Join-Path $toolboxRoot "backend"
 $backendPackage = Join-Path $toolboxRoot "backend\panos_toolbox"
 $requirements = Join-Path $toolboxRoot "backend\requirements.txt"
+$adGroupHelper = Join-Path $backendPackage "ad_group_lookup.ps1"
 $legacyPackage = Join-Path $repoRoot "panorama_cleaner\panorama_cleanup"
 $static = Join-Path $backendPackage "static"
 $staging = Join-Path $toolboxRoot ".release-staging"
@@ -21,6 +22,9 @@ foreach ($required in @($frontend, $backendPackage, $legacyPackage)) {
 }
 if (-not (Test-Path -LiteralPath $requirements -PathType Leaf)) {
     throw "Required file is missing: $requirements"
+}
+if (-not (Test-Path -LiteralPath $adGroupHelper -PathType Leaf)) {
+    throw "Required file is missing: $adGroupHelper"
 }
 
 function Invoke-BuildPython {
@@ -124,6 +128,8 @@ if (-not $SkipTests) {
 }
 
 Get-ChildItem -LiteralPath $backendPackage -File -Filter "*.py" |
+    Copy-Item -Destination $packageBackend
+Get-ChildItem -LiteralPath $backendPackage -File -Filter "*.ps1" |
     Copy-Item -Destination $packageBackend
 Copy-Item -LiteralPath $static -Destination $packageBackend -Recurse
 Get-ChildItem -LiteralPath $legacyPackage -File -Filter "*.py" |

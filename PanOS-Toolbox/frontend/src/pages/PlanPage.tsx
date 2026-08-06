@@ -27,6 +27,7 @@ import { formatDate, shortId, stageAllows } from "../model";
 import { Button, Callout, Card, CardHeader, EmptyState, PageHeader, ProgressBar, StatCard, StatusPill, Toggle } from "../components/Primitives";
 
 interface PlanPageProps {
+  focus?: "plan" | "execute";
   plan: CleanupPlan | null;
   executionSession: ToolboxSession | null;
   executionStage: CapabilityStage;
@@ -72,7 +73,7 @@ const icmpTone = {
   "not-run": "neutral",
 } as const;
 
-export function PlanPage({ plan, executionSession, executionStage, onExecutionStageChange, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
+export function PlanPage({ focus = "plan", plan, executionSession, executionStage, onExecutionStageChange, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onApplyCandidate, onCommit, onPush, onDownload }: PlanPageProps) {
   const [tab, setTab] = useState<"addresses" | "operations">("addresses");
   const [expandedAddress, setExpandedAddress] = useState<string | null>(null);
   const [allowUnisolated, setAllowUnisolated] = useState(false);
@@ -92,8 +93,8 @@ export function PlanPage({ plan, executionSession, executionStage, onExecutionSt
 
   if (!plan) {
     return (
-      <div className="page-stack">
-        <PageHeader eyebrow="Workflow / Plan" title="Plan i wykonanie" description="Weryfikuj każdą mutację przed zapisaniem candidate." />
+      <div className={`page-stack plan-page plan-page--${focus}`}>
+        <PageHeader eyebrow={`Workflow / ${focus === "execute" ? "Wykonaj" : "Plan"}`} title={focus === "execute" ? "Brak planu do wykonania" : "Plan zmian"} description="Najpierw przygotuj plan na ekranie Cleanup. Wykonanie nigdy nie uruchamia się automatycznie." />
         <Card><EmptyState icon={<ListTree size={27} />} title="Nie ma jeszcze planu" description="Wklej IP lub nazwy encji i uruchom analizę. Ten ekran pokaże dokładne zależności, backupy i operacje odwrotne." action={<Button variant="primary" onClick={onOpenCleanup}>Utwórz plan</Button>} /></Card>
       </div>
     );
@@ -107,11 +108,11 @@ export function PlanPage({ plan, executionSession, executionStage, onExecutionSt
   const canPush = state === "COMMITTED";
 
   return (
-    <div className="page-stack">
+    <div className={`page-stack plan-page plan-page--${focus}`}>
       <PageHeader
         eyebrow={`Session / ${shortId(plan.sessionId)}`}
-        title="Plan zmian gotowy do przeglądu"
-        description={`Utworzono ${formatDate(plan.createdAt)} · running config jest źródłem analizy, candidate jest sprawdzany ponownie przed zapisem.`}
+        title={focus === "execute" ? "Kontrolowane wykonanie planu" : "Plan zmian gotowy do przeglądu"}
+        description={focus === "execute" ? "Każdy etap wymaga osobnej decyzji. Candidate, commit i push nie łączą się w jedną automatyczną operację." : `Utworzono ${formatDate(plan.createdAt)} · running config jest źródłem analizy, candidate jest sprawdzany ponownie przed zapisem.`}
         actions={<><StatusPill tone={stateTone[state] ?? "neutral"}>{state.replaceAll("_", " ")}</StatusPill><Button icon={<Download size={16} />} loading={busy === "download"} onClick={() => onDownload("commands")}>Pakiet CLI</Button></>}
       />
 
@@ -134,7 +135,7 @@ export function PlanPage({ plan, executionSession, executionStage, onExecutionSt
         </div>
       </Card>
 
-      <div className="stats-grid stats-grid--6">
+      <div className="stats-grid stats-grid--6 plan-review-only">
         <StatCard label="Wejście" value={plan.sourceCount} detail="celów" />
         <StatCard label="Do usunięcia" value={plan.processCount} detail={`${plan.operations.length} operacji`} tone="accent" />
         <StatCard label="Live" value={plan.skippedLiveCount} detail="pominięte" tone="success" />
@@ -143,7 +144,7 @@ export function PlanPage({ plan, executionSession, executionStage, onExecutionSt
         <StatCard label="Recent Last Hit" value={plan.recentHitCount} detail="do weryfikacji" tone={plan.recentHitCount ? "danger" : "success"} />
       </div>
 
-      <div className="plan-overview-grid">
+      <div className="plan-overview-grid plan-review-only">
         <Card>
           <CardHeader title="Running ↔ Candidate" description="Natywny change-summary oraz diff obsługiwanych namespace’ów." action={<GitCompareArrows size={20} />} />
           <div className="diff-panel">
@@ -167,7 +168,7 @@ export function PlanPage({ plan, executionSession, executionStage, onExecutionSt
       {plan.recentHitCount > 0 && <Callout severity="warning" title={`${plan.recentHitCount} polityk ma świeży Last Hit`}><p>Plan pozostaje dostępny, ale przed zapisaniem candidate zweryfikuj reguły oznaczone ikoną ostrzeżenia.</p></Callout>}
       {plan.warnings.map((warning) => <Callout severity={warning.includes("Application Override") ? "warning" : "info"} title={warning.includes("Application Override") ? "Application Override — automatyczne wykonanie zablokowane" : "Informacja z analizy"} key={warning}><p>{warning}</p></Callout>)}
 
-      <Card className="review-card">
+      <Card className="review-card plan-review-only">
         <div className="review-tabs" role="tablist">
           <button className={tab === "addresses" ? "is-active" : ""} onClick={() => setTab("addresses")} role="tab"><Radio size={16} /> Cele <span>{plan.addresses.length}</span></button>
           <button className={tab === "operations" ? "is-active" : ""} onClick={() => setTab("operations")} role="tab"><Code2 size={16} /> Operacje API <span>{plan.operations.length}</span></button>
@@ -208,7 +209,7 @@ export function PlanPage({ plan, executionSession, executionStage, onExecutionSt
         )}
       </Card>
 
-      <section className="execution-section">
+      <section className="execution-section execute-only">
         <div className="execution-heading"><div><span className="eyebrow">Staged execution</span><h2>Wykonanie kontrolowane</h2><p>Każdy etap kończy się osobnym wynikiem. Commit ani push nie uruchamiają się automatycznie.</p></div><StatusPill tone={writeEnabled ? "danger" : "neutral"}>{writeEnabled ? "API write aktywny" : "Generator only"}</StatusPill></div>
 
         <Card className="execution-mode-card">
