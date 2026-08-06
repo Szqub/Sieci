@@ -143,6 +143,9 @@ export const api = {
   async createCleanupPlan(input: {
     connectionId: string;
     addresses: string[];
+    addressObjects: string[];
+    addressGroups: string[];
+    policies: string[];
     runIcmp: boolean;
     recentHitDays: number;
   }): Promise<CleanupPlan> {
@@ -151,6 +154,9 @@ export const api = {
       body: {
         connection_id: input.connectionId,
         addresses: input.addresses,
+        address_objects: input.addressObjects,
+        address_groups: input.addressGroups,
+        policies: input.policies,
         run_icmp: input.runIcmp,
         recent_hit_days: input.recentHitDays,
       },

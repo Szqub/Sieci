@@ -25,6 +25,7 @@ from panos_toolbox.service import (
     plan_restore_session,
 )
 from panos_toolbox.sessions import SessionStore
+from panos_toolbox.web import _wire_cleanup_plan
 from panos_toolbox.xmlutil import parse_xml
 
 
@@ -43,6 +44,14 @@ class PlanningReader:
 
     def change_summary(self):
         return parse_xml('<response status="success"><result /></response>')
+
+    def run_op_show(self, _command):
+        return parse_xml(
+            '<response status="success"><result><rule-hit-count><rules>'
+            '<entry name="result"><latest>yes</latest><hit-count>1</hit-count>'
+            '<last-hit-timestamp>1</last-hit-timestamp></entry>'
+            '</rules></rule-hit-count></result></response>'
+        )
 
 
 class SplitPlanningReader(PlanningReader):
@@ -136,6 +145,56 @@ class PlanningReportTests(unittest.TestCase):
             short = (session / "raport_krotki.txt").read_text(encoding="utf-8")
             self.assertIn("POMINIĘTO_BŁĄD_ICMP", short)
             self.assertEqual(result["mutation_count"], 0)
+
+    @mock.patch("panos_toolbox.service._last_hit_summary")
+    def test_named_policy_group_and_object_are_saved_in_manifest_and_reports(self, hit_mock):
+        hit_mock.return_value = {
+            "recent_days": 14,
+            "records": [],
+            "review_count": 0,
+            "recent_hit_count": 0,
+            "error_or_unknown_count": 0,
+            "blocking": False,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            result = plan_cleanup_session(
+                store,
+                PlanningReader(self.fixture()),
+                (),
+                address_objects=("TARGET_A",),
+                address_groups=("G-INNER",),
+                policies=("SEC-MIX",),
+                no_ping=True,
+            )
+            manifest = store.load_manifest(result["session_id"])
+            self.assertEqual(manifest["input_targets"]["address_objects"], ["TARGET_A"])
+            self.assertEqual(manifest["input_targets"]["address_groups"], ["G-INNER"])
+            self.assertEqual(manifest["input_targets"]["policies"], ["SEC-MIX"])
+            report = (Path(temporary) / result["session_id"] / "raport_krotki.txt").read_text(encoding="utf-8")
+            self.assertIn("[address-object] TARGET_A: ZAPLANOWANO", report)
+            self.assertIn("[address-group] G-INNER: ZAPLANOWANO", report)
+            self.assertIn("[policy] SEC-MIX: ZAPLANOWANO", report)
+
+    def test_named_policy_always_collects_last_hit_before_plan_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            result = plan_cleanup_session(
+                store,
+                PlanningReader(self.fixture()),
+                (),
+                policies=("SEC-MIX",),
+                no_ping=True,
+            )
+            records = store.load_manifest(result["session_id"])["last_hit"]["records"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["rule"]["name"], "SEC-MIX")
+            self.assertEqual(records[0]["rule"]["location"], "shared")
+            self.assertEqual(records[0]["rule"]["rulebase"], "pre-rulebase")
+            wire = _wire_cleanup_plan(store, result["session_id"])
+            self.assertEqual(wire["addresses"][0]["targetType"], "policy")
+            self.assertEqual(wire["addresses"][0]["label"], "SEC-MIX")
+            self.assertEqual(wire["addresses"][0]["lastHitStatus"], "STALE")
 
 
 class RestoreSessionSelectionTests(unittest.TestCase):

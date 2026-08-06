@@ -17,12 +17,16 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class CleanerAdapterTests(unittest.TestCase):
-    def test_real_cleaner_batch_plan_becomes_structural_patchset(self):
-        config = parse_xml(
+    @staticmethod
+    def fixture():
+        return parse_xml(
             (REPO_ROOT / "panorama_cleaner/tests/fixtures/panorama_running.xml").read_text(
                 encoding="utf-8"
             )
         )
+
+    def test_real_cleaner_batch_plan_becomes_structural_patchset(self):
+        config = self.fixture()
         result = build_cleanup_patchset(
             config,
             ("203.0.113.10",),
@@ -46,6 +50,59 @@ class CleanerAdapterTests(unittest.TestCase):
             self.assertTrue(mutation.forward)
             self.assertTrue(mutation.inverse)
             self.assertTrue(mutation.target_xpath.startswith("/config"))
+
+    def test_named_policy_is_discovered_with_scope_and_deleted(self):
+        result = build_cleanup_patchset(
+            self.fixture(),
+            (),
+            policy_names=("SEC-MIX",),
+            panorama_host="pano",
+            panorama_username="admin",
+        )
+        self.assertEqual(result.patchset.targets, ("policy:SEC-MIX",))
+        self.assertEqual(
+            result.discovery["policy:SEC-MIX"]["matches"][0],
+            {
+                "location": "shared",
+                "rulebase": "pre-rulebase",
+                "policy_type": "security",
+                "name": "SEC-MIX",
+                "entity_type": "policy",
+            },
+        )
+        self.assertTrue(
+            any(
+                mutation.entity_type == "policy"
+                and mutation.entity_key.endswith("/SEC-MIX")
+                for mutation in result.patchset.mutations
+            )
+        )
+
+    def test_named_group_removes_dependencies_before_group(self):
+        result = build_cleanup_patchset(
+            self.fixture(),
+            (),
+            address_group_names=("G-INNER",),
+            panorama_host="pano",
+            panorama_username="admin",
+        )
+        entity_keys = [mutation.entity_key for mutation in result.patchset.mutations]
+        self.assertIn("shared/G-INNER", entity_keys)
+        self.assertIn("shared/G-OUTER", entity_keys)
+        self.assertIn("shared/pre-rulebase/security/SEC-GROUP", entity_keys)
+        self.assertLess(entity_keys.index("shared/G-OUTER"), entity_keys.index("shared/G-INNER"))
+
+    def test_dynamic_group_is_reported_without_mutation(self):
+        result = build_cleanup_patchset(
+            self.fixture(),
+            (),
+            address_group_names=("DAG-RETIRE",),
+            panorama_host="pano",
+            panorama_username="admin",
+        )
+        self.assertEqual(result.discovery["group:DAG-RETIRE"]["status"], "unsupported-dynamic")
+        self.assertIn("group:DAG-RETIRE", result.blocked_ips)
+        self.assertFalse(result.patchset.mutations)
 
 
 class WebBoundaryTests(unittest.TestCase):

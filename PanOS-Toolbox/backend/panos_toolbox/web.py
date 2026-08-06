@@ -156,25 +156,29 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
     patch = store.load_patchset(session_id)
     ping_by_ip = {item["ip"]: item for item in manifest.get("icmp", [])}
     inventory_by_ip = manifest.get("inventory") or {}
-    input_ips = manifest.get("input_ips") or manifest.get("targets") or []
+    input_targets = manifest.get("input_targets") or {}
+    ordered_targets = (
+        input_targets.get("ordered")
+        or manifest.get("input_ips")
+        or manifest.get("targets")
+        or []
+    )
     processed = {cause for mutation in patch.mutations for cause in mutation.causes}
-    recent_rules: dict[str, str] = {}
+    rule_hits: dict[str, dict[str, Any]] = {}
     for record in (manifest.get("last_hit") or {}).get("records", []):
-        if record.get("status") != "RECENT":
-            continue
         rule = record["rule"]
         key = f"{rule['location']}/{rule['rulebase']}/{rule['policy_type']}/{rule['name']}"
-        recent_rules[key] = record.get("last_hit_utc") or "recent"
+        rule_hits[key] = record
     addresses = []
-    for ip in input_ips:
-        ping = ping_by_ip.get(ip, {"status": "BYPASSED", "detail": ""})
+    for target in ordered_targets:
+        ping = ping_by_ip.get(target, {"status": "BYPASSED", "detail": "ICMP nie dotyczy"})
         ping_state = {
             "REPLIED": "responded",
             "NO_REPLY": "timeout",
             "ERROR": "error",
             "BYPASSED": "not-run",
         }.get(ping.get("status"), "not-run")
-        inventory = inventory_by_ip.get(ip) or {
+        inventory = inventory_by_ip.get(target) or {
             "objects": [],
             "blocked_reasons": [],
         }
@@ -186,10 +190,10 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
             else "blocked"
             if inventory.get("blocked_reasons")
             else "process"
-            if ip in processed
+            if target in processed
             else "not-found"
         )
-        related = [mutation for mutation in patch.mutations if ip in mutation.causes]
+        related = [mutation for mutation in patch.mutations if target in mutation.causes]
         references = []
         object_names: list[str] = []
         for object_record in inventory.get("objects") or []:
@@ -201,7 +205,7 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
                 group_name = str(group.get("name") or "unknown")
                 references.append(
                     {
-                        "id": f"inventory-group-{ip}-{len(references) + 1}",
+                        "id": f"inventory-group-{target}-{len(references) + 1}",
                         "scope": group_location,
                         "deviceGroup": group_location,
                         "rulebase": "shared" if group_location == "shared" else "local",
@@ -216,7 +220,7 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
                 rulebase_value = str(policy.get("rulebase") or "")
                 references.append(
                     {
-                        "id": f"inventory-policy-{ip}-{len(references) + 1}",
+                        "id": f"inventory-policy-{target}-{len(references) + 1}",
                         "scope": policy_location,
                         "deviceGroup": policy_location,
                         "rulebase": (
@@ -271,18 +275,31 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
                     "path": mutation.target_xpath,
                 }
             )
-        last_hit = next(
-            (
-                value
-                for mutation in related
-                for key, value in recent_rules.items()
-                if mutation.entity_key == key
-            ),
-            None,
+        related_hit_records = [
+            value
+            for mutation in related
+            for key, value in rule_hits.items()
+            if mutation.entity_key == key
+        ]
+        hit_priority = {
+            "RECENT": 7,
+            "ERROR": 6,
+            "INVALID": 5,
+            "NOT_LATEST": 4,
+            "NOT_FOUND": 3,
+            "NEVER": 2,
+            "STALE": 1,
+        }
+        last_hit_record = max(
+            related_hit_records,
+            key=lambda item: hit_priority.get(str(item.get("status")), 0),
+            default=None,
         )
         addresses.append(
             {
-                "ip": ip,
+                "ip": target,
+                "label": inventory.get("label") or target,
+                "targetType": inventory.get("kind") or "ip",
                 "objectNames": sorted(
                     set(
                         object_names
@@ -296,8 +313,10 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
                 "icmp": ping_state,
                 "icmpDetail": ping.get("detail"),
                 "decision": decision,
-                "lastHit": last_hit,
-                "recentLastHit": last_hit is not None,
+                "lastHit": (last_hit_record or {}).get("last_hit_utc"),
+                "lastHitStatus": (last_hit_record or {}).get("status"),
+                "lastHitDetail": (last_hit_record or {}).get("detail"),
+                "recentLastHit": (last_hit_record or {}).get("status") == "RECENT",
                 "componentId": related[0].component_id if related else None,
                 "references": references,
             }
@@ -765,6 +784,9 @@ def create_app(
             session_store,
             reader(),
             string_list_field(value, "addresses", fallback_key="ips"),
+            address_objects=string_list_field(value, "address_objects"),
+            address_groups=string_list_field(value, "address_groups"),
+            policies=string_list_field(value, "policies"),
             no_ping=not _json_bool(
                 value,
                 "run_icmp",

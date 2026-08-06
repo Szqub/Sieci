@@ -107,12 +107,47 @@ def plan_cleanup(
 
     if nat_translation_action not in {"block", "delete-rule"}:
         raise ValueError("nat_translation_action must be block or delete-rule")
-    all_tokens = build_target_tokens(matches, eligible_ips)
+    return plan_cleanup_targets(
+        model,
+        build_target_tokens(matches, eligible_ips),
+        nat_translation_action=nat_translation_action,
+    )
+
+
+def plan_cleanup_targets(
+    model: ConfigModel,
+    tokens: Iterable[TargetToken],
+    *,
+    forced_groups: Optional[Mapping[ScopedName, TargetToken]] = None,
+    forced_rules: Optional[Mapping[RuleKey, TargetToken]] = None,
+    nat_translation_action: str = "delete-rule",
+) -> BatchPlan:
+    """Plan an atomic mixed batch of IP, object, group and policy targets."""
+
+    if nat_translation_action not in {"block", "delete-rule"}:
+        raise ValueError("nat_translation_action must be block or delete-rule")
+    all_tokens = set(tokens)
+    all_forced_groups = dict(forced_groups or {})
+    all_forced_rules = dict(forced_rules or {})
     active_tokens = set(all_tokens)
     blocked_ips: Dict[str, List[BlockReason]] = {}
 
     for _ in range(len({token.ip for token in all_tokens}) + 2):
-        computed = _compute_plan(model, active_tokens, nat_translation_action)
+        computed = _compute_plan(
+            model,
+            active_tokens,
+            nat_translation_action,
+            forced_groups={
+                key: token
+                for key, token in all_forced_groups.items()
+                if token in active_tokens
+            },
+            forced_rules={
+                key: token
+                for key, token in all_forced_rules.items()
+                if token in active_tokens
+            },
+        )
         newly_blocked = {
             ip: reasons
             for ip, reasons in computed.blockers.items()
@@ -331,6 +366,8 @@ def _audit_effective_scope_references(
     field_removals: Dict[Tuple[RuleKey, str], Dict[str, Set[TargetToken]]],
     occurrence_removal_causes: Mapping[UnknownOccurrence, Set[TargetToken]],
     blockers: Dict[str, List[BlockReason]],
+    directly_deleted_groups: Set[ScopedName],
+    directly_deleted_rules: Set[RuleKey],
 ) -> None:
     """Fail closed when one physical mutation has different DG meanings."""
 
@@ -365,6 +402,13 @@ def _audit_effective_scope_references(
             planned_causes = field_removals.get(
                 (ref.owner_rule, ref.field), {}
             ).get(ref.referenced_name)
+
+        if ref.owner_group in directly_deleted_groups:
+            group_causes.setdefault(ref.owner_group, set()).update(target_causes)
+            continue
+        if ref.owner_rule in directly_deleted_rules:
+            rule_causes.setdefault(ref.owner_rule, set()).update(target_causes)
+            continue
 
         containing = set()
         for context in contexts or (ref.owner_location,):
@@ -604,6 +648,9 @@ def _compute_plan(
     model: ConfigModel,
     active_tokens: Set[TargetToken],
     nat_translation_action: str,
+    *,
+    forced_groups: Optional[Mapping[ScopedName, TargetToken]] = None,
+    forced_rules: Optional[Mapping[RuleKey, TargetToken]] = None,
 ) -> _ComputedPlan:
     address_tokens, literal_tokens = _token_maps(active_tokens)
     blockers: Dict[str, List[BlockReason]] = {}
@@ -632,8 +679,10 @@ def _compute_plan(
         if removals:
             direct_group_removals[group_key] = removals
 
-    deleted_groups: Set[ScopedName] = set()
-    group_causes: Dict[ScopedName, Set[TargetToken]] = {}
+    deleted_groups: Set[ScopedName] = set(forced_groups or {})
+    group_causes: Dict[ScopedName, Set[TargetToken]] = {
+        key: {token} for key, token in (forced_groups or {}).items()
+    }
     changed = True
     while changed:
         changed = False
@@ -690,9 +739,11 @@ def _compute_plan(
     field_removals: Dict[
         Tuple[RuleKey, str], Dict[str, Set[TargetToken]]
     ] = {}
-    deleted_rules: Set[RuleKey] = set()
-    independently_deleted_rules: Set[RuleKey] = set()
-    rule_causes: Dict[RuleKey, Set[TargetToken]] = {}
+    deleted_rules: Set[RuleKey] = set(forced_rules or {})
+    independently_deleted_rules: Set[RuleKey] = set(forced_rules or {})
+    rule_causes: Dict[RuleKey, Set[TargetToken]] = {
+        key: {token} for key, token in (forced_rules or {}).items()
+    }
     pending_negated: List[Tuple[RuleKey, str, Set[TargetToken], str]] = []
 
     for rule_key, rule in sorted(model.rules.items()):
@@ -774,11 +825,14 @@ def _compute_plan(
         elif kind == "literal" and detail in literal_tokens:
             causes.add(literal_tokens[detail])
         elif kind == "static-group" and resolved_key is not None:
-            causes.update(
-                effective_group_causes.get(
-                    (occurrence.location, resolved_key), set()
+            if resolved_key in deleted_groups:
+                causes.update(group_causes.get(resolved_key, set()))
+            else:
+                causes.update(
+                    effective_group_causes.get(
+                        (occurrence.location, resolved_key), set()
+                    )
                 )
-            )
             if (
                 causes
                 and resolved_key not in deleted_groups
@@ -820,6 +874,8 @@ def _compute_plan(
         field_removals=field_removals,
         occurrence_removal_causes=occurrence_removal_causes,
         blockers=blockers,
+        directly_deleted_groups=set(forced_groups or {}),
+        directly_deleted_rules=set(forced_rules or {}),
     )
     _propagate_plan_causes(
         model,

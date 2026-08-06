@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { stageAllows } from "../model";
-import { parseAddressInput, pluralize } from "../utils";
+import { parseAddressInput, parseNameInput, pluralize } from "../utils";
 
 describe("parseAddressInput", () => {
   it("deduplikuje adresy i ignoruje komentarze", () => {
@@ -12,6 +12,15 @@ describe("parseAddressInput", () => {
 
   it("zachowuje kolejność wejścia", () => {
     expect(parseAddressInput("2001:db8::2;2001:db8::1").addresses).toEqual(["2001:db8::2", "2001:db8::1"]);
+  });
+});
+
+describe("parseNameInput", () => {
+  it("zachowuje spacje w nazwach i deduplikuje całe wiersze", () => {
+    const parsed = parseNameInput("# policies\nALLOW LEGACY APP\nALLOW LEGACY APP\nOLD-NAT");
+    expect(parsed.names).toEqual(["ALLOW LEGACY APP", "OLD-NAT"]);
+    expect(parsed.duplicates).toBe(1);
+    expect(parsed.ignored).toBe(1);
   });
 });
 

@@ -10,7 +10,7 @@ import type {
   RestorePlan,
   ToolboxSession,
 } from "./model";
-import { parseAddressInput } from "./utils";
+import { parseAddressInput, parseNameInput } from "./utils";
 import { AuditPage } from "./pages/AuditPage";
 import { CleanupPage } from "./pages/CleanupPage";
 import { ConnectionPage } from "./pages/ConnectionPage";
@@ -65,6 +65,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   const [addressText, setAddressText] = useState("");
+  const [objectText, setObjectText] = useState("");
+  const [groupText, setGroupText] = useState("");
+  const [policyText, setPolicyText] = useState("");
   const [runIcmp, setRunIcmp] = useState(true);
   const [recentHitDays, setRecentHitDays] = useState(14);
   const [cleanupPlan, setCleanupPlan] = useState<CleanupPlan | null>(null);
@@ -140,6 +143,9 @@ export default function App() {
     setDoctor(demo.demoDoctor);
     setSessions(demo.demoSessions);
     setAddressText("10.42.16.19\n10.42.16.20\n10.42.16.21\n10.42.16.22\n10.42.16.23\n10.42.16.99");
+    setObjectText("OLD-WEB-SERVER");
+    setGroupText("GRP-LEGACY-SERVERS");
+    setPolicyText("ALLOW-LEGACY-APP");
     setView("cleanup");
     setError(null);
   };
@@ -163,7 +169,10 @@ export default function App() {
     setError(null);
     try {
       const addresses = parseAddressInput(addressText).addresses;
-      const plan = demoMode && demoApi ? demoApi.demoCleanupPlan : await api.createCleanupPlan({ connectionId: connection.id, addresses, runIcmp, recentHitDays });
+      const addressObjects = parseNameInput(objectText).names;
+      const addressGroups = parseNameInput(groupText).names;
+      const policies = parseNameInput(policyText).names;
+      const plan = demoMode && demoApi ? demoApi.demoCleanupPlan : await api.createCleanupPlan({ connectionId: connection.id, addresses, addressObjects, addressGroups, policies, runIcmp, recentHitDays });
       setCleanupPlan(plan);
       setExecutionSession(null);
       setView("plan");
@@ -290,7 +299,7 @@ export default function App() {
 
   let page;
   if (view === "connection") page = <ConnectionPage draft={draft} onDraftChange={setDraft} connection={connection} doctor={doctor} busy={mainBusy === "connect" || mainBusy === "doctor" ? mainBusy : null} error={error} onConnect={() => void connect()} onDoctor={() => void runDoctor()} onDemo={enableDemo} demoAvailable={import.meta.env.DEV} />;
-  else if (view === "cleanup") page = <CleanupPage connection={connection} addressText={addressText} onAddressTextChange={setAddressText} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} busy={mainBusy === "analyze"} error={error} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} />;
+  else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} busy={mainBusy === "analyze"} error={error} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "plan") page = <PlanPage plan={cleanupPlan} executionSession={executionSession} apiMaxStage={connection?.apiMaxStage ?? "read-only"} writeEnabled={writeEnabled} busy={stageBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onApplyCandidate={() => void applyCandidate()} onCommit={(unisolated, full) => void commitCleanup(unisolated, full)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} />;
