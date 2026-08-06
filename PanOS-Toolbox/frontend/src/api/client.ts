@@ -4,11 +4,14 @@ import type {
   AdGroupGenerationResult,
   AnalysisJob,
   AuditResult,
+  CandidateJob,
   CapabilityStage,
   CleanupPlan,
   ConnectionDraft,
   ConnectionSession,
   DoctorResult,
+  LookupKind,
+  LookupResult,
   RestorePlan,
   ToolboxSession,
   WriteOptions,
@@ -52,6 +55,7 @@ type WireConnectionSession = Partial<ConnectionSession> & {
   api_max_stage?: CapabilityStage;
   connected_at?: string;
   candidate_dirty?: boolean;
+  candidate_status?: "clean" | "dirty" | "unknown";
   capability_warning?: string;
 };
 
@@ -148,9 +152,27 @@ export const api = {
       apiMaxStage: wire.apiMaxStage ?? wire.api_max_stage ?? input.apiMaxStage,
       connectedAt: wire.connectedAt ?? wire.connected_at ?? new Date().toISOString(),
       candidateDirty: wire.candidateDirty ?? wire.candidate_dirty ?? false,
+      candidateStatus: wire.candidateStatus ?? wire.candidate_status ?? "unknown",
       capabilityWarning: wire.capabilityWarning ?? wire.capability_warning,
     };
     return connection;
+  },
+
+  async lookup(input: {
+    type: LookupKind;
+    names: string[];
+    deviceGroup?: string;
+    recentDays: number;
+  }): Promise<LookupResult> {
+    return request("/lookup", {
+      method: "POST",
+      body: {
+        type: input.type,
+        names: input.names,
+        device_group: input.deviceGroup?.trim() || undefined,
+        recent_days: input.recentDays,
+      },
+    });
   },
 
   async disconnect(): Promise<void> {
@@ -218,6 +240,13 @@ export const api = {
     });
   },
 
+  async createSelectionPlan(planId: string, targets: string[]): Promise<CleanupPlan> {
+    return request(`/cleanup/plans/${encodeURIComponent(planId)}/selection`, {
+      method: "POST",
+      body: { targets },
+    });
+  },
+
   async getCleanupPlan(planId: string): Promise<CleanupPlan> {
     return request(`/cleanup/plans/${encodeURIComponent(planId)}`);
   },
@@ -230,6 +259,20 @@ export const api = {
         execution_stage: options.executionStage,
       },
     });
+  },
+
+  async startCandidateJob(sessionId: string, options: WriteOptions): Promise<CandidateJob> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/candidate-jobs`, {
+      method: "POST",
+      body: {
+        enable_api_write: options.enableApiWrite,
+        execution_stage: options.executionStage,
+      },
+    });
+  },
+
+  async getExecutionJob(jobId: string): Promise<CandidateJob> {
+    return request(`/execution-jobs/${encodeURIComponent(jobId)}`);
   },
 
   async commit(sessionId: string, options: WriteOptions): Promise<ApiActionResult> {
@@ -271,13 +314,22 @@ export const api = {
     return request(`/sessions/${encodeURIComponent(sessionId)}`);
   },
 
-  async downloadSessionArtifact(sessionId: string, name: "commands" | "report" | "manifest" | "conflicts"): Promise<Blob> {
+  async reconcileExternalSession(sessionId: string, source: "CLI" | "API" = "CLI"): Promise<ApiActionResult> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/reconcile-external`, {
+      method: "POST",
+      body: { source },
+    });
+  },
+
+  async downloadSessionArtifact(sessionId: string, name: "commands" | "report" | "manifest" | "conflicts" | "bundle"): Promise<Blob> {
     return download(`/sessions/${encodeURIComponent(sessionId)}/artifacts/${name}`);
   },
 
   async createRestorePlan(input: {
     connectionId: string;
     ip?: string;
+    target?: string;
+    targets?: string[];
     sourceSessionId?: string;
   }): Promise<RestorePlan> {
     return request("/restore/plans", {
@@ -285,6 +337,8 @@ export const api = {
       body: {
         connection_id: input.connectionId,
         ip: input.ip || undefined,
+        target: input.target || undefined,
+        targets: input.targets?.length ? input.targets : undefined,
         source_session_id: input.sourceSessionId || undefined,
       },
     });

@@ -104,8 +104,8 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
 
         <div className="sidebar__footer">
           <div className="safety-note"><ShieldCheck size={17} /><span>API i GUI dostępne wyłącznie na localhost.</span></div>
-          <div className="paloalto-brand"><span>Built for</span><img src="/paloalto-logo-light.png" alt="Palo Alto Networks" /><small>PAN-OS 10.2.16-h4 · Panorama</small></div>
-          <span>Open source · ByteTech · v0.3.0</span>
+          <div className="paloalto-brand"><span>Built for</span><img src="/paloalto-logo-light.png" alt="Palo Alto Networks" /><small>{connection ? `PAN-OS ${connection.panoramaVersion}` : "Panorama XML API"}</small></div>
+          <span>Open source · ByteTech · v0.4.0</span>
           <strong className="author-brand">Szymon Żołnierczyk · Devops Engineer NET</strong>
         </div>
       </aside>
@@ -123,10 +123,11 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
           </div>
           <div className="topbar__actions">
             {demoMode && <StatusPill tone="info">Tryb demo</StatusPill>}
-            {connection && <StatusPill tone="info">profil: {connection.apiMaxStage}</StatusPill>}
-            <StatusPill tone={!connection ? "neutral" : connection.candidateDirty ? "warning" : "success"}>
-              {!connection ? "Offline" : connection.candidateDirty ? "Candidate dirty" : "Candidate clean"}
-            </StatusPill>
+            <span title="Status niezacommitowanych zmian odczytany z Panorama change-summary">
+              <StatusPill tone={!connection ? "neutral" : connection.candidateStatus === "dirty" ? "warning" : connection.candidateStatus === "clean" ? "success" : "info"}>
+                {!connection ? "Offline" : connection.candidateStatus === "dirty" ? "Candidate: są niezacommitowane zmiany" : connection.candidateStatus === "clean" ? "Candidate: bez zmian" : "Candidate: status nieznany"}
+              </StatusPill>
+            </span>
             <button className="icon-button" onClick={onThemeChange} aria-label={theme === "dark" ? "Włącz jasny motyw" : "Włącz ciemny motyw"}>
               {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
             </button>
@@ -134,29 +135,17 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
           </div>
         </header>
 
-        {activeView === "ad-groups" ? (
-          <div className="write-gate write-gate--local">
-            <div><UsersRound size={17} /><span><strong>Lokalna walidacja AD</strong> · bez zapisu do AD i Panorama</span></div>
+        <div className={`write-gate ${writeEnabled ? "write-gate--enabled" : ""}`}>
+          <div>
+            <Zap size={17} />
+            <span><strong>{writeEnabled ? "WRITE" : "READ ONLY"}</strong>{writeEnabled ? " · realne operacje XML API są dozwolone" : " · wyszukiwanie, analiza i backup bez zmian w Panorama"}</span>
           </div>
-        ) : (
-          <div className={`write-gate ${writeEnabled ? "write-gate--enabled" : ""}`}>
-            <div>
-              <Zap size={17} />
-              <span><strong>Zapis API</strong>{writeEnabled ? " aktywny dla tej sesji przeglądarki" : " wyłączony — generator/read-only"}</span>
-            </div>
-            <label className="compact-switch">
-              <span>{writeEnabled ? "ON" : "OFF"}</span>
-              <input
-                type="checkbox"
-                checked={writeEnabled}
-                onChange={(event) => requestWrite(event.target.checked)}
-                disabled={!connection}
-                aria-label="Włącz zapis przez API"
-              />
-              <i aria-hidden="true" />
-            </label>
-          </div>
-        )}
+          <label className="compact-switch">
+            <span>{writeEnabled ? "WRITE" : "READ ONLY"}</span>
+            <input type="checkbox" checked={writeEnabled} onChange={(event) => requestWrite(event.target.checked)} disabled={!connection} aria-label="Przełącz READ ONLY / WRITE" />
+            <i aria-hidden="true" />
+          </label>
+        </div>
 
         <main className="page-content">{children}</main>
       </div>
@@ -165,7 +154,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
         <div className="write-confirm-backdrop" role="presentation">
           <div className="write-confirm" role="dialog" aria-modal="true" aria-labelledby="write-confirm-title">
             <div><AlertTriangle size={21} /><strong id="write-confirm-title">Czy na pewno chcesz włączyć WRITE?</strong></div>
-            <p>Toolbox przejdzie z generatora do realnego zapisu API na <code>{connection.host}</code> jako <code>{connection.username}</code>. Candidate, commit i push nadal pozostają osobnymi etapami.</p>
+            <p>Toolbox zezwoli na realne, ścieżkowe operacje XML API na <code>{connection.host}</code> jako <code>{connection.username}</code>. Każda encja ma backup; Candidate, commit i push pozostają trzema osobnymi etapami.</p>
             <div><Button onClick={() => setConfirmingWrite(false)}>Anuluj</Button><Button variant="primary" onClick={() => { onWriteEnabledChange(true); setConfirmingWrite(false); }}>Tak, włącz WRITE</Button></div>
           </div>
         </div>

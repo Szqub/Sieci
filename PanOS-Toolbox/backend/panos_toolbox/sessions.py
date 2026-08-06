@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import hashlib
+import io
 import json
 import os
 import secrets
@@ -11,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import re
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
@@ -567,6 +569,65 @@ class SessionStore:
             "recorded_utc": utc_now(),
         }
         self.update(session_id, lambda manifest: manifest.__setitem__("candidate_application", record))
+
+    def record_external_execution(
+        self,
+        session_id: str,
+        *,
+        state: SessionState,
+        source: str,
+        applied_mutation_ids: Iterable[str],
+        evidence: Mapping[str, Any],
+    ) -> None:
+        """Register CLI/API work only after live post-state reconciliation."""
+
+        if state not in {SessionState.CANDIDATE_APPLIED, SessionState.COMMITTED}:
+            raise ValueError("External execution can be candidate-applied or committed.")
+
+        def change(manifest: dict[str, Any]) -> None:
+            current = SessionState(str(manifest.get("state")))
+            if current not in {SessionState.PLANNED, SessionState.FAILED}:
+                raise SessionError(
+                    "Rejestracja wykonania zewnętrznego wymaga sesji PLANNED albo FAILED."
+                )
+            recorded = list(applied_mutation_ids)
+            manifest["state"] = state.value
+            manifest["candidate_application"] = {
+                "applied_mutation_ids": recorded,
+                "skipped_components": [],
+                "recorded_utc": utc_now(),
+            }
+            manifest["external_execution"] = {
+                "source": source,
+                "verified_utc": utc_now(),
+                "evidence": dict(evidence),
+            }
+            manifest.setdefault("warnings", []).append(
+                "Wykonanie zewnętrzne zarejestrowano dopiero po live porównaniu "
+                "każdej oczekiwanej ścieżki z Panorama."
+            )
+
+        self.update(session_id, change)
+        self.append_event(
+            session_id,
+            "EXTERNAL_EXECUTION_RECONCILED",
+            {"state": state.value, "source": source, **dict(evidence)},
+        )
+
+    def bundle_bytes(self, session_id: str) -> bytes:
+        """Return an integrity-checked ZIP containing the complete session."""
+
+        self.verify(session_id)
+        directory = self._directory(session_id)
+        output = io.BytesIO()
+        with zipfile.ZipFile(
+            output, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as archive:
+            for path in sorted(directory.rglob("*")):
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                archive.write(path, arcname=f"{session_id}/{path.relative_to(directory)}")
+        return output.getvalue()
 
     def write_artifact(
         self, session_id: str, filename: str, content: str, *, kind: str

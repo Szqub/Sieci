@@ -46,13 +46,29 @@ function Invoke-BuildPython {
     }
 }
 
+function Invoke-BuildNpm {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) {
+        $npm = Get-Command npm -ErrorAction SilentlyContinue
+    }
+    if (-not $npm) {
+        throw "npm was not found."
+    }
+    & $npm.Source @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm build step failed with exit code $LASTEXITCODE."
+    }
+}
+
 Push-Location $frontend
 try {
-    npm ci
+    Invoke-BuildNpm -Arguments @("ci")
     if (-not $SkipTests) {
-        npm test
+        Invoke-BuildNpm -Arguments @("test")
     }
-    npm run build
+    Invoke-BuildNpm -Arguments @("run", "build")
 }
 finally {
     Pop-Location

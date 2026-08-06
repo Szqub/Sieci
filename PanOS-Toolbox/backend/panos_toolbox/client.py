@@ -79,7 +79,7 @@ class UrllibXMLTransport:
             self.profile.base_url,
             data=urllib.parse.urlencode(params).encode("utf-8"),
             headers={
-                "User-Agent": "ByteTech-PanOS-Toolbox/0.1",
+                "User-Agent": "ByteTech-PanOS-Toolbox/0.4.0",
                 "Content-Type": "application/x-www-form-urlencoded",
                 **headers,
             },
@@ -146,6 +146,7 @@ class PanoramaReadClient:
         self.transport: XMLTransport = transport or UrllibXMLTransport(profile)
         self._api_key: Optional[str] = None
         self._config_cache: dict[str, tuple[float, ET.Element]] = {}
+        self._device_group_cache: Optional[tuple[str, ...]] = None
 
     def _post(self, params: Mapping[str, str], *, mutating: bool = False) -> ET.Element:
         headers = {"X-PAN-KEY": self._api_key} if self._api_key else {}
@@ -185,6 +186,63 @@ class PanoramaReadClient:
             return copy.deepcopy(cached[1])
         return self.fetch_config(config_type)
 
+    def invalidate_config_cache(self, *config_types: str) -> None:
+        """Forget cached trees after a local mutation or commit attempt."""
+
+        targets = config_types or tuple(self._config_cache)
+        for config_type in targets:
+            self._config_cache.pop(config_type, None)
+
+    def fetch_xpath(self, xpath: str, *, config_type: str = "running") -> ET.Element:
+        """Read one exact configuration XPath without downloading ``/config``.
+
+        ``show`` reads the active/running tree and ``get`` reads candidate.  The
+        returned element deliberately remains the normal PAN-OS response wrapper
+        because a targeted XPath may return an entry, a container, or an empty
+        result rather than a complete ``<config>`` document.
+        """
+
+        self.assert_authenticated()
+        action = {"running": "show", "candidate": "get"}.get(config_type)
+        if action is None:
+            raise ValueError("config_type must be running or candidate")
+        if not xpath.startswith("/config/"):
+            raise ValueError("targeted xpath must start with /config/")
+        return self._post({"type": "config", "action": action, "xpath": xpath})
+
+    def complete_xpath(self, xpath: str) -> ET.Element:
+        """Return lightweight XPath completions (used to enumerate DG names)."""
+
+        self.assert_authenticated()
+        if not xpath.startswith("/config/"):
+            raise ValueError("completion xpath must start with /config/")
+        return self._post({"type": "config", "action": "complete", "xpath": xpath})
+
+    def device_group_names(self) -> tuple[str, ...]:
+        """Discover device-group names without retrieving their configuration."""
+
+        if self._device_group_cache is not None:
+            return self._device_group_cache
+        root = self.complete_xpath("/config/devices/entry/device-group/entry")
+        names: set[str] = set()
+        for element in root.iter():
+            if element.tag == "completion":
+                raw = element.get("value") or element.get("name") or (element.text or "")
+            elif element.tag == "entry" and element.get("name"):
+                raw = element.get("name") or ""
+            else:
+                continue
+            value = raw.strip().strip("'\"")
+            if value and value not in {"entry", "device-group", "localhost.localdomain"}:
+                names.add(value)
+        self._device_group_cache = tuple(sorted(names))
+        return self._device_group_cache
+
+    def system_info(self) -> ET.Element:
+        """Read the real appliance software version, model and system mode."""
+
+        return self.run_op_show(ET.fromstring("<show><system><info /></system></show>"))
+
     def run_op_show(self, command: ET.Element) -> ET.Element:
         self.assert_authenticated()
         if command.tag != "show":
@@ -212,6 +270,7 @@ class PanoramaReadClient:
     def close(self) -> None:
         self._api_key = None
         self._config_cache.clear()
+        self._device_group_cache = None
 
 
 class PanoramaWriteClient:
@@ -246,13 +305,21 @@ class PanoramaWriteClient:
 
     def apply_operation(self, operation: MutationOperation) -> ET.Element:
         self._assert(ApiStage.CANDIDATE)
-        return self.reader._post(self._operation_params(operation), mutating=True)
+        try:
+            return self.reader._post(self._operation_params(operation), mutating=True)
+        finally:
+            # Even a transport-ambiguous mutating POST makes a cached candidate
+            # unsafe.  A later analysis must read it again.
+            self.reader.invalidate_config_cache("candidate")
 
     def apply_recovery_operation(self, operation: MutationOperation) -> ET.Element:
         """Apply an inverse operation admitted by an already-started transaction."""
 
         self._assert_recovery(ApiStage.CANDIDATE)
-        return self.reader._post(self._operation_params(operation), mutating=True)
+        try:
+            return self.reader._post(self._operation_params(operation), mutating=True)
+        finally:
+            self.reader.invalidate_config_cache("candidate")
 
     def validate_candidate(self) -> Optional[str]:
         self._assert(ApiStage.CANDIDATE)
@@ -264,8 +331,8 @@ class PanoramaWriteClient:
 
     def save_candidate_snapshot(self, filename: str) -> ET.Element:
         self._assert(ApiStage.CANDIDATE)
-        if not filename or any(char in filename for char in "<>\r\n"):
-            raise ValueError("Niepoprawna nazwa snapshotu.")
+        if not filename or len(filename) > 32 or any(char in filename for char in "<>\r\n"):
+            raise ValueError("Nazwa snapshotu musi mieć 1–32 znaki i nie może zawierać <, > ani nowej linii.")
         command = ET.Element("save")
         config = ET.SubElement(command, "config")
         ET.SubElement(config, "to").text = filename
@@ -332,6 +399,9 @@ class PanoramaWriteClient:
         if not lock.acquire(blocking=False):
             raise CapabilityError("Commit/push dla tej Panoramy jest już wykonywany sekwencyjnie.")
         try:
+            # A successful commit changes running; an outcome-unknown commit
+            # may have changed it.  In both cases both cached trees are stale.
+            self.reader.invalidate_config_cache("running", "candidate")
             params = {"type": "commit", "cmd": ET.tostring(command, encoding="unicode")}
             if partial:
                 params["action"] = "partial"

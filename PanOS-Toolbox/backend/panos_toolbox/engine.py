@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .cleaner_adapter import build_cleanup_patchset
 from .client import PanoramaReadClient, PanoramaWriteClient
@@ -37,6 +38,85 @@ class ApplyResult:
     applied_mutations: tuple[str, ...]
     skipped_components: tuple[str, ...]
     conflicts: tuple[dict[str, Any], ...]
+
+
+def server_snapshot_filename(session_id: str) -> str:
+    """Return a human-recognisable PAN-OS config name within its 32-char limit."""
+
+    raw_stamp = session_id.removeprefix("session-").split("-", 1)[0]
+    stamp = "".join(character for character in raw_stamp if character.isalnum())[:16]
+    if not stamp:
+        stamp = "session"
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:6]
+    filename = f"ptb_{stamp}_{digest}.xml"
+    if len(filename) > 32:  # defensive if the format above changes later
+        filename = f"ptb_{digest}.xml"
+    return filename
+
+
+def reconcile_external_execution(
+    store: SessionStore,
+    session_id: str,
+    reader: PanoramaReadClient,
+    *,
+    source: str = "CLI",
+) -> SessionState:
+    """Prove that a generated plan was executed outside Toolbox.
+
+    Generating CLI commands is never treated as proof of execution.  This
+    function compares every planned postcondition against live candidate and
+    running, including policy order, before admitting the durable session into
+    restore history.
+    """
+
+    if source not in {"CLI", "API"}:
+        raise ValidationError("Źródło wykonania zewnętrznego musi być CLI albo API.")
+    with store.operation_lock(session_id):
+        with store.panorama_job_lock(reader.profile.host, session_id):
+            manifest = store.load_manifest(session_id)
+            if manifest["state"] not in {
+                SessionState.PLANNED.value,
+                SessionState.FAILED.value,
+            }:
+                raise SessionError(
+                    "Tylko sesję PLANNED albo FAILED można zweryfikować jako wykonanie zewnętrzne."
+                )
+            patch = store.load_patchset(session_id)
+            _assert_session_identity(patch, reader)
+            if not patch.mutations:
+                raise ValidationError("Sesja nie zawiera operacji do uzgodnienia.")
+            running = reader.fetch_config("running")
+            candidate = reader.fetch_config("candidate")
+            running_failures = _postcondition_failures(patch.mutations, running)
+            candidate_failures = _postcondition_failures(patch.mutations, candidate)
+            if not running_failures:
+                state = SessionState.COMMITTED
+                matched = "running"
+            elif not candidate_failures:
+                state = SessionState.CANDIDATE_APPLIED
+                matched = "candidate"
+            else:
+                sample = [
+                    str(item.get("mutation_id"))
+                    for item in candidate_failures[:8]
+                ]
+                raise ConflictError(
+                    "Live Panorama nie odpowiada kompletnemu wynikowi wygenerowanego planu. "
+                    "Brak potwierdzenia dla: " + ", ".join(sample)
+                )
+            store.write_snapshot(session_id, "external_verified_running", running)
+            store.write_snapshot(session_id, "external_verified_candidate", candidate)
+            store.record_external_execution(
+                session_id,
+                state=state,
+                source=source,
+                applied_mutation_ids=(mutation.mutation_id for mutation in patch.mutations),
+                evidence={
+                    "matchedTree": matched,
+                    "mutationCount": len(patch.mutations),
+                },
+            )
+            return state
 
 
 def _assert_session_identity(patch: PatchSet, reader: PanoramaReadClient) -> None:
@@ -476,6 +556,9 @@ def apply_candidate(
     *,
     save_server_snapshot: bool = True,
     acquire_locks: bool = True,
+    progress_callback: Optional[
+        Callable[[int, str, Optional[dict[str, Any]]], None]
+    ] = None,
 ) -> ApplyResult:
     with store.operation_lock(session_id):
         # One durable host-wide transaction mutex serializes every Toolbox
@@ -490,6 +573,7 @@ def apply_candidate(
                 writer,
                 save_server_snapshot=save_server_snapshot,
                 acquire_locks=acquire_locks,
+                progress_callback=progress_callback,
             )
 
 
@@ -501,7 +585,23 @@ def _apply_candidate_unlocked(
     *,
     save_server_snapshot: bool = True,
     acquire_locks: bool = True,
+    progress_callback: Optional[
+        Callable[[int, str, Optional[dict[str, Any]]], None]
+    ] = None,
 ) -> ApplyResult:
+    def progress(
+        value: int, message: str, detail: Optional[dict[str, Any]] = None
+    ) -> None:
+        if progress_callback is None:
+            return
+        # Progress is observational.  A broken browser/poller must never alter
+        # the transactional outcome of a Panorama write.
+        try:
+            progress_callback(max(0, min(100, value)), message, detail)
+        except Exception:
+            pass
+
+    progress(1, "Weryfikacja sesji i backupów", None)
     manifest = store.load_manifest(session_id)
     if manifest["state"] != SessionState.PLANNED.value:
         raise SessionError("Candidate apply wymaga sesji w stanie PLANNED.")
@@ -513,10 +613,20 @@ def _apply_candidate_unlocked(
 
     # Full local snapshots precede even the config-lock request.  They are
     # refreshed after locks, immediately before fingerprint checks and writes.
+    progress(4, "Pobieranie running do bezpiecznego snapshotu", None)
     running = reader.fetch_config("running")
+    progress(11, "Pobieranie candidate przed zapisem", None)
     candidate = reader.fetch_config("candidate")
     store.write_snapshot(session_id, "pre_running", running)
     store.write_snapshot(session_id, "pre_candidate", candidate)
+    progress(
+        18,
+        "Backup każdej encji i pełne snapshoty są gotowe",
+        {
+            "event": "backups-ready",
+            "backupCount": len(manifest.get("entity_backups") or ()),
+        },
+    )
     locks = reader.show_config_locks()
     commit_locks = reader.show_commit_locks()
     store.append_event(
@@ -530,6 +640,7 @@ def _apply_candidate_unlocked(
 
     acquired: list[Optional[str]] = []
     try:
+        progress(22, "Sprawdzono locki Panorama", None)
         if acquire_locks:
             for scope in _direct_lock_scopes(patch):
                 writer.acquire_config_lock(scope, f"PanOS Toolbox {session_id}")
@@ -537,6 +648,7 @@ def _apply_candidate_unlocked(
                 store.append_event(
                     session_id, "CONFIG_LOCK_ACQUIRED", {"scope": scope or "shared"}
                 )
+        progress(27, "Lock konfiguracji aktywny; ponowny odczyt candidate", None)
 
         # Re-fetch after lock acquisition.  Preconditions are per touched XPath;
         # unrelated candidate changes are informational and never a blocker.
@@ -586,6 +698,16 @@ def _apply_candidate_unlocked(
                 tuple(conflicts),
             )
 
+        progress(
+            43,
+            "Fingerprint i graf zależności potwierdzone",
+            {
+                "event": "preconditions-ok",
+                "safeMutations": len(safe),
+                "skippedComponents": len(conflicted_components),
+            },
+        )
+
         store.transition(
             session_id,
             SessionState.RESTORING
@@ -595,11 +717,23 @@ def _apply_candidate_unlocked(
         applied: list[Mutation] = []
         try:
             if save_server_snapshot:
-                writer.save_candidate_snapshot(
-                    "panos_toolbox_" + session_id.replace("session-", "") + ".xml"
-                )
+                writer.save_candidate_snapshot(server_snapshot_filename(session_id))
                 store.append_event(session_id, "SERVER_CANDIDATE_SNAPSHOT_SAVED", {})
+            total_operations = sum(len(mutation.forward) for mutation in safe)
+            completed_operations = 0
             for mutation in safe:
+                progress(
+                    45 + int(38 * completed_operations / max(1, total_operations)),
+                    f"Przygotowanie: {mutation.entity_key}",
+                    {
+                        "event": "mutation-start",
+                        "mutationId": mutation.mutation_id,
+                        "entityType": mutation.entity_type,
+                        "entityKey": mutation.entity_key,
+                        "completedOperations": completed_operations,
+                        "totalOperations": total_operations,
+                    },
+                )
                 store.append_event(
                     session_id, "MUTATION_START", {"mutation": mutation.to_dict()}
                 )
@@ -617,6 +751,30 @@ def _apply_candidate_unlocked(
                             "operation": operation.to_dict(),
                         },
                     )
+                    completed_operations += 1
+                    progress(
+                        45
+                        + int(
+                            38
+                            * completed_operations
+                            / max(1, total_operations)
+                        ),
+                        (
+                            f"XML API {completed_operations}/{total_operations}: "
+                            f"{mutation.entity_key}"
+                        ),
+                        {
+                            "event": "operation-ok",
+                            "mutationId": mutation.mutation_id,
+                            "entityType": mutation.entity_type,
+                            "entityKey": mutation.entity_key,
+                            "action": operation.action.value,
+                            "xpath": operation.xpath,
+                            "completedOperations": completed_operations,
+                            "totalOperations": total_operations,
+                        },
+                    )
+            progress(86, "Walidacja candidate w Panorama", None)
             validation_job = writer.validate_candidate()
             if validation_job:
                 validation = writer.poll_job(validation_job)
@@ -625,6 +783,7 @@ def _apply_candidate_unlocked(
                     raise ValidationError(
                         f"Walidacja candidate zakończyła się {validation.result}."
                     )
+            progress(92, "Kontrola wyniku każdej dotkniętej ścieżki", None)
             post_candidate = reader.fetch_config("candidate")
             post_failures = _postcondition_failures(safe, post_candidate)
             if post_failures:
@@ -650,6 +809,15 @@ def _apply_candidate_unlocked(
                 skipped_components=skipped,
             )
             store.transition(session_id, state)
+            progress(
+                100,
+                "Candidate zapisany i zwalidowany",
+                {
+                    "event": "complete",
+                    "completedOperations": completed_operations,
+                    "totalOperations": total_operations,
+                },
+            )
         except OutcomeUnknownError:
             store.force_terminal_state(
                 session_id,

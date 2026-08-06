@@ -153,6 +153,7 @@ def select_history(
     records: Sequence[HistoricalMutation],
     *,
     ip: Optional[str] = None,
+    targets: Optional[Iterable[str]] = None,
     source_session_id: Optional[str] = None,
     dependency_owner_sets: Iterable[Iterable[str]] = (),
 ) -> SelectedHistory:
@@ -163,8 +164,13 @@ def select_history(
     dependencies and rule-order anchors.
     """
 
-    if bool(ip) == bool(source_session_id):
-        raise ValidationError("Restore history wymaga dokładnie IP albo source session.")
+    selected_targets = tuple(
+        dict.fromkeys(str(value).strip() for value in (targets or ()) if str(value).strip())
+    )
+    if sum(bool(value) for value in (ip, selected_targets, source_session_id)) != 1:
+        raise ValidationError(
+            "Restore history wymaga dokładnie IP, listy celów albo source session."
+        )
     by_id = {record.qualified_id: record for record in records}
     adjacency: dict[str, set[str]] = {key: set() for key in by_id}
 
@@ -243,14 +249,15 @@ def select_history(
         record.qualified_id
         for record in records
         if (
-            ip is not None
-            and ip in record.mutation.causes
+            ip is not None and ip in record.mutation.causes
+            or selected_targets
+            and bool(set(selected_targets).intersection(record.mutation.causes))
             or source_session_id is not None
             and record.source_session_id == source_session_id
         )
     }
     if not seeds:
-        target = ip or source_session_id or "?"
+        target = ip or ", ".join(selected_targets) or source_session_id or "?"
         raise ValidationError(f"Historia nie zawiera zastosowanej mutacji dla {target}.")
     selected: set[str] = set(seeds)
     queue = deque(sorted(seeds))

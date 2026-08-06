@@ -16,9 +16,12 @@ from panos_toolbox.engine import (
     apply_candidate,
     commit_session,
     push_session,
+    reconcile_external_execution,
+    server_snapshot_filename,
 )
 from panos_toolbox.errors import (
     CapabilityError,
+    ConflictError,
     OutcomeUnknownError,
     PanoramaResponseError,
     SessionError,
@@ -228,6 +231,64 @@ class EngineTests(unittest.TestCase):
             result = apply_candidate(store, session2, reader2, StatefulWriter(reader2))
             self.assertEqual(result.state, SessionState.CANDIDATE_APPLIED)
             self.assertIsNone(find_xpath(reader2.candidate, "/config/shared/address/entry[@name='A']"))
+
+    def test_server_snapshot_filename_respects_panorama_32_character_limit(self):
+        session_id = "session-20260806T110947Z-b68dfb0b"
+        filename = server_snapshot_filename(session_id)
+        self.assertLessEqual(len(filename), 32)
+        self.assertTrue(filename.startswith("ptb_20260806T110947Z_"))
+        self.assertTrue(filename.endswith(".xml"))
+        self.assertEqual(filename, server_snapshot_filename(session_id))
+
+    def test_candidate_progress_reports_each_path_operation(self):
+        profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            reader = StatefulReader(profile, config("A", "B"))
+            session_id, _ = self.make_session(
+                store, profile, (mutation(1, "A"), mutation(2, "B"))
+            )
+            updates = []
+            result = apply_candidate(
+                store,
+                session_id,
+                reader,
+                StatefulWriter(reader),
+                progress_callback=lambda value, message, detail: updates.append(
+                    (value, message, detail)
+                ),
+            )
+            self.assertEqual(result.state, SessionState.CANDIDATE_APPLIED)
+            self.assertEqual(updates[-1][0], 100)
+            operation_updates = [
+                detail
+                for _value, _message, detail in updates
+                if detail and detail.get("event") == "operation-ok"
+            ]
+            self.assertEqual(len(operation_updates), 2)
+            self.assertEqual(operation_updates[-1]["completedOperations"], 2)
+            self.assertEqual(operation_updates[-1]["totalOperations"], 2)
+
+    def test_external_cli_execution_requires_complete_live_postconditions(self):
+        profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            reader = StatefulReader(profile, config("A"))
+            session_id, _ = self.make_session(store, profile, (mutation(1, "A"),))
+            with self.assertRaises(ConflictError):
+                reconcile_external_execution(store, session_id, reader, source="CLI")
+            self.assertEqual(store.load_manifest(session_id)["state"], "PLANNED")
+
+            reader.candidate = config()
+            reader.running = config()
+            state = reconcile_external_execution(store, session_id, reader, source="CLI")
+            self.assertEqual(state, SessionState.COMMITTED)
+            manifest = store.load_manifest(session_id)
+            self.assertEqual(manifest["external_execution"]["source"], "CLI")
+            self.assertEqual(
+                manifest["candidate_application"]["applied_mutation_ids"],
+                ["mutation-00001"],
+            )
 
     def test_commit_and_push_guards_and_sequential_states(self):
         profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
@@ -984,6 +1045,13 @@ class RestorePrimitiveTests(unittest.TestCase):
         )
         selected = select_history(records, ip="192.0.2.1")
         self.assertEqual(selected.source_session_ids, ("session-a", "session-b"))
+        selected_many = select_history(
+            records, targets=("192.0.2.1", "192.0.2.2")
+        )
+        self.assertEqual(
+            {record.qualified_id for record in selected_many.records},
+            {record.qualified_id for record in records},
+        )
         current = parse_xml("<config><shared><address-group /></shared></config>")
         result = build_restore_patchset_history(
             selected,

@@ -8,7 +8,6 @@ import {
   FileArchive,
   GitMerge,
   History,
-  Lock,
   PackageCheck,
   RefreshCcw,
   RotateCcw,
@@ -17,33 +16,33 @@ import {
   ShieldCheck,
   ShieldX,
 } from "lucide-react";
-import type { CapabilityStage, RestorePlan, ToolboxSession } from "../model";
-import { formatDate, shortId, stageAllows } from "../model";
-import { Button, Callout, Card, CardHeader, EmptyState, PageHeader, StatCard, StatusPill, Toggle } from "../components/Primitives";
+import type { CandidateJob, RestorePlan, ToolboxSession } from "../model";
+import { formatDate, shortId } from "../model";
+import { Button, Callout, Card, CardHeader, EmptyState, PageHeader, ProgressBar, StatCard, StatusPill } from "../components/Primitives";
 
 interface RestorePageProps {
   query: string;
   onQueryChange: (query: string) => void;
   plan: RestorePlan | null;
   executionSession: ToolboxSession | null;
-  apiMaxStage: CapabilityStage;
+  candidateJob: CandidateJob | null;
   writeEnabled: boolean;
   connected: boolean;
   busy: "plan" | "candidate" | "commit" | "push" | "download" | null;
   error: string | null;
-  onCreatePlan: (mode: "ip" | "session") => void;
+  onCreatePlan: (mode: "target" | "session") => void;
   onApplyCandidate: () => void;
-  onCommit: (allowUnisolated: boolean, allowFull: boolean) => void;
+  onCommit: () => void;
   onPush: () => void;
   onDownloadConflicts: () => void;
   onOpenConnection: () => void;
 }
 
-export function RestorePage({ query, onQueryChange, plan, executionSession, apiMaxStage, writeEnabled, connected, busy, error, onCreatePlan, onApplyCandidate, onCommit, onPush, onDownloadConflicts, onOpenConnection }: RestorePageProps) {
-  const [mode, setMode] = useState<"ip" | "session">(() => query.startsWith("cleanup-") ? "session" : "ip");
-  const [allowUnisolated, setAllowUnisolated] = useState(false);
-  const [allowFull, setAllowFull] = useState(false);
-  useEffect(() => { if (query.startsWith("cleanup-")) setMode("session"); }, [query]);
+export function RestorePage({ query, onQueryChange, plan, executionSession, candidateJob, writeEnabled, connected, busy, error, onCreatePlan, onApplyCandidate, onCommit, onPush, onDownloadConflicts, onOpenConnection }: RestorePageProps) {
+  const sessionQuery = (value: string) => !value.includes("\n") && /^(session-|cleanup-)/.test(value.trim());
+  const [mode, setMode] = useState<"target" | "session">(() => sessionQuery(query) ? "session" : "target");
+  const [confirmAction, setConfirmAction] = useState<"commit" | "push" | null>(null);
+  useEffect(() => { setMode(sessionQuery(query) ? "session" : "target"); }, [query]);
 
   const state = executionSession?.state ?? plan?.state ?? "PLANNED";
   const safeEntities = useMemo(() => plan?.entities.filter((entity) => entity.outcome !== "conflict") ?? [], [plan]);
@@ -66,8 +65,8 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, apiM
       <Card className="restore-search-card">
         <div className="restore-search-card__copy"><div className="emergency-icon"><RotateCcw size={22} /></div><div><span className="eyebrow">Znajdź backup</span><h2>Co chcesz przywrócić?</h2><p>Wyszukaj konkretny adres albo otwórz całą sesję cleanup.</p></div></div>
         <div className="restore-search-card__form">
-          <div className="segmented-control segmented-control--large"><button className={mode === "ip" ? "is-active" : ""} onClick={() => setMode("ip")}><Search size={15} /> Adres IP</button><button className={mode === "session" ? "is-active" : ""} onClick={() => setMode("session")}><History size={15} /> Session ID</button></div>
-          <div className="restore-input"><input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder={mode === "ip" ? "np. 10.42.8.17" : "cleanup-YYYYMMDD-HHMM-…"} spellCheck={false} /><Button variant="primary" loading={busy === "plan"} disabled={!connected || !query.trim()} onClick={() => onCreatePlan(mode)} icon={<GitMerge size={17} />}>Przelicz Restore</Button></div>
+          <div className="segmented-control segmented-control--large"><button className={mode === "target" ? "is-active" : ""} onClick={() => setMode("target")}><Search size={15} /> Cel / IP / polityka</button><button className={mode === "session" ? "is-active" : ""} onClick={() => setMode("session")}><History size={15} /> Session ID</button></div>
+          <div className="restore-input"><textarea rows={mode === "target" ? 3 : 1} value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder={mode === "target" ? "Po jednym celu na linię: IP, object:NAZWA, group:NAZWA lub policy:NAZWA" : "session-YYYYMMDDT…"} spellCheck={false} /><Button variant="primary" loading={busy === "plan"} disabled={!connected || !query.trim()} onClick={() => onCreatePlan(mode)} icon={<GitMerge size={17} />}>Przelicz Restore</Button></div>
         </div>
       </Card>
 
@@ -110,32 +109,31 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, apiM
           </Card>
 
           <section className="restore-execution">
-            <div className="execution-heading"><div><span className="eyebrow">Recovery execution</span><h2>Odtworzenie etapowe</h2><p>Inverse patch trafia najpierw do candidate. Commit i push pozostają osobnymi decyzjami.</p></div><StatusPill tone={writeEnabled ? "danger" : "neutral"}>{writeEnabled ? "API write aktywny" : "Read-only preview"}</StatusPill></div>
+            <div className="execution-heading"><div><span className="eyebrow">Recovery execution</span><h2>Odtworzenie etapowe</h2><p>Inverse patch trafia najpierw do candidate. Commit i push pozostają osobnymi decyzjami.</p></div><StatusPill tone={writeEnabled ? "success" : "info"}>{writeEnabled ? "WRITE aktywny" : "READ ONLY"}</StatusPill></div>
             {conflicts.length > 0 && <Callout severity="warning" title={`${plan.conflictComponentCount} komponent konfliktowy zostanie pominięty`}><p>Safe subset obejmuje wyłącznie komponenty niezależne. Dla konfliktów powstał osobny raport i pakiet ręczny.</p></Callout>}
             <div className="restore-stage-grid">
               <Card className={candidateDone ? "restore-stage restore-stage--done" : "restore-stage"}>
                 <span>1</span><ServerCog size={21} /><h3>Restore Candidate</h3><p>Powtórny fingerprint, backup bieżącego stanu, inverse patch i validation.</p>
-                {!stageAllows(apiMaxStage, "candidate") && <small className="stage-blocked"><Lock size={13} /> Zablokowane przez tryb wykonania</small>}
-                <Button variant="primary" loading={busy === "candidate"} disabled={!writeEnabled || !stageAllows(apiMaxStage, "candidate") || state !== "PLANNED"} onClick={onApplyCandidate}>Zastosuj safe subset</Button>
+                <Button variant="primary" loading={busy === "candidate"} disabled={!writeEnabled || state !== "PLANNED"} onClick={onApplyCandidate}>Zastosuj safe subset</Button>
               </Card>
               <Card className={commitDone ? "restore-stage restore-stage--done" : "restore-stage"}>
                 <span>2</span><PackageCheck size={21} /><h3>Commit Restore</h3><p>Partial commit operatora na Panorama. Ryzykowne rozszerzenia wymagają osobnej zgody.</p>
-                <div className="compact-risk"><Toggle checked={allowUnisolated} onChange={(value) => { setAllowUnisolated(value); if (!value) setAllowFull(false); }} label="Unisolated" danger /><Toggle checked={allowFull} onChange={(value) => { setAllowFull(value); if (value) setAllowUnisolated(true); }} label="Full commit" danger /></div>
-                {stageAllows(apiMaxStage, "commit") && !allowUnisolated && <small className="stage-blocked"><ShieldX size={13} /> Potwierdź zakres same-admin</small>}
-                <Button variant={allowFull ? "danger" : "primary"} loading={busy === "commit"} disabled={!writeEnabled || !stageAllows(apiMaxStage, "commit") || (state !== "RESTORED" && state !== "PARTIAL") || !allowUnisolated} onClick={() => onCommit(allowUnisolated, allowFull)}>Commit Restore</Button>
+                <Button variant="primary" loading={busy === "commit"} disabled={!writeEnabled || (state !== "RESTORED" && state !== "PARTIAL")} onClick={() => setConfirmAction("commit")}>Commit Restore</Button>
               </Card>
               <Card className={state === "PUSHED" ? "restore-stage restore-stage--done" : "restore-stage"}>
                 <span>3</span><CloudUpload size={21} /><h3>Push Restore</h3><p>Push wyłącznie do device groups wynikających z bezpiecznego closure.</p>
                 <div className="restore-targets">{plan.affectedDeviceGroups.map((scope) => <StatusPill key={scope} tone="neutral">{scope}</StatusPill>)}</div>
-                <Button variant="primary" loading={busy === "push"} disabled={!writeEnabled || !stageAllows(apiMaxStage, "push") || state !== "COMMITTED"} onClick={onPush}>Validate & Push Restore</Button>
+                <Button variant="primary" loading={busy === "push"} disabled={!writeEnabled || state !== "COMMITTED"} onClick={() => setConfirmAction("push")}>Validate & Push Restore</Button>
               </Card>
             </div>
+            {candidateJob && <Card className="candidate-progress-card" aria-live="polite"><div className="candidate-progress-head"><span><strong>{candidateJob.message}</strong><small>{candidateJob.current?.entityKey ?? "Backup i kontrola live stanu"}</small></span><b>{candidateJob.progress}%</b></div><ProgressBar value={candidateJob.progress} label={`${candidateJob.progress}%`} /><div className="candidate-operation-log">{candidateJob.items.slice(-6).map((item, index) => <div key={`${item.mutationId}-${index}`}><CheckCircle2 className="is-complete" size={14} /><strong>{item.entityKey}</strong><code>{item.action} · {item.completedOperations}/{item.totalOperations}</code></div>)}</div></Card>}
             {state === "RESTORED" ? <Callout severity="success" title="Restore zapisany do Candidate"><p>Safe subset został zastosowany i zwalidowany. Commit ani push nie zostały jeszcze uruchomione.</p></Callout> : null}
             {state === "PARTIAL" ? <Callout severity="warning" title="Częściowy Restore zapisany do Candidate"><p>Bezpieczne komponenty zostały zastosowane; konfliktowe komponenty pominięto. Po przejrzeniu pakietu ręcznego możesz commitować safe subset.</p></Callout> : null}
             {state === "PUSHED" ? <Callout severity="success" title="Restore zakończony"><p>Bezpieczne komponenty zostały odtworzone. Zmiany niezależne pozostały nietknięte, a konflikty są dostępne w pakiecie ręcznym.</p></Callout> : null}
           </section>
 
           <div className="restore-policy"><ShieldCheck size={20} /><div><strong>Pełny backup jest tylko źródłem prawdy</strong><p>Toolbox nie wywoła automatycznego load config, nawet podczas Emergency Restore. Każdy zapis jest ścieżkowym patchem z operacją odwrotną.</p></div><AlertTriangle size={19} /></div>
+          {confirmAction && <div className="write-confirm-backdrop"><div className={`write-confirm ${confirmAction === "push" ? "write-confirm--critical" : ""}`} role="dialog" aria-modal="true"><div><AlertTriangle size={22} /><strong>{confirmAction === "commit" ? "Potwierdź commit Restore" : "UWAGA: potwierdź push Restore"}</strong></div><p>{confirmAction === "commit" ? "Bezpieczny subset Restore zostanie utrwalony partial commitem. Push nie uruchomi się automatycznie." : `Odtworzone zmiany zostaną wysłane do: ${plan.affectedDeviceGroups.join(", ") || "shared"}.`}</p><div><Button onClick={() => setConfirmAction(null)}>Anuluj</Button><Button variant={confirmAction === "push" ? "danger" : "primary"} onClick={() => { const action = confirmAction; setConfirmAction(null); if (action === "commit") onCommit(); else onPush(); }}>{confirmAction === "commit" ? "Uruchom commit" : "Wykonaj PUSH"}</Button></div></div></div>}
         </>
       )}
     </div>

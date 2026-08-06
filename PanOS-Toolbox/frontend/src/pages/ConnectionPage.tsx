@@ -1,6 +1,6 @@
-import { Check, CircleGauge, FlaskConical, KeyRound, LockKeyhole, Radar, Server, ShieldCheck, Wifi } from "lucide-react";
+import { CircleGauge, FlaskConical, KeyRound, LoaderCircle, LockKeyhole, Radar, Server, ShieldCheck, Wifi } from "lucide-react";
 import type { ConnectionDraft, ConnectionSession, DoctorResult } from "../model";
-import { formatDate, stageOrder } from "../model";
+import { formatDate } from "../model";
 import { Button, Callout, Card, CardHeader, PageHeader, ResultIcon, StatusPill, Toggle } from "../components/Primitives";
 
 interface ConnectionPageProps {
@@ -16,13 +16,6 @@ interface ConnectionPageProps {
   demoAvailable: boolean;
 }
 
-const capabilities = [
-  { id: "read-only" as const, label: "Read-only", description: "Analiza i generowanie komend" },
-  { id: "candidate" as const, label: "Candidate", description: "Kontrolowane mutacje candidate" },
-  { id: "commit" as const, label: "Commit", description: "Partial commit na Panorama" },
-  { id: "push" as const, label: "Push", description: "Push do wybranych device groups" },
-];
-
 export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy, error, onConnect, onDoctor, onDemo, demoAvailable }: ConnectionPageProps) {
   const update = <K extends keyof ConnectionDraft>(key: K, value: ConnectionDraft[K]) => onDraftChange({ ...draft, [key]: value });
 
@@ -31,16 +24,15 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
       <PageHeader
         eyebrow="Workspace / Connection"
         title="Połącz Toolbox z Panorama"
-        description="Poświadczenia żyją wyłącznie w pamięci procesu. Profil opisuje sesję analityczną; jawne uprawnienie zapisu wybierzesz osobno w sekcji Wykonanie."
+        description="Poświadczenia żyją wyłącznie w pamięci procesu. Połączenie wykonuje keygen, odczyt prawdziwej wersji systemu i status Candidate — nie pobiera całej konfiguracji."
         actions={connection && <StatusPill tone="success">Połączono · {connection.panoramaVersion}</StatusPill>}
       />
 
       {error && <Callout severity="danger" title="Nie udało się wykonać operacji"><p>{error}</p></Callout>}
-      {connection?.capabilityWarning && <Callout severity="warning" title="Backend ograniczył poziom API"><p>{connection.capabilityWarning}</p></Callout>}
 
       <div className="connection-grid">
         <Card className="connection-form-card">
-          <CardHeader title="Profil połączenia" description="Poziom profilu nie blokuje osobnego, tymczasowego przełącznika Wykonanie w GUI." action={<Server size={20} />} />
+          <CardHeader title="Połączenie z Panorama" description="Jeden przełącznik READ ONLY / WRITE znajduje się stale w górnym pasku." action={<Server size={20} />} />
           <form onSubmit={(event) => { event.preventDefault(); onConnect(); }} className="form-stack" autoComplete="off">
             <div className="field-grid field-grid--2">
               <label className="field">
@@ -62,26 +54,19 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
               <Toggle checked={draft.verifySsl} onChange={(value) => update("verifySsl", value)} label="Weryfikuj certyfikat" description={draft.verifySsl ? "Łańcuch certyfikatu musi być zaufany" : "Odpowiednik --insecure; tożsamość hosta nie jest weryfikowana"} disabled={!draft.ssl} danger={draft.ssl && !draft.verifySsl} />
             </div>
 
-            <fieldset className="capability-fieldset">
-              <legend>Maksymalny poziom API</legend>
-              <p>Ten wybór nie uruchamia zapisu. W GUI zakres realnego wykonania jest potwierdzany później, niezależnie i tylko dla bieżącej sesji.</p>
-              <div className="capability-options">
-                {capabilities.map((capability) => (
-                  <label key={capability.id} className={draft.apiMaxStage === capability.id ? "is-selected" : ""}>
-                    <input type="radio" name="api-max-stage" value={capability.id} checked={draft.apiMaxStage === capability.id} onChange={() => update("apiMaxStage", capability.id)} />
-                    <span className="capability-check">{draft.apiMaxStage === capability.id && <Check size={13} />}</span>
-                    <span><strong>{capability.label}</strong><small>{capability.description}</small></span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
             {!draft.verifySsl && draft.ssl && <Callout severity="warning" title="Certyfikat nie będzie weryfikowany"><p>Połączenie jest szyfrowane, ale podatne na podszycie się pod urządzenie. Używaj wyłącznie w kontrolowanej sieci.</p></Callout>}
 
             <div className="form-actions">
               <Button type="button" onClick={onDoctor} loading={busy === "doctor"} icon={<CircleGauge size={17} />}>Uruchom Doctor</Button>
               <Button type="submit" variant="primary" loading={busy === "connect"} icon={<Wifi size={17} />}>{connection ? "Połącz ponownie" : "Połącz"}</Button>
             </div>
+            {busy === "connect" && (
+              <div className="connection-progress" role="status" aria-live="polite">
+                <div><LoaderCircle className="spin" size={18} /><span><strong>Łączenie z Panorama</strong><small>Keygen → show system info → status Candidate</small></span></div>
+                <span className="connection-progress__track"><i /></span>
+                <p>Pełny running/candidate zostanie pobrany dopiero po uruchomieniu analizy batch.</p>
+              </div>
+            )}
           </form>
           {demoAvailable && (
             <button className="demo-link" type="button" onClick={onDemo}><FlaskConical size={15} /> Otwórz bezpieczne dane demonstracyjne</button>
@@ -117,13 +102,8 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
           </Card>
 
           <Card>
-            <CardHeader title="Profil analityczny" description={connection ? `Profil ${connection.username}` : "Wynika z wybranego maksimum"} />
-            <div className="capability-ladder">
-              {capabilities.map((capability, index) => {
-                const enabled = stageOrder[connection?.apiMaxStage ?? draft.apiMaxStage] >= index;
-                return <div key={capability.id} className={enabled ? "is-enabled" : ""}><span>{index + 1}</span><div><strong>{capability.label}</strong><small>{enabled ? "Dozwolone przez profil" : "Zablokowane przez profil"}</small></div></div>;
-              })}
-            </div>
+            <CardHeader title="Dwa tryby pracy" description="Bez ukrytych profili ani dodatkowych limitów GUI." />
+            <div className="connection-modes"><div><span>READ ONLY</span><strong>Wyszukiwanie, analiza, Last Hit i backupy</strong></div><div><span>WRITE</span><strong>Operacje XPath → Candidate → Commit → Push</strong></div></div>
           </Card>
         </div>
       </div>

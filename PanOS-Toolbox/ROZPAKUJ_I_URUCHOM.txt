@@ -6,6 +6,11 @@ PANOS TOOLBOX PORTABLE - WINDOWS
 3. Uruchom dwuklikiem start_toolbox.cmd.
 4. Otworz http://127.0.0.1:8765/ jezeli przegladarka nie otworzy sie automatycznie.
 
+Backupy i pelna historia sesji sa trwale zapisywane obok programu w:
+    backupy\sessions\session-...
+Nie usuwaj tego katalogu, jezeli chcesz korzystac z Emergency Restore po
+ponownym uruchomieniu narzedzia.
+
 Paczka zawiera Flask, Werkzeug i pozostale biblioteki w backend\vendor.
 Nie uruchamiaj plikow bezposrednio z podgladu ZIP i nie wykonuj pip install.
 

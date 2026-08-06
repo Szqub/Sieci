@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
 import urllib.error
+import zipfile
 from dataclasses import replace
 from unittest import mock
 from pathlib import Path
@@ -152,6 +154,31 @@ class ClientSerializationTests(unittest.TestCase):
         second = reader.fetch_config_cached("running")
         self.assertEqual(first.get("version"), second.get("version"))
         self.assertEqual(len(transport.calls), 1)
+
+    def test_candidate_mutation_invalidates_only_candidate_cache(self):
+        profile = PanoramaProfile(
+            "pano", "admin", verify_ssl=False, api_max_stage=ApiStage.CANDIDATE
+        )
+        transport = RecordingTransport()
+        response = (
+            '<response status="success"><result><config version="10.2">'
+            '<shared /></config></result></response>'
+        )
+        transport.queue(response)
+        transport.queue(response)
+        reader = PanoramaReadClient(profile, transport)
+        reader._api_key = "memory-only-test-key"
+        reader.fetch_config("running")
+        reader.fetch_config("candidate")
+        writer = reader.enable_write(
+            issue_write_lease(profile, ApiStage.CANDIDATE, enable_api_write=True)
+        )
+        transport.queue('<response status="success"><result /></response>')
+        writer.apply_operation(sample_mutation().forward[0])
+        reader.fetch_config_cached("running")
+        transport.queue(response)
+        reader.fetch_config_cached("candidate")
+        self.assertEqual(len(transport.calls), 4)
 
     def test_mutating_transport_failure_is_never_retried(self):
         profile = PanoramaProfile("pano", "admin", verify_ssl=False)
@@ -318,6 +345,32 @@ class SessionIntegrityTests(unittest.TestCase):
                 with self.assertRaises(Exception):
                     with store.operation_lock(session_id):
                         pass
+
+    def test_complete_session_bundle_contains_manifest_backups_and_journal(self):
+        profile = PanoramaProfile("pano", "admin")
+        patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(sample_mutation(),),
+            targets=("192.0.2.1",),
+            affected_device_groups=(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            session_id = store.create(
+                patch,
+                profile,
+                planning_running=parse_xml("<config><shared /></config>"),
+                planning_candidate=parse_xml("<config><shared /></config>"),
+            )
+            payload = store.bundle_bytes(session_id)
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                names = set(archive.namelist())
+            prefix = f"{session_id}/"
+            self.assertIn(prefix + "manifest.json", names)
+            self.assertTrue(any(name.startswith(prefix + "entities/") for name in names))
+            self.assertTrue(any(name.startswith(prefix + "journal/") for name in names))
 
     def test_restore_history_enumeration_fails_closed_on_corrupt_session(self):
         with tempfile.TemporaryDirectory() as temporary:

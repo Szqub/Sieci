@@ -6,11 +6,15 @@ import type {
   AdGroupGenerationResult,
   AnalysisJob,
   AuditResult,
-  CapabilityStage,
+  CandidateJob,
   CleanupPlan,
   ConnectionDraft,
   ConnectionSession,
   DoctorResult,
+  LookupEntity,
+  LookupKind,
+  LookupResult,
+  EntityDependency,
   RestorePlan,
   ToolboxSession,
 } from "./model";
@@ -29,7 +33,7 @@ const initialConnection: ConnectionDraft = {
   password: "",
   ssl: true,
   verifySsl: true,
-  apiMaxStage: "read-only",
+  apiMaxStage: "push",
 };
 
 const initialAdGroupDraft: AdGroupDraft = {
@@ -69,7 +73,9 @@ export default function App() {
   const [view, setView] = useState<ViewId>("connection");
   const [theme, setTheme] = useState<"light" | "dark">(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   const [analysisJob, setAnalysisJob] = useState<AnalysisJob | null>(null);
-  const [executionStage, setExecutionStage] = useState<CapabilityStage>("candidate");
+  const [candidateJob, setCandidateJob] = useState<CandidateJob | null>(null);
+  const [lookupResult, setLookupResult] = useState<LookupResult | null>(null);
+  const [lookupBusy, setLookupBusy] = useState(false);
   const [singlePlanBusy, setSinglePlanBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<ConnectionDraft>(initialConnection);
   const [connection, setConnection] = useState<ConnectionSession | null>(null);
@@ -102,6 +108,7 @@ export default function App() {
   const [restoreQuery, setRestoreQuery] = useState("");
   const [restorePlan, setRestorePlan] = useState<RestorePlan | null>(null);
   const [restoreSession, setRestoreSession] = useState<ToolboxSession | null>(null);
+  const [restoreCandidateJob, setRestoreCandidateJob] = useState<CandidateJob | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -177,13 +184,56 @@ export default function App() {
     }
     setConnection(null);
     setWriteEnabled(false);
-    setExecutionStage("candidate");
     setAnalysisJob(null);
+    setCandidateJob(null);
+    setRestoreCandidateJob(null);
+    setLookupResult(null);
     setDemoMode(false);
     setDemoApi(null);
     setExecutionSession(null);
     setRestoreSession(null);
     setView("connection");
+  };
+
+  const runLookup = async (kind: LookupKind, names: string[], deviceGroup?: string) => {
+    if (!connection) return;
+    setLookupBusy(true);
+    setLookupResult(null);
+    setError(null);
+    try {
+      const result = demoMode && demoApi
+        ? { found: [], requested: names, searchedScopes: 1, apiCalls: 1, elapsedMs: 20, partial: false, warnings: ["Lookup punktowy nie jest symulowany w trybie demo."] }
+        : await api.lookup({ type: kind, names, deviceGroup, recentDays: recentHitDays });
+      setLookupResult(result);
+    } catch (lookupError) {
+      setError(getErrorMessage(lookupError));
+    } finally {
+      setLookupBusy(false);
+    }
+  };
+
+  const addLookupEntitiesToBatch = (entities: LookupEntity[]) => {
+    const append = (current: string, names: string[]) => {
+      const existing = parseNameInput(current).names;
+      return [...new Set([...existing, ...names])].join("\n");
+    };
+    setObjectText((current) => append(current, entities.filter((item) => item.type === "address").map((item) => item.name)));
+    setGroupText((current) => append(current, entities.filter((item) => item.type === "address-group").map((item) => item.name)));
+    setPolicyText((current) => append(current, entities.filter((item) => item.type === "policy" && !item.readOnly).map((item) => item.name)));
+  };
+
+  const planDependencies = (dependencies: EntityDependency[], targets: AddressAnalysis[]) => {
+    const append = (current: string, names: string[]) => [...new Set([...parseNameInput(current).names, ...names])].join("\n");
+    const namesFor = (type: "address" | "address-group" | "policy") => [
+      ...dependencies.filter((item) => item.type === type && !item.readOnly).map((item) => item.name),
+      ...targets.filter((item) => item.targetType === ({ address: "address-object", "address-group": "address-group", policy: "policy" } as const)[type]).map((item) => item.label ?? item.ip.replace(/^[^:]+:/, "")),
+    ];
+    const targetIps = targets.filter((item) => (item.targetType ?? "ip") === "ip").map((item) => item.ip);
+    setAddressText((current) => [...new Set([...parseAddressInput(current).addresses, ...targetIps])].join("\n"));
+    setObjectText((current) => append(current, namesFor("address")));
+    setGroupText((current) => append(current, namesFor("address-group")));
+    setPolicyText((current) => append(current, namesFor("policy")));
+    navigate("cleanup");
   };
 
   const analyze = async () => {
@@ -214,6 +264,7 @@ export default function App() {
       }
       setCleanupPlan(plan);
       setExecutionSession(null);
+      setCandidateJob(null);
       setView("plan");
     } catch (analysisError) {
       setError(getErrorMessage(analysisError));
@@ -234,6 +285,24 @@ export default function App() {
       setExecutionSession(null);
     } catch (singleError) {
       setError(getErrorMessage(singleError));
+    } finally {
+      setSinglePlanBusy(null);
+    }
+  };
+
+  const createSelectionPlan = async (targets: AddressAnalysis[]) => {
+    if (!cleanupPlan || !targets.length) return;
+    setSinglePlanBusy("selection");
+    setError(null);
+    try {
+      const plan = demoMode && demoApi
+        ? demoApi.demoCleanupPlan
+        : await api.createSelectionPlan(cleanupPlan.sessionId, targets.map((target) => target.ip));
+      setCleanupPlan(plan);
+      setExecutionSession(null);
+      setCandidateJob(null);
+    } catch (selectionError) {
+      setError(getErrorMessage(selectionError));
     } finally {
       setSinglePlanBusy(null);
     }
@@ -261,10 +330,21 @@ export default function App() {
 
   const applyCandidate = async () => {
     if (!cleanupPlan) return;
-    setStageBusy("candidate"); setError(null);
+    setStageBusy("candidate"); setCandidateJob(null); setError(null);
     try {
-      const result = demoMode && demoApi ? demoApi.demoAction(cleanupPlan.sessionId, "CANDIDATE_APPLIED", "candidate") : await api.applyCandidate(cleanupPlan.sessionId, { enableApiWrite: writeEnabled, executionStage });
-      setExecutionSession(result.session);
+      if (demoMode && demoApi) {
+        setExecutionSession(demoApi.demoAction(cleanupPlan.sessionId, "CANDIDATE_APPLIED", "candidate").session);
+      } else {
+        let job = await api.startCandidateJob(cleanupPlan.sessionId, { enableApiWrite: writeEnabled, executionStage: "push" });
+        setCandidateJob(job);
+        while (job.state === "queued" || job.state === "running") {
+          await wait(350);
+          job = await api.getExecutionJob(job.id);
+          setCandidateJob(job);
+        }
+        if (job.state === "failed" || !job.session) throw new Error(job.error?.message || "Zapis candidate nie zwrócił poprawnego wyniku.");
+        setExecutionSession(job.session);
+      }
     } catch (actionError) { setError(getErrorMessage(actionError)); } finally { setStageBusy(null); }
   };
 
@@ -273,7 +353,7 @@ export default function App() {
     const sessionId = executionSession?.id ?? cleanupPlan.sessionId;
     setStageBusy("commit"); setError(null);
     try {
-      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "COMMITTED", "commit") : await api.commit(sessionId, { enableApiWrite: writeEnabled, executionStage, allowUnisolatedCommit: allowUnisolated, allowFullCommit: allowFull });
+      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "COMMITTED", "commit") : await api.commit(sessionId, { enableApiWrite: writeEnabled, executionStage: "push", allowUnisolatedCommit: allowUnisolated, allowFullCommit: allowFull });
       setExecutionSession(result.session);
     } catch (actionError) { setError(getErrorMessage(actionError)); } finally { setStageBusy(null); }
   };
@@ -283,7 +363,7 @@ export default function App() {
     const sessionId = executionSession?.id ?? cleanupPlan.sessionId;
     setStageBusy("push"); setError(null);
     try {
-      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "PUSHED", "push") : await api.push(sessionId, cleanupPlan.affectedDeviceGroups, { enableApiWrite: writeEnabled, executionStage });
+      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "PUSHED", "push") : await api.push(sessionId, cleanupPlan.affectedDeviceGroups, { enableApiWrite: writeEnabled, executionStage: "push" });
       setExecutionSession(result.session);
     } catch (actionError) { setError(getErrorMessage(actionError)); } finally { setStageBusy(null); }
   };
@@ -313,7 +393,8 @@ export default function App() {
     try {
       const result = demoMode && demoApi ? demoApi.demoSessions : await api.listSessions();
       setSessions(result);
-      if (selectedSession) setSelectedSession(result.find((session) => session.id === selectedSession.id) ?? null);
+      const current = selectedSession ? result.find((session) => session.id === selectedSession.id) : undefined;
+      setSelectedSession(current ?? result.find((session) => session.kind === "cleanup" && session.canRestore) ?? result[0] ?? null);
     } catch (historyError) { setError(getErrorMessage(historyError)); } finally { setMainBusy(null); }
   }
 
@@ -321,25 +402,71 @@ export default function App() {
     setRestoreQuery(session.id);
     setRestorePlan(null);
     setRestoreSession(null);
+    setRestoreCandidateJob(null);
     navigate("restore");
   };
 
-  const createRestorePlan = async (mode: "ip" | "session") => {
+  const openRestoreForTarget = (target: AddressAnalysis) => {
+    setRestoreQuery(target.ip);
+    setRestorePlan(null);
+    setRestoreSession(null);
+    setRestoreCandidateJob(null);
+    navigate("restore");
+  };
+
+  const openRestoreForTargets = (targets: string[]) => {
+    setRestoreQuery(targets.join("\n"));
+    setRestorePlan(null);
+    setRestoreSession(null);
+    setRestoreCandidateJob(null);
+    navigate("restore");
+  };
+
+  const downloadSessionBundle = async (session: ToolboxSession) => {
+    setMainBusy("history"); setError(null);
+    try {
+      const blob = demoMode && demoApi ? new Blob([JSON.stringify(session, null, 2)], { type: "application/json" }) : await api.downloadSessionArtifact(session.id, "bundle");
+      saveBlob(blob, `PanOS-Toolbox-${session.id}.${demoMode ? "json" : "zip"}`);
+    } catch (downloadError) { setError(getErrorMessage(downloadError)); } finally { setMainBusy(null); }
+  };
+
+  const reconcileExternalSession = async (session: ToolboxSession) => {
+    setMainBusy("history"); setError(null);
+    try {
+      const result = await api.reconcileExternalSession(session.id, "CLI");
+      setSelectedSession(result.session);
+      setSessions((current) => current.map((item) => item.id === result.session.id ? result.session : item));
+    } catch (reconcileError) { setError(getErrorMessage(reconcileError)); } finally { setMainBusy(null); }
+  };
+
+  const createRestorePlan = async (mode: "target" | "session") => {
     if (!connection) return;
     setRestoreBusy("plan"); setError(null);
     try {
-      const plan = demoMode && demoApi ? demoApi.demoRestorePlan : await api.createRestorePlan({ connectionId: connection.id, ip: mode === "ip" ? restoreQuery : undefined, sourceSessionId: mode === "session" ? restoreQuery : undefined });
+      const plan = demoMode && demoApi ? demoApi.demoRestorePlan : await api.createRestorePlan({ connectionId: connection.id, targets: mode === "target" ? parseNameInput(restoreQuery).names : undefined, sourceSessionId: mode === "session" ? restoreQuery.trim() : undefined });
       setRestorePlan(plan);
       setRestoreSession(null);
+      setRestoreCandidateJob(null);
     } catch (planError) { setError(getErrorMessage(planError)); } finally { setRestoreBusy(null); }
   };
 
   const applyRestoreCandidate = async () => {
     if (!restorePlan) return;
-    setRestoreBusy("candidate"); setError(null);
+    setRestoreBusy("candidate"); setRestoreCandidateJob(null); setError(null);
     try {
-      const result = demoMode && demoApi ? demoApi.demoAction(restorePlan.sessionId, "RESTORED", "restore") : await api.applyRestoreCandidate(restorePlan.id, { enableApiWrite: writeEnabled, executionStage });
-      setRestoreSession(result.session);
+      if (demoMode && demoApi) {
+        setRestoreSession(demoApi.demoAction(restorePlan.sessionId, "RESTORED", "restore").session);
+      } else {
+        let job = await api.startCandidateJob(restorePlan.sessionId, { enableApiWrite: writeEnabled, executionStage: "push" });
+        setRestoreCandidateJob(job);
+        while (job.state === "queued" || job.state === "running") {
+          await wait(350);
+          job = await api.getExecutionJob(job.id);
+          setRestoreCandidateJob(job);
+        }
+        if (job.state === "failed" || !job.session) throw new Error(job.error?.message || "Restore Candidate nie zwrócił poprawnego wyniku.");
+        setRestoreSession(job.session);
+      }
     } catch (restoreError) { setError(getErrorMessage(restoreError)); } finally { setRestoreBusy(null); }
   };
 
@@ -348,7 +475,7 @@ export default function App() {
     const sessionId = restoreSession?.id ?? restorePlan.sessionId;
     setRestoreBusy("commit"); setError(null);
     try {
-      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "COMMITTED", "commit") : await api.commit(sessionId, { enableApiWrite: writeEnabled, executionStage, allowUnisolatedCommit: allowUnisolated, allowFullCommit: allowFull });
+      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "COMMITTED", "commit") : await api.commit(sessionId, { enableApiWrite: writeEnabled, executionStage: "push", allowUnisolatedCommit: allowUnisolated, allowFullCommit: allowFull });
       setRestoreSession(result.session);
     } catch (restoreError) { setError(getErrorMessage(restoreError)); } finally { setRestoreBusy(null); }
   };
@@ -359,7 +486,7 @@ export default function App() {
     const groups = restorePlan.affectedDeviceGroups;
     setRestoreBusy("push"); setError(null);
     try {
-      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "PUSHED", "push") : await api.push(sessionId, groups, { enableApiWrite: writeEnabled, executionStage });
+      const result = demoMode && demoApi ? demoApi.demoAction(sessionId, "PUSHED", "push") : await api.push(sessionId, groups, { enableApiWrite: writeEnabled, executionStage: "push" });
       setRestoreSession(result.session);
     } catch (restoreError) { setError(getErrorMessage(restoreError)); } finally { setRestoreBusy(null); }
   };
@@ -375,12 +502,12 @@ export default function App() {
 
   let page;
   if (view === "connection") page = <ConnectionPage draft={draft} onDraftChange={setDraft} connection={connection} doctor={doctor} busy={mainBusy === "connect" || mainBusy === "doctor" ? mainBusy : null} error={error} onConnect={() => void connect()} onDoctor={() => void runDoctor()} onDemo={enableDemo} demoAvailable={import.meta.env.DEV} />;
-  else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} busy={mainBusy === "analyze"} progress={analysisJob} error={error} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} />;
+  else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} busy={mainBusy === "analyze"} progress={analysisJob} lookupResult={lookupResult} lookupBusy={lookupBusy} error={error} onLookup={(kind, names, deviceGroup) => void runLookup(kind, names, deviceGroup)} onAddLookupEntities={addLookupEntitiesToBatch} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "ad-groups") page = <AdGroupsPage draft={adGroupDraft} onDraftChange={setAdGroupDraft} result={adGroupResult} busy={mainBusy === "ad-groups"} error={error} onGenerate={() => void generateAdGroup()} />;
-  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionStage={executionStage} onExecutionStageChange={setExecutionStage} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onApplyCandidate={() => void applyCandidate()} onCommit={(unisolated, full) => void commitCleanup(unisolated, full)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
+  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} candidateJob={candidateJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
-  else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} />;
-  else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} apiMaxStage={executionStage} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={(unisolated, full) => void commitRestore(unisolated, full)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => navigate("connection")} />;
+  else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
+  else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} candidateJob={restoreCandidateJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => navigate("connection")} />;
 
   return (
     <Shell activeView={view} onViewChange={navigate} connection={connection} writeEnabled={writeEnabled} onWriteEnabledChange={setWriteEnabled} theme={theme} onThemeChange={() => setTheme((current) => current === "dark" ? "light" : "dark")} onDisconnect={() => void disconnect()} demoMode={demoMode}>

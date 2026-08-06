@@ -1,14 +1,17 @@
 # PanOS Toolbox
 
 Lokalne GUI i CLI do analizy, generowania oraz kontrolowanego wykonywania
-cleanup/restore na Panorama 10.2.16-h4. Serwer nasłuchuje wyłącznie na
+cleanup/restore na Panorama. Serwer nasłuchuje wyłącznie na
 `127.0.0.1`; frontend jest statyczny, więc Node.js nie jest wymagany na
 maszynie docelowej.
 
-Toolbox domyślnie jest **read-only/generator-only**. Zapis wymaga równocześnie:
+Toolbox domyślnie jest **READ ONLY/generator-only**. W GUI istnieje tylko jedna
+bramka: niebieski przełącznik **READ ONLY**, który po ostrzeżeniu zmienia się w
+zielony **WRITE**. Nie ma drugiego wyboru profilu ani „poziomu API”. Zapis
+wymaga równocześnie:
 
-1. odpowiedniego `api_max_stage` w CLI albo jawnego etapu wykonania w GUI;
-2. jawnego `--enable-api-write` w CLI albo nietrwałego przełącznika w GUI.
+1. odpowiedniego `api_max_stage` i `--enable-api-write` w CLI; albo
+2. nietrwałego przełącznika **WRITE** w lokalnym GUI.
 
 Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
 następnego automatycznie. Narzędzie nigdy automatycznie nie ładuje pełnego
@@ -27,7 +30,9 @@ Checkout utworzony przez `git clone` jest kodem źródłowym i celowo nie zawier
 Najprościej: wybierz w Eksploratorze **Wyodrębnij wszystkie**, wejdź do katalogu
 `PanOS-Toolbox` i uruchom dwuklikiem `start_toolbox.cmd`. Launcher sprawdza
 kompletność paczki i uruchamia Pythona z `-I -S`, więc globalny Flask nie jest
-używany.
+używany. Historia i backupy są zapisywane trwale obok programu w
+`backupy\sessions`; pozostają po zamknięciu aplikacji i można skopiować cały
+katalog razem z paczką.
 
 ```powershell
 Expand-Archive .\PanOS-Toolbox-YYYYMMDD-HHMMSS.zip -DestinationPath .\PanOS-Toolbox
@@ -49,11 +54,12 @@ Alternatywny launcher CMD oraz jego diagnostyka:
 Następnie otwórz `http://127.0.0.1:8765/`. Serwera nie uruchamiaj z bindem
 `0.0.0.0` ani na interfejsie sieciowym.
 
-`start_toolbox.ps1` przekazuje domyślny `panorama_host.txt` jako sufit profilu
-analitycznego i twardą granicę CLI. Brak pliku albo niedopasowanie hosta,
-użytkownika lub TLS ustawia profil połączenia na `read-only`. Lokalny GUI ma
-osobny, nietrwały grant wykonania opisany niżej; nadal wymaga zgodności hosta,
-aktywnego connection tokenu, poprawnego Origin i jawnego przełącznika zapisu.
+`start_toolbox.ps1` przekazuje domyślny `panorama_host.txt` jako profil dla CLI.
+Lokalny GUI używa jednego, nietrwałego grantu WRITE; nadal wymaga zgodności
+hosta, aktywnego connection tokenu, poprawnego Origin i jawnego potwierdzenia
+przełącznika zapisu. Połączenie wykonuje keygen, odczyt `show system info` i
+`change-summary` — nie pobiera wtedy pełnego configu. Wyświetlana wersja PAN-OS
+pochodzi bezpośrednio z `sw-version`, a nie z atrybutu pliku konfiguracji.
 
 Nie instaluj Flask ani innych modułów globalnie. Paczka release ma przypięty
 Flask i jego zależności w `backend/vendor`; tryb `-I -S` w poleceniu Doctor
@@ -79,13 +85,29 @@ z polityk oraz grup nadrzędnych, usuwa grupy opróżnione przez tę zmianę, a 
 końcu wskazaną grupę. Dynamic address group jest raportowana jako blokada do
 ręcznego review — nie jest automatycznie kasowana.
 
-Analiza w GUI działa jako asynchroniczny job i pokazuje procentowy postęp dla
-ICMP, pobierania running/candidate, grafu zależności, Last Hit oraz zapisu
-artefaktów. Jeśli podano dokładnie jeden cel, Toolbox korzysta ze świeżego
-snapshotu utworzonego podczas połączenia (maksymalnie 5 minut) i nie pobiera
-ponownie pełnego configu. Po analizie przy każdym bezpiecznym celu jest przycisk
-**Osobny plan**. Wydziela on cały powiązany komponent zależności do nowej sesji,
-dzięki czemu obiekt, grupa lub polityka mogą być wykonane oddzielnie od batcha.
+Ekran ma dwa tryby:
+
+- **Punktowo** — 1–20 dokładnych nazw lub IP. Toolbox wysyła wąskie zapytania
+  XPath do `shared` i wskazanych DG, nie pobiera całego `/config`, pokazuje
+  lokalizację, pola polityki, komentarz, Last Hit i zależności;
+- **Lista / batch** — buduje pełny graf zależności na snapshotach running i
+  candidate. Pierwszy batch pobiera je z Panoramy, a kolejne plany w tym samym
+  połączeniu korzystają ze świeżego cache przez maksymalnie 30 minut.
+
+Analiza batch działa jako asynchroniczny job i pokazuje procentowy postęp dla
+ICMP, pobierania/cache running i candidate, grafu zależności, Last Hit oraz
+zapisu artefaktów. Przed każdym realnym WRITE cache nie jest zaufany: Toolbox
+ponownie pobiera live running/candidate, sprawdza locki, fingerprinty i graf.
+Po analizie przy każdym bezpiecznym celu jest przycisk **Tylko ten**. Można też
+zaznaczyć dowolne wiersze albo konkretne zależności i przygotować nowy batch.
+Wydzielany jest cały atomowy komponent zależności, dzięki czemu obiekt, grupa
+lub polityka mogą być wykonane oddzielnie bez częściowego uszkodzenia grafu.
+
+Wiersze są rozwijane. Dla polityki pokazują DG, pre/post-rulebase, typ reguły,
+strefy from/to, source, destination, service, application, tagi, komentarz i
+rzeczywiste zależności obiektów/grup. Last Hit ma stałe kolory: zielony dla
+braku hitów/braku Last Hit lub wieku co najmniej pół roku, żółty od miesiąca,
+pomarańczowy od dwóch tygodni i czerwony poniżej dwóch tygodni.
 
 Application Override jest traktowany fail-closed. Bezpośrednio wskazana reguła
 oraz każdy obiekt/grupa zależna od takiej reguły są oznaczone
@@ -96,10 +118,12 @@ Kliknięcie **Analizuj zależności** niczego nie zapisuje. Wynikiem są: plan G
 komendy CLI, raport krótki, raport szczegółowy i manifest. Candidate, commit i
 push pozostają trzema osobnymi, jawnymi etapami.
 
-W sekcji **Wykonanie kontrolowane** GUI ma osobny, nietrwały wybór Candidate,
-Commit albo Push. Jest on niezależny od profilu wybranego przy połączeniu i
-działa wyłącznie razem z przełącznikiem **Zapis API** dla bieżącej sesji
-przeglądarki. CLI nadal respektuje `api_max_stage` profilu.
+W sekcji **Wykonanie kontrolowane** nie ma wyboru „poziomu API”. Zielony WRITE
+odblokowuje trzy osobne przyciski zgodnie ze stanem sesji. Candidate wykonuje
+po XML API każdą operację XPath osobno; pasek pokazuje backup, locki, live
+recheck, bieżącą encję, liczbę operacji i walidację. Toolbox nie wgrywa całego
+pliku konfiguracji. Commit ma osobne ostrzeżenie, a push mocniejsze ostrzeżenie
+z listą device groups. CLI nadal respektuje `api_max_stage` profilu.
 
 ## Generator Custom LDAP Group z Active Directory
 
@@ -167,10 +191,11 @@ api_max_stage=read-only
 - `api_max_stage`: `read-only`, `candidate`, `commit` albo `push`;
 - brak `api_max_stage` oznacza `read-only`.
 
-`api_max_stage` pozostaje twardą granicą CLI. Lokalny GUI może wydać osobny,
-godzinny lease wykonania dopiero po jednoczesnym włączeniu **Zapis API** i
-wybraniu jawnego etapu w ekranie planu; lease jest przechowywany wyłącznie w
-pamięci i jest związany z hostem bieżącego połączenia.
+`api_max_stage` pozostaje twardą granicą CLI. W lokalnym GUI zastępuje ją jedna
+świadoma bramka **READ ONLY / WRITE**. Krótki lease wykonania jest tworzony dla
+konkretnego żądania dopiero po potwierdzeniu WRITE, jest przechowywany wyłącznie
+w pamięci i pozostaje związany z hostem bieżącego połączenia. Po odświeżeniu,
+rozłączeniu albo restarcie aplikacji GUI wraca do READ ONLY.
 
 Kompatybilność: jeśli w starym profilu nie ma `verify_ssl`, Toolbox zachowuje
 historyczne znaczenie `ssl` jako przełącznika weryfikacji certyfikatu i nadal
@@ -208,7 +233,8 @@ Full commit jest osobnym, najwyższym ryzykiem:
 python .\panos-toolbox.py session commit --session SESSION_ID --enable-api-write --full --allow-full-commit
 ```
 
-Emergency Restore można wyszukać po IP albo jawnej sesji:
+Emergency Restore można przygotować po IP, identyfikatorze celu albo jawnej
+sesji. GUI pozwala wybrać ostatnią stabilną sesję, kilka celów lub całą sesję:
 
 ```powershell
 python .\panos-toolbox.py restore plan --ip 10.0.0.10
@@ -217,8 +243,9 @@ python .\panos-toolbox.py restore apply --session RESTORE_SESSION_ID --enable-ap
 ```
 
 Restore candidate, commit restore i push restore pozostają trzema oddzielnymi
-akcjami. Konflikt jednej zależnej części pomija cały jej komponent, ale nie
-blokuje innych bezpiecznych komponentów.
+akcjami, a Restore Candidate ma taki sam postęp per XPath jak cleanup.
+Konflikt jednej zależnej części pomija cały jej komponent, ale nie blokuje
+innych bezpiecznych komponentów.
 
 Wyszukiwanie po IP obejmuje wszystkie faktycznie zastosowane sesje cleanup dla
 tego hosta i administratora. Toolbox kwalifikuje powtarzające się identyfikatory
@@ -250,6 +277,8 @@ raportu restore.
 - znany błąd joba commit pozostawia sesję w stanie zastosowanego candidate, a
   znany błąd push w `COMMITTED`, dzięki czemu etap można bezpiecznie ponowić;
 - apply zapisuje snapshoty, backupy encji, manifest i hash-chain journal;
+- nazwa snapshotu zapisywanego na serwerze ma najwyżej 32 znaki; backend
+  sprawdza limit przed wywołaniem PAN-OS;
 - candidate apply, commit i push są serializowane jednym międzyprocesowym
   mutexem per Panorama; restore ponownie sprawdza watermark historii pod tym
   mutexem i pod config lockami;
@@ -261,16 +290,24 @@ raportu restore.
 - push używa rozwiniętego zakresu dotkniętych device groups i nie obejmuje
   template changes.
 
+Jeżeli operator wykonał wygenerowane komendy poza Toolboxem, samo wygenerowanie
+pliku nie jest traktowane jako wykonanie. W Historii użyj **Zweryfikuj wykonanie
+CLI/API**. Toolbox pobierze live running i candidate, sprawdzi postcondition
+każdej operacji oraz pozycję polityk i dopiero przy pełnej zgodności oznaczy
+sesję jako `CANDIDATE_APPLIED` albo `COMMITTED`, udostępniając ją dla Restore.
+
 ## Sesje i backupy
 
-Domyślna lokalizacja:
+Paczka portable uruchamiana launcherem zapisuje sesje w:
 
 ```text
-%LOCALAPPDATA%\PanOSToolbox\sessions\session-...
+<katalog PanOS-Toolbox>\backupy\sessions\session-...
 ```
 
-Katalog otrzymuje ACL bieżącego użytkownika. Dane są plaintext, mają sumy
-SHA256 i nie są automatycznie kasowane. Sesja zawiera między innymi:
+Jawne uruchomienie CLI bez `--session-dir` nadal używa lokalizacji profilu
+użytkownika. Dane są plaintext, mają sumy SHA256 i nie są automatycznie
+kasowane. GUI pozwala pobrać integralnie zweryfikowany ZIP całej sesji. Sesja
+zawiera między innymi:
 
 - `plan_running.xml`, `plan_candidate.xml`;
 - snapshoty `pre_*` i `post_*` dla wykonanych etapów;

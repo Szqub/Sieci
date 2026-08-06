@@ -174,8 +174,27 @@ def _last_hit_summary(
     _legacy_root()
     from panorama_cleanup.hitcounts import collect_rule_hit_counts  # type: ignore[import-not-found]
 
+    # A policy can remain in place while only one source/destination member is
+    # detached.  It is still relevant to the operator and therefore needs a
+    # Last Hit observation.  Direct policy lookups (including a blocked
+    # Application Override) also need to be represented even when the planner
+    # deliberately produced no mutation for them.
+    relevant_rules = set(plan_result.plan.deleted_rules)
+    relevant_rules.update(key for key, _field in plan_result.plan.rule_field_removals)
+    for discovered in plan_result.discovery.values():
+        for found in discovered.get("matches") or ():
+            if found.get("entity_type") != "policy":
+                continue
+            relevant_rules.update(
+                key
+                for key in plan_result.model.rules
+                if key.location == found.get("location")
+                and key.rulebase == found.get("rulebase")
+                and key.policy_type == found.get("policy_type")
+                and key.name == found.get("name")
+            )
     results = collect_rule_hit_counts(
-        reader, plan_result.plan.deleted_rules, recent_days=recent_days
+        reader, relevant_rules, recent_days=recent_days
     )
     records = []
     for key, value in sorted(results.items()):
@@ -230,7 +249,243 @@ def _cleanup_inventory(
         for key in result.model.addresses
         if (key.location, key.name) in selected_object_identities
     )
+    selected_group_identities = {
+        (str(found.get("location")), str(found.get("name")))
+        for discovered in result.discovery.values()
+        if discovered.get("kind") == "address-group"
+        for found in discovered.get("matches") or ()
+        if found.get("entity_type") == "address-group"
+    }
+    keys.update(
+        key
+        for key in result.model.static_groups
+        if (key.location, key.name) in selected_group_identities
+    )
     dependencies = dependency_inventories(result.model, keys)
+
+    def member_values(entry: ET.Element, field: str) -> list[str]:
+        return [
+            (node.text or "").strip()
+            for node in entry.findall(f"./{field}/member")
+            if (node.text or "").strip()
+        ]
+
+    def join_members(entry: ET.Element, field: str) -> str:
+        values = member_values(entry, field)
+        return ", ".join(values) if values else "—"
+
+    def inbound_dependencies(key: Any) -> list[dict[str, Any]]:
+        groups, rules, _warnings = dependencies.get(key, (set(), set(), []))
+        records = [
+            {
+                "id": f"group:{item.location}:{item.name}",
+                "type": "address-group",
+                "name": item.name,
+                "scope": item.location,
+                "relation": "member",
+                "path": result.model.static_groups[item].xpath,
+                "read_only": False,
+            }
+            for item in sorted(groups)
+        ]
+        records.extend(
+            {
+                "id": f"policy:{item.location}:{item.rulebase}:{item.policy_type}:{item.name}",
+                "type": "policy",
+                "name": item.name,
+                "scope": item.location,
+                "rulebase": item.rulebase,
+                "policy_type": item.policy_type,
+                "relation": "uses-object-or-group",
+                "path": result.model.rules[item].xpath,
+                "read_only": item.policy_type == "application-override",
+            }
+            for item in sorted(rules)
+        )
+        return records
+
+    def entity_details(discovered: dict[str, Any]) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for found in discovered.get("matches") or ():
+            location = str(found.get("location") or "unknown")
+            name = str(found.get("name") or "unknown")
+            entity_type = str(found.get("entity_type") or "unknown")
+            if entity_type == "address":
+                key = next(
+                    (key for key in result.model.addresses if key.location == location and key.name == name),
+                    None,
+                )
+                if key is None:
+                    continue
+                address = result.model.addresses[key]
+                records.append(
+                    {
+                        "id": f"address:{location}:{name}",
+                        "type": "address",
+                        "name": name,
+                        "scope": location,
+                        "path": address.xpath,
+                        "read_only": False,
+                        "fields": [
+                            {"k": "Typ", "v": address.object_type},
+                            {"k": "Wartość", "v": address.raw_value},
+                            {"k": "Tagi", "v": ", ".join(address.tags) or "—"},
+                        ],
+                        "dependencies": inbound_dependencies(key),
+                    }
+                )
+                continue
+            if entity_type in {"address-group", "dynamic-address-group"}:
+                static_key = next(
+                    (key for key in result.model.static_groups if key.location == location and key.name == name),
+                    None,
+                )
+                dynamic_key = next(
+                    (key for key in result.model.dynamic_groups if key.location == location and key.name == name),
+                    None,
+                )
+                if static_key is not None:
+                    group = result.model.static_groups[static_key]
+                    outbound = []
+                    for reference in result.model.group_references.get(static_key, ()):
+                        outbound.append(
+                            {
+                                "id": f"member:{location}:{name}:{reference.referenced_name}",
+                                "type": (
+                                    "address-group"
+                                    if reference.resolved_kind == "static-group"
+                                    else "address"
+                                    if reference.resolved_kind == "address"
+                                    else reference.resolved_kind
+                                ),
+                                "name": reference.referenced_name,
+                                "scope": (
+                                    reference.resolved_key.location
+                                    if reference.resolved_key is not None
+                                    else location
+                                ),
+                                "relation": "contains",
+                                "path": reference.configuration_path,
+                                "read_only": not reference.supported_for_automatic_modification,
+                            }
+                        )
+                    records.append(
+                        {
+                            "id": f"address-group:{location}:{name}",
+                            "type": "address-group",
+                            "name": name,
+                            "scope": location,
+                            "path": group.xpath,
+                            "read_only": False,
+                            "fields": [
+                                {"k": "Typ", "v": "static"},
+                                {"k": "Członkowie", "v": ", ".join(group.members) or "—"},
+                            ],
+                            "dependencies": [*outbound, *inbound_dependencies(static_key)],
+                        }
+                    )
+                elif dynamic_key is not None:
+                    group = result.model.dynamic_groups[dynamic_key]
+                    records.append(
+                        {
+                            "id": f"address-group:{location}:{name}",
+                            "type": "address-group",
+                            "name": name,
+                            "scope": location,
+                            "path": group.xpath,
+                            "read_only": True,
+                            "blocked_reason": "Dynamic Address Group wymaga ręcznego review.",
+                            "fields": [
+                                {"k": "Typ", "v": "dynamic"},
+                                {"k": "Filtr", "v": group.filter_text or "—"},
+                                {"k": "Tagi", "v": ", ".join(group.tags) or "—"},
+                            ],
+                            "dependencies": [],
+                        }
+                    )
+                continue
+            if entity_type == "policy":
+                key = next(
+                    (
+                        key
+                        for key in result.model.rules
+                        if key.location == location
+                        and key.rulebase == found.get("rulebase")
+                        and key.policy_type == found.get("policy_type")
+                        and key.name == name
+                    ),
+                    None,
+                )
+                if key is None:
+                    continue
+                rule = result.model.rules[key]
+                entry = ET.fromstring(rule.xml)
+                outbound = []
+                for reference in result.model.rule_references.get(key, ()):
+                    outbound.append(
+                        {
+                            "id": f"reference:{location}:{key.rulebase}:{key.policy_type}:{name}:{reference.field}:{reference.referenced_name}",
+                            "type": (
+                                "address-group"
+                                if reference.resolved_kind == "static-group"
+                                else "address"
+                                if reference.resolved_kind == "address"
+                                else reference.resolved_kind
+                            ),
+                            "name": reference.referenced_name,
+                            "scope": (
+                                reference.resolved_key.location
+                                if reference.resolved_key is not None
+                                else location
+                            ),
+                            "relation": reference.field,
+                            "path": reference.configuration_path,
+                            "read_only": not reference.supported_for_automatic_modification,
+                        }
+                    )
+                fields = [
+                    {"k": "Device group", "v": location},
+                    {"k": "Rulebase", "v": key.rulebase},
+                    {"k": "Typ polityki", "v": key.policy_type},
+                    {"k": "From / strefa", "v": join_members(entry, "from")},
+                    {"k": "To / strefa", "v": join_members(entry, "to")},
+                    {"k": "Source", "v": join_members(entry, "source")},
+                    {"k": "Destination", "v": join_members(entry, "destination")},
+                    {"k": "Service", "v": join_members(entry, "service")},
+                    {"k": "Application", "v": join_members(entry, "application")},
+                    {"k": "Tagi", "v": join_members(entry, "tag")},
+                    {"k": "Action", "v": (entry.findtext("./action") or "—").strip()},
+                    {
+                        "k": "Komentarz",
+                        "v": (
+                            entry.findtext("./description")
+                            or entry.findtext("./comments")
+                            or entry.findtext("./audit-comment")
+                            or "—"
+                        ).strip(),
+                    },
+                ]
+                read_only = key.policy_type == "application-override"
+                records.append(
+                    {
+                        "id": f"policy:{location}:{key.rulebase}:{key.policy_type}:{name}",
+                        "type": "policy",
+                        "name": name,
+                        "scope": location,
+                        "rulebase": key.rulebase,
+                        "policy_type": key.policy_type,
+                        "path": rule.xpath,
+                        "read_only": read_only,
+                        "blocked_reason": (
+                            "Application Override jest read-only w automatycznym cleanupie."
+                            if read_only
+                            else None
+                        ),
+                        "fields": fields,
+                        "dependencies": outbound,
+                    }
+                )
+        return records
     for target in targets:
         discovered = result.discovery.get(target) or {}
         inventory[target].update(
@@ -239,6 +494,7 @@ def _cleanup_inventory(
                 "label": discovered.get("label", target),
                 "status": discovered.get("status", "not-found"),
                 "matches": list(discovered.get("matches") or ()),
+                "entities": entity_details(discovered),
             }
         )
         match = result.matches.get(target)
@@ -424,7 +680,6 @@ def plan_cleanup_session(
     policy_names = normalize_names(policies, label="polityki")
     if not (ips or object_names or group_names or policy_names):
         raise InputError("Nie podano żadnego IP, obiektu, grupy ani polityki.")
-    single_target = len(ips) + len(object_names) + len(group_names) + len(policy_names) == 1
     progress(8, "Kontrola ICMP")
     pings = (
         ping_ips(ips, bypass=no_ping, timeout_ms=ping_timeout_ms, workers=ping_workers)
@@ -434,23 +689,24 @@ def plan_cleanup_session(
     eligible = tuple(
         ip for ip, result in pings.items() if result.status in {"NO_REPLY", "BYPASSED"}
     )
-    fetch_config = (
-        reader.fetch_config_cached
-        if single_target and hasattr(reader, "fetch_config_cached")
-        else reader.fetch_config
-    )
+    # A complete snapshot is expensive on large Panoramas.  Reuse it for
+    # subsequent read-only plans in the same in-memory connection.  Candidate
+    # execution never trusts this cache: engine.apply_candidate refreshes live
+    # running/candidate, checks locks and revalidates every touched XPath.
+    if hasattr(reader, "fetch_config_cached"):
+        fetch_config = lambda kind: reader.fetch_config_cached(  # noqa: E731
+            kind, max_age_seconds=1800.0
+        )
+    else:
+        fetch_config = reader.fetch_config
     progress(
         15,
-        "Szybkie wyszukiwanie pojedynczego celu w świeżym cache"
-        if single_target
-        else "Pobieranie running config z Panoramy",
+        "Odczyt running config (świeży cache sesji lub Panorama)",
     )
     running = fetch_config("running")
     progress(
         45,
-        "Sprawdzanie candidate dla pojedynczego celu"
-        if single_target
-        else "Pobrano running config; pobieranie candidate",
+        "Odczyt candidate (świeży cache sesji lub Panorama)",
     )
     candidate = fetch_config("candidate")
     progress(65, "Pobrano candidate; porównywanie konfiguracji")
@@ -1008,10 +1264,22 @@ def plan_restore_session(
     *,
     source_session_id: Optional[str] = None,
     ip: Optional[str] = None,
+    target: Optional[str] = None,
+    targets: Iterable[str] = (),
 ) -> dict[str, Any]:
-    if bool(source_session_id) == bool(ip):
-        raise InputError("Restore plan wymaga dokładnie --source-session albo --ip.")
-    normalized = str(ipaddress.ip_address(ip)) if ip else None
+    if target is not None and not isinstance(target, str):
+        raise InputError("Identyfikator celu restore musi być tekstem.")
+    normalized_targets = tuple(
+        dict.fromkeys(str(value).strip() for value in targets if str(value).strip())
+    )
+    supplied = sum(
+        bool(value) for value in (source_session_id, ip, target, normalized_targets)
+    )
+    if supplied != 1:
+        raise InputError(
+            "Restore plan wymaga dokładnie source-session, IP albo identyfikatora celu."
+        )
+    normalized = str(ipaddress.ip_address(ip)) if ip else (target or "").strip() or None
     _guard_unknown_restore_source(store, reader)
     history = store.iter_applied_cleanup_history(
         reader.profile.host, reader.profile.username
@@ -1031,6 +1299,7 @@ def plan_restore_session(
         selected = select_history(
             records,
             ip=normalized,
+            targets=normalized_targets,
             source_session_id=source_session_id,
             dependency_owner_sets=dependency_graph.owner_sets,
         )

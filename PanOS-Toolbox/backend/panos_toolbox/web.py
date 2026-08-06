@@ -9,14 +9,19 @@ import threading
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
 
 from .ad_groups import generate_ad_group_definition
 from .client import PanoramaReadClient
 from .diffing import compare_configs
 from .doctor import run_doctor
-from .engine import apply_candidate, commit_session, push_session
+from .engine import (
+    apply_candidate,
+    commit_session,
+    push_session,
+    reconcile_external_execution,
+)
 from .errors import (
     CapabilityError,
     ConflictError,
@@ -27,6 +32,7 @@ from .errors import (
     ToolboxError,
 )
 from .models import ApiStage, PatchSet, SessionState
+from .lookup import lookup_exact
 from .profile import PanoramaProfile, load_profile, normalize_host
 from .service import (
     make_writer,
@@ -134,6 +140,29 @@ def _wire_session(store: SessionStore, session_id: str) -> dict[str, Any]:
                 ),
             }
         )
+    input_targets = manifest.get("input_targets") or {}
+    targets = list(input_targets.get("ordered") or manifest.get("targets") or ())
+    mutations = {mutation.mutation_id: mutation for mutation in patch.mutations}
+    backup_items = []
+    for record in manifest.get("entity_backups") or ():
+        mutation = mutations.get(str(record.get("mutation_id")))
+        backup_items.append(
+            {
+                "mutationId": record.get("mutation_id"),
+                "entityType": record.get("entity_type"),
+                "entityName": record.get("entity_key"),
+                "file": record.get("file"),
+                "sha256": record.get("sha256"),
+                "targets": list(mutation.causes) if mutation is not None else [],
+                "componentId": mutation.component_id if mutation is not None else None,
+            }
+        )
+    stable_restore_states = {
+        SessionState.CANDIDATE_APPLIED.value,
+        SessionState.PARTIAL.value,
+        SessionState.COMMITTED.value,
+        SessionState.PUSHED.value,
+    }
     return {
         "id": session_id,
         "kind": manifest["operation_kind"],
@@ -142,12 +171,30 @@ def _wire_session(store: SessionStore, session_id: str) -> dict[str, Any]:
         "updatedAt": manifest["updated_utc"],
         "operator": manifest["profile"]["username"],
         "panoramaHost": manifest["profile"]["host"],
-        "itemCount": len(manifest.get("targets") or ()),
+        "itemCount": len(targets),
+        "targets": targets,
+        "backupCount": len(backup_items),
+        "backupItems": backup_items,
+        "canRestore": (
+            manifest["operation_kind"] == "cleanup"
+            and manifest["state"] in stable_restore_states
+        ),
+        "canReconcileExternal": (
+            manifest["operation_kind"] == "cleanup"
+            and manifest["state"]
+            in {SessionState.PLANNED.value, SessionState.FAILED.value}
+            and bool(patch.mutations)
+        ),
+        "executionSource": (manifest.get("external_execution") or {}).get(
+            "source", "GUI"
+        ),
         "affectedDeviceGroups": manifest.get("affected_device_groups") or [],
         "sourceSessionId": patch.source_session_id,
         "sourceSessionIds": list(patch.source_session_ids),
         "description": (
-            "Emergency Restore" if manifest["operation_kind"] == "restore" else "Cleanup adresów"
+            "Emergency Restore"
+            if manifest["operation_kind"] == "restore"
+            else "Cleanup Panorama"
         ),
         "jobs": jobs,
     }
@@ -171,6 +218,84 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
         rule = record["rule"]
         key = f"{rule['location']}/{rule['rulebase']}/{rule['policy_type']}/{rule['name']}"
         rule_hits[key] = record
+    backup_by_mutation = {
+        str(record.get("mutation_id")): record
+        for record in manifest.get("entity_backups") or ()
+    }
+
+    def hit_for(
+        scope: str,
+        rulebase: Optional[str],
+        policy_type: Optional[str],
+        name: str,
+    ) -> Optional[dict[str, Any]]:
+        if not rulebase or not policy_type:
+            return None
+        return rule_hits.get(f"{scope}/{rulebase}/{policy_type}/{name}")
+
+    def wire_dependency(record: dict[str, Any]) -> dict[str, Any]:
+        dependency_type = str(record.get("type") or "unknown")
+        scope = str(record.get("scope") or "unknown")
+        rulebase = record.get("rulebase")
+        policy_type = record.get("policy_type")
+        name = str(record.get("name") or "unknown")
+        hit = (
+            hit_for(scope, str(rulebase), str(policy_type), name)
+            if dependency_type == "policy"
+            else None
+        )
+        return {
+            "id": str(record.get("id") or f"dependency:{scope}:{name}"),
+            "type": dependency_type,
+            "name": name,
+            "scope": scope,
+            "deviceGroup": scope,
+            "rulebase": rulebase,
+            "policyType": policy_type,
+            "relation": str(record.get("relation") or "dependency"),
+            "field": str(record.get("relation") or "dependency"),
+            "path": str(record.get("path") or ""),
+            "readOnly": bool(record.get("read_only")),
+            "hitCount": (hit or {}).get("hit_count"),
+            "lastHit": (hit or {}).get("last_hit_utc"),
+            "lastHitStatus": (hit or {}).get("status"),
+            "lastHitAgeDays": (hit or {}).get("age_days"),
+            "lastHitDetail": (hit or {}).get("detail"),
+        }
+
+    def wire_entity(record: dict[str, Any]) -> dict[str, Any]:
+        scope = str(record.get("scope") or "unknown")
+        rulebase = record.get("rulebase")
+        policy_type = record.get("policy_type")
+        name = str(record.get("name") or "unknown")
+        hit = (
+            hit_for(scope, str(rulebase), str(policy_type), name)
+            if record.get("type") == "policy"
+            else None
+        )
+        dependencies = [
+            wire_dependency(dependency)
+            for dependency in record.get("dependencies") or ()
+        ]
+        return {
+            "id": str(record.get("id") or f"entity:{scope}:{name}"),
+            "type": str(record.get("type") or "unknown"),
+            "name": name,
+            "scope": scope,
+            "rulebase": rulebase,
+            "policyType": policy_type,
+            "path": str(record.get("path") or ""),
+            "readOnly": bool(record.get("read_only")),
+            "blockedReason": record.get("blocked_reason"),
+            "fields": list(record.get("fields") or ()),
+            "dependencies": dependencies,
+            "hitCount": (hit or {}).get("hit_count"),
+            "lastHit": (hit or {}).get("last_hit_utc"),
+            "lastHitStatus": (hit or {}).get("status"),
+            "lastHitAgeDays": (hit or {}).get("age_days"),
+            "lastHitDetail": (hit or {}).get("detail"),
+        }
+
     addresses = []
     for target in ordered_targets:
         ping = ping_by_ip.get(target, {"status": "BYPASSED", "detail": "ICMP nie dotyczy"})
@@ -196,92 +321,39 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
             else "not-found"
         )
         related = [mutation for mutation in patch.mutations if target in mutation.causes]
-        references = []
+        entities = [wire_entity(record) for record in inventory.get("entities") or ()]
+        reference_by_id: dict[str, dict[str, Any]] = {}
+        for entity in entities:
+            for dependency in entity["dependencies"]:
+                reference_by_id.setdefault(dependency["id"], dependency)
+        references = list(reference_by_id.values())
         object_names: list[str] = []
         for object_record in inventory.get("objects") or []:
             location = str(object_record.get("location") or "unknown")
             object_name = str(object_record.get("name") or "unknown")
             object_names.append(f"{location}/{object_name}")
-            for group in object_record.get("groups") or []:
-                group_location = str(group.get("location") or location)
-                group_name = str(group.get("name") or "unknown")
-                references.append(
-                    {
-                        "id": f"inventory-group-{target}-{len(references) + 1}",
-                        "scope": group_location,
-                        "deviceGroup": group_location,
-                        "rulebase": "shared" if group_location == "shared" else "local",
-                        "policyType": "group",
-                        "name": group_name,
-                        "field": "static",
-                        "path": f"{group_location}/address-group/{group_name}",
-                    }
-                )
-            for policy in object_record.get("policies") or []:
-                policy_location = str(policy.get("location") or location)
-                rulebase_value = str(policy.get("rulebase") or "")
-                references.append(
-                    {
-                        "id": f"inventory-policy-{target}-{len(references) + 1}",
-                        "scope": policy_location,
-                        "deviceGroup": policy_location,
-                        "rulebase": (
-                            "pre"
-                            if rulebase_value == "pre-rulebase"
-                            else "post"
-                            if rulebase_value == "post-rulebase"
-                            else "shared"
-                            if policy_location == "shared"
-                            else "local"
-                        ),
-                        "policyType": policy.get("policy_type") or "security",
-                        "name": policy.get("name") or "unknown",
-                        "field": "dependency",
-                        "path": (
-                            f"{policy_location}/{rulebase_value}/"
-                            f"{policy.get('policy_type')}/{policy.get('name')}"
-                        ),
-                    }
-                )
-        for mutation in related:
-            scope, dg = _scope_for_mutation(mutation)
-            policy_type = (
-                "security"
-                if "/security/" in mutation.target_xpath
-                else "nat"
-                if "/nat/" in mutation.target_xpath
-                else "application-override"
-                if "/application-override/" in mutation.target_xpath
-                else "group"
-                if "group" in mutation.entity_type
-                else "object"
+        direct_policy_hits = [
+            hit_for(
+                str(entity.get("scope") or ""),
+                entity.get("rulebase"),
+                entity.get("policyType"),
+                str(entity.get("name") or ""),
             )
-            rulebase = (
-                "pre"
-                if "/pre-rulebase/" in mutation.target_xpath
-                else "post"
-                if "/post-rulebase/" in mutation.target_xpath
-                else "shared"
-                if scope == "shared"
-                else "local"
+            for entity in entities
+            if entity.get("type") == "policy"
+        ]
+        dependency_policy_hits = [
+            hit_for(
+                str(reference.get("scope") or ""),
+                reference.get("rulebase"),
+                reference.get("policyType"),
+                str(reference.get("name") or ""),
             )
-            references.append(
-                {
-                    "id": mutation.mutation_id,
-                    "scope": scope,
-                    "deviceGroup": dg,
-                    "rulebase": rulebase,
-                    "policyType": policy_type,
-                    "name": mutation.entity_key,
-                    "field": mutation.entity_type,
-                    "path": mutation.target_xpath,
-                }
-            )
+            for reference in references
+            if reference.get("type") == "policy"
+        ]
         related_hit_records = [
-            value
-            for mutation in related
-            for key, value in rule_hits.items()
-            if mutation.entity_key == key
+            value for value in [*direct_policy_hits, *dependency_policy_hits] if value
         ]
         hit_priority = {
             "RECENT": 7,
@@ -316,10 +388,26 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
                 "icmpDetail": ping.get("detail"),
                 "decision": decision,
                 "lastHit": (last_hit_record or {}).get("last_hit_utc"),
+                "hitCount": (last_hit_record or {}).get("hit_count"),
+                "lastHitAgeDays": (last_hit_record or {}).get("age_days"),
                 "lastHitStatus": (last_hit_record or {}).get("status"),
                 "lastHitDetail": (last_hit_record or {}).get("detail"),
                 "recentLastHit": (last_hit_record or {}).get("status") == "RECENT",
                 "componentId": related[0].component_id if related else None,
+                "componentIds": sorted({mutation.component_id for mutation in related}),
+                "operationIds": [mutation.mutation_id for mutation in related],
+                "entities": entities,
+                "backupFiles": [
+                    {
+                        "mutationId": mutation.mutation_id,
+                        "entityType": backup_by_mutation[mutation.mutation_id].get("entity_type"),
+                        "entityName": backup_by_mutation[mutation.mutation_id].get("entity_key"),
+                        "file": backup_by_mutation[mutation.mutation_id].get("file"),
+                        "sha256": backup_by_mutation[mutation.mutation_id].get("sha256"),
+                    }
+                    for mutation in related
+                    if mutation.mutation_id in backup_by_mutation
+                ],
                 "references": references,
             }
         )
@@ -340,6 +428,145 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
         "addresses": addresses,
         "operations": _wire_operations(patch),
     }
+
+
+def _create_cleanup_child_plan(
+    store: SessionStore,
+    parent_id: str,
+    client: PanoramaReadClient,
+    selected: Iterable[Any],
+    *,
+    note: str,
+    chosen_targets: Iterable[str],
+) -> str:
+    parent_manifest = store.load_manifest(parent_id)
+    if parent_manifest["state"] != SessionState.PLANNED.value:
+        raise InputError("Podzbiór można wydzielić tylko z planu PLANNED.")
+    parent_patch = store.load_patchset(parent_id)
+    if (
+        parent_patch.panorama_host != client.profile.host
+        or parent_patch.panorama_username != client.profile.username
+    ):
+        raise InputError("Plan nadrzędny należy do innego hosta lub operatora.")
+    mutations = tuple(selected)
+    if not mutations:
+        raise InputError("Wybrany podzbiór nie zawiera bezpiecznych mutacji.")
+    selected_components = {mutation.component_id for mutation in mutations}
+    complete = tuple(
+        mutation
+        for mutation in parent_patch.mutations
+        if mutation.component_id in selected_components
+    )
+    if len(complete) != len(mutations):
+        raise InputError(
+            "Podzbiór narusza atomowy komponent zależności; wybierz cały komponent."
+        )
+    component_targets = tuple(
+        sorted({cause for mutation in complete for cause in mutation.causes})
+    )
+    child_patch = PatchSet.new(
+        kind=parent_patch.kind,
+        panorama_host=parent_patch.panorama_host,
+        panorama_username=parent_patch.panorama_username,
+        mutations=complete,
+        targets=component_targets,
+        affected_device_groups=parent_patch.affected_device_groups,
+        warnings=(*parent_patch.warnings, note),
+    )
+    child_id = store.create(
+        child_patch,
+        client.profile,
+        planning_running=store.load_snapshot(parent_id, "plan_running"),
+        planning_candidate=store.load_snapshot(parent_id, "plan_candidate"),
+        diff_summary=parent_manifest.get("diff_summary") or {},
+    )
+    parent_inputs = parent_manifest.get("input_targets") or {}
+    parent_inventory = parent_manifest.get("inventory") or {}
+    parent_icmp = parent_manifest.get("icmp") or []
+    selected_entity_keys = {mutation.entity_key for mutation in complete}
+    parent_hit = parent_manifest.get("last_hit") or {}
+    hit_records = [
+        record
+        for record in parent_hit.get("records") or []
+        if "/".join(
+            str((record.get("rule") or {}).get(key, ""))
+            for key in ("location", "rulebase", "policy_type", "name")
+        )
+        in selected_entity_keys
+    ]
+    child_hit = {
+        **parent_hit,
+        "records": hit_records,
+        "review_count": sum(
+            str(record.get("status"))
+            in {"RECENT", "ERROR", "INVALID", "NOT_LATEST", "NOT_FOUND"}
+            for record in hit_records
+        ),
+        "recent_hit_count": sum(
+            str(record.get("status")) == "RECENT" for record in hit_records
+        ),
+    }
+
+    def enrich_child(manifest: dict[str, Any]) -> None:
+        manifest["parent_session_id"] = parent_id
+        manifest["selected_targets"] = list(dict.fromkeys(chosen_targets))
+        manifest["icmp"] = [
+            item for item in parent_icmp if item.get("ip") in component_targets
+        ]
+        manifest["last_hit"] = child_hit
+        manifest["input_targets"] = {
+            "ips": [item for item in parent_inputs.get("ips", []) if item in component_targets],
+            "address_objects": [
+                item
+                for item in parent_inputs.get("address_objects", [])
+                if f"object:{item}" in component_targets
+            ],
+            "address_groups": [
+                item
+                for item in parent_inputs.get("address_groups", [])
+                if f"group:{item}" in component_targets
+            ],
+            "policies": [
+                item
+                for item in parent_inputs.get("policies", [])
+                if f"policy:{item}" in component_targets
+            ],
+            "ordered": list(component_targets),
+        }
+        manifest["inventory"] = {
+            item: parent_inventory[item]
+            for item in component_targets
+            if item in parent_inventory
+        }
+
+    store.update(child_id, enrich_child)
+    operation_lines = [
+        json.dumps(operation, ensure_ascii=False, sort_keys=True)
+        for operation in _wire_operations(child_patch)
+    ]
+    store.write_artifact(
+        child_id,
+        "commands.txt",
+        "\n".join(operation_lines) + ("\n" if operation_lines else ""),
+        kind="api-operation-preview",
+    )
+    store.write_artifact(
+        child_id,
+        "raport_szczegolowy.txt",
+        "\n".join(
+            [
+                f"Plan podzbioru: {child_id}",
+                f"Plan nadrzędny: {parent_id}",
+                "Cele wybrane w GUI: " + ", ".join(chosen_targets),
+                "Powiązane cele atomowych komponentów: " + ", ".join(component_targets),
+                f"Komponenty: {len(selected_components)}",
+                f"Mutacje: {len(complete)}",
+            ]
+        )
+        + "\n",
+        kind="detailed-report",
+    )
+    return child_id
 
 
 def _wire_restore_plan(store: SessionStore, result: dict[str, Any]) -> dict[str, Any]:
@@ -452,31 +679,12 @@ def _profile_from_json(value: dict[str, Any]) -> PanoramaProfile:
 def _apply_profile_ceiling(
     requested: PanoramaProfile, ceiling: Optional[PanoramaProfile]
 ) -> tuple[PanoramaProfile, Optional[str]]:
-    if ceiling is None:
-        return (
-            replace(requested, api_max_stage=ApiStage.READ_ONLY),
-            "Brak lokalnego panorama_host.txt serwera; GUI ograniczono do read-only.",
-        )
-    identity_matches = (
-        requested.host == ceiling.host
-        and requested.username == ceiling.username
-        and requested.use_ssl == ceiling.use_ssl
-        and requested.verify_ssl == ceiling.verify_ssl
-    )
-    if not identity_matches:
-        return (
-            replace(requested, api_max_stage=ApiStage.READ_ONLY),
-            "Dane GUI nie odpowiadają lokalnemu profilowi serwera; zapis API wyłączono.",
-        )
-    effective = min(
-        (requested.api_max_stage, ceiling.api_max_stage), key=lambda stage: stage.rank
-    )
-    warning = None
-    if effective != requested.api_max_stage:
-        warning = (
-            f"Lokalny profil ograniczył żądany etap do {effective.value}."
-        )
-    return replace(requested, api_max_stage=effective), warning
+    # The localhost GUI has one volatile READ ONLY / WRITE switch.  A profile
+    # file may still provide defaults to the CLI, but it must not create a
+    # second, contradictory permission selector in the GUI.  Real mutations
+    # remain blocked by the per-request runtime gate in ``make_writer``.
+    del ceiling
+    return replace(requested, api_max_stage=ApiStage.PUSH), None
 
 
 def _json_bool(
@@ -505,11 +713,15 @@ def _contract() -> dict[str, Any]:
         "paths": {
             "POST /connections": "keygen and create memory-only connection",
             "DELETE /connections/current": "destroy current connection",
+            "GET|POST /lookup": "targeted exact lookup without full running config",
             "POST /ad-groups/generate": "validate local AD groups and build custom LDAP filters",
             "POST /cleanup/plans": "read snapshots, ICMP/last-hit, create PatchSet session",
             "POST /cleanup/analysis-jobs": "asynchronous cleanup plan with progress",
             "GET /cleanup/analysis-jobs/{id}": "poll analysis progress/result",
             "POST /cleanup/plans/{id}/components/{component}": "derive isolated component plan",
+            "POST /cleanup/plans/{id}/selection": "derive plan for selected target rows",
+            "POST /sessions/{id}/candidate-jobs": "path-by-path candidate write with progress",
+            "GET /execution-jobs/{id}": "poll candidate operation progress",
             "POST /sessions/{id}/candidate": "candidate write with ephemeral gate",
             "POST /sessions/{id}/commit": "sequential partial/full commit job",
             "POST /sessions/{id}/push": "one sequential specific-DG commit-all job",
@@ -517,6 +729,8 @@ def _contract() -> dict[str, Any]:
             "POST /audits": "read-only dependency audit",
             "GET /sessions": "session history",
             "GET /sessions/{id}": "integrity-checked manifest",
+            "POST /sessions/{id}/reconcile-external": "verify CLI/API post-state and admit restore history",
+            "GET /sessions/{id}/artifacts/bundle": "download complete session backup ZIP",
         },
     }
 
@@ -544,6 +758,8 @@ def create_app(
     connections = ConnectionRegistry()
     analysis_jobs: dict[str, dict[str, Any]] = {}
     analysis_jobs_lock = threading.Lock()
+    execution_jobs: dict[str, dict[str, Any]] = {}
+    execution_jobs_lock = threading.Lock()
 
     @app.before_request
     def localhost_boundary():
@@ -754,11 +970,25 @@ def create_app(
             "error": job.get("error"),
         }
 
+    def wire_execution_job(job: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": job["id"],
+            "sessionId": job["session_id"],
+            "kind": job["kind"],
+            "state": job["state"],
+            "progress": job["progress"],
+            "message": job["message"],
+            "current": job.get("current"),
+            "items": list(job.get("items") or ()),
+            "session": job.get("session"),
+            "error": job.get("error"),
+        }
+
     @app.get("/api/health")
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.3.0", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.4.0", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -825,10 +1055,27 @@ def create_app(
         try:
             client.authenticate(password)
             password = ""
-            running = client.fetch_config("running")
-            candidate = client.fetch_config("candidate")
+            system_info = client.system_info()
+            panorama_version = (
+                system_info.findtext(".//sw-version")
+                or system_info.findtext(".//version")
+                or "nieznana"
+            ).strip()
+            try:
+                summary = client.change_summary()
+                result_node = summary.find(".//result")
+                candidate_dirty = bool(
+                    result_node is not None
+                    and (
+                        list(result_node)
+                        or (result_node.text and result_node.text.strip())
+                    )
+                )
+                candidate_status = "dirty" if candidate_dirty else "clean"
+            except ToolboxError:
+                candidate_dirty = False
+                candidate_status = "unknown"
             token = connections.add(client)
-            diff = compare_configs(running, candidate, None)
         except Exception:
             client.close()
             raise
@@ -839,12 +1086,13 @@ def create_app(
                 "connectionToken": token,
                 "host": profile.host,
                 "username": profile.username,
-                "panorama_version": running.get("version") or "nieznana",
+                "panorama_version": panorama_version,
                 "api_max_stage": profile.api_max_stage.value,
                 "connected_at": __import__("datetime").datetime.now(
                     __import__("datetime").timezone.utc
                 ).isoformat(timespec="seconds"),
-                "candidate_dirty": bool(diff["semantic"]["has_changes"]),
+                "candidate_dirty": candidate_dirty,
+                "candidate_status": candidate_status,
                 "capability_warning": capability_warning,
                 "profile": {
                     "host": profile.host,
@@ -853,9 +1101,48 @@ def create_app(
                     "verifySsl": profile.verify_ssl,
                     "apiMaxStage": profile.api_max_stage.value,
                 },
-                "runningVersion": running.get("version"),
-                "candidateVersion": candidate.get("version"),
+                "systemMode": system_info.findtext(".//system-mode") or "unknown",
             }
+        )
+
+    @app.get("/api/v1/lookup")
+    @app.post("/api/v1/lookup")
+    def lookup_endpoint():
+        if request.method == "POST":
+            value = body()
+            kind = value.get("type")
+            names = value.get("names")
+            device_group = value.get("device_group", value.get("deviceGroup"))
+            recent_days = integer_field(
+                value,
+                "recent_days",
+                fallback_key="recentDays",
+                default=14,
+                minimum=1,
+                maximum=3650,
+            )
+        else:
+            kind = request.args.get("type")
+            names = [request.args.get("name", "")]
+            device_group = request.args.get("dg")
+            try:
+                recent_days = int(request.args.get("recent_days", "14"))
+            except ValueError as exc:
+                raise InputError("recent_days musi być liczbą całkowitą.") from exc
+        if not isinstance(kind, str):
+            raise InputError("Lookup wymaga pola type.")
+        if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
+            raise InputError("Lookup wymaga tablicy names.")
+        if device_group is not None and not isinstance(device_group, str):
+            raise InputError("device_group musi być tekstem.")
+        return jsonify(
+            lookup_exact(
+                reader(),
+                kind,
+                names,
+                device_group=device_group or None,
+                recent_days=recent_days,
+            )
         )
 
     @app.delete("/api/v1/connections/current")
@@ -973,15 +1260,7 @@ def create_app(
         if not isinstance(target, str) or not target.strip():
             raise InputError("Osobny plan wymaga dokładnego pola target.")
         target = target.strip()
-        parent_manifest = session_store.load_manifest(plan_id)
-        if parent_manifest["state"] != SessionState.PLANNED.value:
-            raise InputError("Osobny plan można wydzielić tylko z planu PLANNED.")
         parent_patch = session_store.load_patchset(plan_id)
-        if (
-            parent_patch.panorama_host != client.profile.host
-            or parent_patch.panorama_username != client.profile.username
-        ):
-            raise InputError("Plan nadrzędny należy do innego hosta lub operatora.")
         selected = tuple(
             mutation
             for mutation in parent_patch.mutations
@@ -989,111 +1268,52 @@ def create_app(
         )
         if not selected or not any(target in mutation.causes for mutation in selected):
             raise InputError("Cel nie należy do wskazanego komponentu planu.")
-        component_targets = tuple(
-            sorted({cause for mutation in selected for cause in mutation.causes})
+        child_id = _create_cleanup_child_plan(
+            session_store,
+            plan_id,
+            client,
+            selected,
+            note=f"Osobny plan wydzielony z {plan_id}; komponent {component_id}.",
+            chosen_targets=(target,),
         )
-        child_patch = PatchSet.new(
-            kind=parent_patch.kind,
-            panorama_host=parent_patch.panorama_host,
-            panorama_username=parent_patch.panorama_username,
-            mutations=selected,
-            targets=component_targets,
-            affected_device_groups=parent_patch.affected_device_groups,
-            warnings=(
-                *parent_patch.warnings,
-                f"Osobny plan wydzielony z {plan_id}; komponent {component_id}.",
-            ),
+        return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
+
+    @app.post("/api/v1/cleanup/plans/<plan_id>/selection")
+    def cleanup_selection_plan(plan_id: str):
+        value = body()
+        client = reader()
+        targets = string_list_field(value, "targets")
+        targets = list(dict.fromkeys(item.strip() for item in targets if item.strip()))
+        if not targets:
+            raise InputError("Zaznacz co najmniej jeden cel planu.")
+        parent_manifest = session_store.load_manifest(plan_id)
+        known_targets = set(
+            (parent_manifest.get("input_targets") or {}).get("ordered") or ()
         )
-        child_id = session_store.create(
-            child_patch,
-            client.profile,
-            planning_running=session_store.load_snapshot(plan_id, "plan_running"),
-            planning_candidate=session_store.load_snapshot(plan_id, "plan_candidate"),
-            diff_summary=parent_manifest.get("diff_summary") or {},
-        )
-        parent_inputs = parent_manifest.get("input_targets") or {}
-        parent_inventory = parent_manifest.get("inventory") or {}
-        parent_icmp = parent_manifest.get("icmp") or []
-        selected_entity_keys = {mutation.entity_key for mutation in selected}
-        parent_hit = parent_manifest.get("last_hit") or {}
-        hit_records = [
-            record
-            for record in parent_hit.get("records") or []
-            if "/".join(
-                str((record.get("rule") or {}).get(key, ""))
-                for key in ("location", "rulebase", "policy_type", "name")
-            )
-            in selected_entity_keys
-        ]
-        child_hit = {
-            **parent_hit,
-            "records": hit_records,
-            "review_count": sum(
-                str(record.get("status")) in {"RECENT", "ERROR", "INVALID", "NOT_LATEST", "NOT_FOUND"}
-                for record in hit_records
-            ),
-            "recent_hit_count": sum(
-                str(record.get("status")) == "RECENT" for record in hit_records
-            ),
+        unknown = sorted(set(targets) - known_targets)
+        if unknown:
+            raise InputError("Cele nie należą do planu: " + ", ".join(unknown[:10]))
+        parent_patch = session_store.load_patchset(plan_id)
+        selected_components = {
+            mutation.component_id
+            for mutation in parent_patch.mutations
+            if set(mutation.causes).intersection(targets)
         }
-
-        def enrich_child(manifest: dict[str, Any]) -> None:
-            manifest["parent_session_id"] = plan_id
-            manifest["icmp"] = [
-                item for item in parent_icmp if item.get("ip") in component_targets
-            ]
-            manifest["last_hit"] = child_hit
-            manifest["input_targets"] = {
-                "ips": [item for item in parent_inputs.get("ips", []) if item in component_targets],
-                "address_objects": [
-                    item
-                    for item in parent_inputs.get("address_objects", [])
-                    if f"object:{item}" in component_targets
-                ],
-                "address_groups": [
-                    item
-                    for item in parent_inputs.get("address_groups", [])
-                    if f"group:{item}" in component_targets
-                ],
-                "policies": [
-                    item
-                    for item in parent_inputs.get("policies", [])
-                    if f"policy:{item}" in component_targets
-                ],
-                "ordered": list(component_targets),
-            }
-            manifest["inventory"] = {
-                item: parent_inventory[item]
-                for item in component_targets
-                if item in parent_inventory
-            }
-
-        session_store.update(child_id, enrich_child)
-        operation_lines = [
-            json.dumps(operation, ensure_ascii=False, sort_keys=True)
-            for operation in _wire_operations(child_patch)
-        ]
-        session_store.write_artifact(
-            child_id,
-            "commands.txt",
-            "\n".join(operation_lines) + ("\n" if operation_lines else ""),
-            kind="api-operation-preview",
+        selected = tuple(
+            mutation
+            for mutation in parent_patch.mutations
+            if mutation.component_id in selected_components
         )
-        session_store.write_artifact(
-            child_id,
-            "raport_szczegolowy.txt",
-            "\n".join(
-                [
-                    f"Osobny plan: {child_id}",
-                    f"Plan nadrzędny: {plan_id}",
-                    f"Cel wybrany w GUI: {target}",
-                    f"Komponent: {component_id}",
-                    "Powiązane cele komponentu: " + ", ".join(component_targets),
-                    f"Mutacje: {len(selected)}",
-                ]
-            )
-            + "\n",
-            kind="detailed-report",
+        child_id = _create_cleanup_child_plan(
+            session_store,
+            plan_id,
+            client,
+            selected,
+            note=(
+                f"Plan zaznaczonego podzbioru z {plan_id}; wybrano "
+                f"{len(targets)} celów i {len(selected_components)} atomowych komponentów."
+            ),
+            chosen_targets=targets,
         )
         return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
 
@@ -1112,10 +1332,43 @@ def create_app(
         reader()
         return jsonify(_wire_session(session_store, session_id))
 
+    @app.post("/api/v1/sessions/<session_id>/reconcile-external")
+    def session_reconcile_external(session_id: str):
+        value = body()
+        source = value.get("source", "CLI")
+        if not isinstance(source, str):
+            raise InputError("Pole source musi być tekstem CLI albo API.")
+        state = reconcile_external_execution(
+            session_store,
+            session_id,
+            reader(),
+            source=source.strip().upper(),
+        )
+        return jsonify(
+            {
+                "session": _wire_session(session_store, session_id),
+                "message": (
+                    "Live Panorama potwierdziła wykonanie zewnętrzne; "
+                    f"sesja ma stan {state.value} i jest dostępna dla Restore."
+                ),
+            }
+        )
+
     @app.get("/api/v1/sessions/<session_id>/artifacts/<filename>")
     def artifact_get(session_id: str, filename: str):
         reader()
         manifest = session_store.load_manifest(session_id)
+        if filename == "bundle":
+            payload = session_store.bundle_bytes(session_id)
+            return Response(
+                payload,
+                content_type="application/zip",
+                headers={
+                    "Content-Disposition": (
+                        f'attachment; filename="PanOS-Toolbox-{session_id}.zip"'
+                    )
+                },
+            )
         artifact_files = {
             record.get("file") for record in manifest.get("artifacts", [])
         }
@@ -1188,6 +1441,126 @@ def create_app(
                 "message": f"Candidate zakończony stanem {result.state.value}.",
             }
         )
+
+    @app.post("/api/v1/sessions/<session_id>/candidate-jobs")
+    def session_candidate_job_start(session_id: str):
+        value = body()
+        token = request.headers.get("X-Toolbox-Session")
+        client = connections.get(token)
+        writer = make_writer(
+            client,
+            ApiStage.CANDIDATE,
+            enable_api_write=_json_bool(
+                value, "enable_api_write", fallback_key="enableApiWrite", default=False
+            ),
+            operator_authorized_stage=execution_stage(value),
+        )
+        # Validate the target before detaching work from the request context.
+        session_store.load_manifest(session_id)
+        with execution_jobs_lock:
+            active = next(
+                (
+                    job
+                    for job in execution_jobs.values()
+                    if job["session_id"] == session_id
+                    and job["state"] in {"queued", "running"}
+                ),
+                None,
+            )
+            if active is not None:
+                raise ConflictError(
+                    f"Sesja ma już aktywny zapis candidate: {active['id']}."
+                )
+            job_id = "candidate-" + secrets.token_hex(8)
+            job = {
+                "id": job_id,
+                "owner": token,
+                "session_id": session_id,
+                "kind": "candidate",
+                "state": "queued",
+                "progress": 0,
+                "message": "Oczekiwanie na bezpieczny zapis candidate",
+                "items": [],
+            }
+            execution_jobs[job_id] = job
+
+        def update(
+            progress: int, message: str, detail: Optional[dict[str, Any]]
+        ) -> None:
+            with execution_jobs_lock:
+                current = execution_jobs[job_id]
+                current.update(
+                    state="running",
+                    progress=max(0, min(100, int(progress))),
+                    message=message,
+                    current=detail,
+                )
+                if detail and detail.get("event") == "operation-ok":
+                    current.setdefault("items", []).append(dict(detail))
+
+        def worker() -> None:
+            try:
+                result = apply_candidate(
+                    session_store,
+                    session_id,
+                    client,
+                    writer,
+                    save_server_snapshot=_json_bool(
+                        value,
+                        "save_server_snapshot",
+                        fallback_key="saveServerSnapshot",
+                        default=True,
+                    ),
+                    acquire_locks=True,
+                    progress_callback=update,
+                )
+                with execution_jobs_lock:
+                    execution_jobs[job_id].update(
+                        state="success",
+                        progress=100,
+                        message=f"Candidate zakończony stanem {result.state.value}",
+                        session=_wire_session(session_store, session_id),
+                    )
+            except ToolboxError as exc:
+                with execution_jobs_lock:
+                    execution_jobs[job_id].update(
+                        state="failed",
+                        message="Zapis candidate został zatrzymany",
+                        error={"code": type(exc).__name__, "message": str(exc)},
+                    )
+            except Exception:
+                correlation_id = secrets.token_hex(8)
+                app.logger.exception(
+                    "Unhandled candidate job error correlation=%s", correlation_id
+                )
+                with execution_jobs_lock:
+                    execution_jobs[job_id].update(
+                        state="failed",
+                        message="Nieoczekiwany błąd zapisu candidate",
+                        error={
+                            "code": "InternalError",
+                            "message": "Nieoczekiwany błąd backendu podczas zapisu candidate.",
+                            "correlation_id": correlation_id,
+                        },
+                    )
+
+        threading.Thread(
+            target=worker,
+            name=f"panos-toolbox-{job_id}",
+            daemon=True,
+        ).start()
+        return jsonify(wire_execution_job(job)), 202
+
+    @app.get("/api/v1/execution-jobs/<job_id>")
+    def session_execution_job_get(job_id: str):
+        token = request.headers.get("X-Toolbox-Session")
+        connections.get(token)
+        with execution_jobs_lock:
+            job = execution_jobs.get(job_id)
+            if job is None or job["owner"] != token:
+                raise InputError("Nieznany job wykonania dla tej sesji połączenia.")
+            payload = wire_execution_job(dict(job))
+        return jsonify(payload)
 
     @app.post("/api/v1/sessions/<session_id>/commit")
     def session_commit(session_id: str):
@@ -1264,6 +1637,8 @@ def create_app(
                 reader(),
                 source_session_id=value.get("source_session_id") or value.get("sourceSessionId"),
                 ip=value.get("ip"),
+                target=value.get("target"),
+                targets=string_list_field(value, "targets"),
             )
         return jsonify(_wire_restore_plan(session_store, result)), 201
 

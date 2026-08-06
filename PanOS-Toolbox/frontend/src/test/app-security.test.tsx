@@ -13,7 +13,7 @@ describe("runtime safety state", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: /dane demonstracyjne/i }));
-    const writeToggle = await screen.findByRole("checkbox", { name: /włącz zapis przez api/i });
+    const writeToggle = await screen.findByRole("checkbox", { name: /przełącz read only \/ write/i });
     await waitFor(() => expect(writeToggle).toBeEnabled());
     expect(writeToggle).not.toBeChecked();
     fireEvent.click(writeToggle);

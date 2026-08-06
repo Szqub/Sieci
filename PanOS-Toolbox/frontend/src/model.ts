@@ -34,7 +34,45 @@ export interface ConnectionSession {
   apiMaxStage: CapabilityStage;
   connectedAt: string;
   candidateDirty: boolean;
+  candidateStatus?: "clean" | "dirty" | "unknown";
   capabilityWarning?: string;
+}
+
+export type LookupKind = "address" | "address-group" | "policy" | "ip";
+
+export interface LookupField {
+  k: string;
+  v: string;
+}
+
+export interface LookupEntity {
+  id: string;
+  type: "address" | "address-group" | "policy";
+  name: string;
+  value: string;
+  scope: string;
+  rulebase?: "pre-rulebase" | "post-rulebase";
+  policyType?: "security" | "nat" | "application-override";
+  xpath: string;
+  readOnly: boolean;
+  blockedReason?: string;
+  fields: LookupField[];
+  dependencies: EntityDependency[];
+  hitCount?: number;
+  lastHit?: string;
+  lastHitStatus?: string;
+  lastHitAgeDays?: number;
+  lastHitDetail?: string;
+}
+
+export interface LookupResult {
+  found: LookupEntity[];
+  requested: string[];
+  searchedScopes: number;
+  apiCalls: number;
+  elapsedMs: number;
+  partial: boolean;
+  warnings: string[];
 }
 
 export interface DoctorCheck {
@@ -64,13 +102,52 @@ export type Decision = "process" | "skip-live" | "skip-error" | "not-found" | "b
 
 export interface ReferenceLocation {
   id: string;
+  type?: string;
   scope: string;
   deviceGroup: string;
-  rulebase: "pre" | "post" | "local" | "shared";
-  policyType: "security" | "nat" | "application-override" | "group" | "object";
+  rulebase?: "pre-rulebase" | "post-rulebase" | "pre" | "post" | "local" | "shared";
+  policyType?: "security" | "nat" | "application-override" | "group" | "object";
   name: string;
   field: string;
+  relation?: string;
   path: string;
+  readOnly?: boolean;
+  hitCount?: number;
+  lastHit?: string;
+  lastHitStatus?: string;
+  lastHitAgeDays?: number;
+  lastHitDetail?: string;
+}
+
+export interface EntityDependency extends ReferenceLocation {
+  type: string;
+}
+
+export interface EntityInspection {
+  id: string;
+  type: string;
+  name: string;
+  scope: string;
+  rulebase?: string;
+  policyType?: string;
+  path: string;
+  readOnly: boolean;
+  blockedReason?: string;
+  fields: LookupField[];
+  dependencies: EntityDependency[];
+  hitCount?: number;
+  lastHit?: string;
+  lastHitStatus?: string;
+  lastHitAgeDays?: number;
+  lastHitDetail?: string;
+}
+
+export interface EntityBackup {
+  mutationId: string;
+  entityType: string;
+  entityName: string;
+  file: string;
+  sha256: string;
 }
 
 export interface AddressAnalysis {
@@ -82,10 +159,16 @@ export interface AddressAnalysis {
   icmpDetail?: string;
   decision: Decision;
   lastHit?: string;
+  hitCount?: number;
+  lastHitAgeDays?: number;
   lastHitStatus?: string;
   lastHitDetail?: string;
   recentLastHit: boolean;
   componentId?: string;
+  componentIds?: string[];
+  operationIds?: string[];
+  entities?: EntityInspection[];
+  backupFiles?: EntityBackup[];
   references: ReferenceLocation[];
 }
 
@@ -129,6 +212,31 @@ export interface AnalysisJob {
   progress: number;
   message: string;
   plan?: CleanupPlan;
+  error?: ApiErrorPayload;
+}
+
+export interface CandidateProgressItem {
+  event: string;
+  mutationId?: string;
+  entityType?: string;
+  entityKey?: string;
+  action?: string;
+  xpath?: string;
+  completedOperations?: number;
+  totalOperations?: number;
+  backupCount?: number;
+}
+
+export interface CandidateJob {
+  id: string;
+  sessionId: string;
+  kind: "candidate";
+  state: "queued" | "running" | "success" | "failed";
+  progress: number;
+  message: string;
+  current?: CandidateProgressItem;
+  items: CandidateProgressItem[];
+  session?: ToolboxSession;
   error?: ApiErrorPayload;
 }
 
@@ -184,6 +292,12 @@ export interface ToolboxSession {
   operator: string;
   panoramaHost: string;
   itemCount: number;
+  targets?: string[];
+  backupCount?: number;
+  backupItems?: Array<EntityBackup & { targets: string[]; componentId?: string }>;
+  canRestore?: boolean;
+  canReconcileExternal?: boolean;
+  executionSource?: "GUI" | "CLI" | "API";
   affectedDeviceGroups: string[];
   sourceSessionId?: string;
   sourceSessionIds?: string[];

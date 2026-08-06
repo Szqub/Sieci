@@ -131,20 +131,20 @@ class CleanerAdapterTests(unittest.TestCase):
 
 
 class WebBoundaryTests(unittest.TestCase):
-    def test_gui_profile_is_clamped_by_independent_server_ceiling(self):
+    def test_gui_profile_always_allows_runtime_write_gate(self):
         requested = PanoramaProfile(
             "pano", "admin", api_max_stage=ApiStage.PUSH
         )
         effective, warning = _apply_profile_ceiling(requested, None)
-        self.assertEqual(effective.api_max_stage, ApiStage.READ_ONLY)
-        self.assertIsNotNone(warning)
+        self.assertEqual(effective.api_max_stage, ApiStage.PUSH)
+        self.assertIsNone(warning)
 
         ceiling = PanoramaProfile(
             "pano", "admin", api_max_stage=ApiStage.COMMIT
         )
         effective, warning = _apply_profile_ceiling(requested, ceiling)
-        self.assertEqual(effective.api_max_stage, ApiStage.COMMIT)
-        self.assertIsNotNone(warning)
+        self.assertEqual(effective.api_max_stage, ApiStage.PUSH)
+        self.assertIsNone(warning)
 
     def test_localhost_origin_csp_contract_and_no_cors(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -194,14 +194,18 @@ class WebBoundaryTests(unittest.TestCase):
             def authenticate(self, password):
                 self.authenticated_with = password
 
-            def fetch_config(self, config_type):
-                self.assert_config_type(config_type)
-                return parse_xml('<config version="10.2.16-h4"><shared /></config>')
+            def system_info(self):
+                return parse_xml(
+                    '<response status="success"><result><system>'
+                    '<sw-version>10.2.16-h4</sw-version>'
+                    '</system></result></response>'
+                )
 
-            @staticmethod
-            def assert_config_type(config_type):
-                if config_type not in {"running", "candidate"}:
-                    raise AssertionError(config_type)
+            def change_summary(self):
+                return parse_xml('<response status="success"><result /></response>')
+
+            def fetch_config(self, _config_type):
+                raise AssertionError("Połączenie nie może pobierać pełnej konfiguracji.")
 
             def close(self):
                 self.closed = True
@@ -235,7 +239,7 @@ class WebBoundaryTests(unittest.TestCase):
                 )
 
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json["api_max_stage"], "candidate")
+                self.assertEqual(response.json["api_max_stage"], "push")
                 self.assertEqual(response.json["panorama_version"], "10.2.16-h4")
                 self.assertNotIn("not-persisted", response.get_data(as_text=True))
                 token = response.json["session_token"]
@@ -259,10 +263,17 @@ class WebBoundaryTests(unittest.TestCase):
             def authenticate(self, _password):
                 return None
 
+            def system_info(self):
+                return parse_xml(
+                    '<response status="success"><result><system>'
+                    '<sw-version>10.2.16-h4</sw-version>'
+                    '</system></result></response>'
+                )
+
             def fetch_config(self, _config_type):
                 return copy.deepcopy(fixture)
 
-            def fetch_config_cached(self, config_type):
+            def fetch_config_cached(self, config_type, **_kwargs):
                 return self.fetch_config(config_type)
 
             def change_summary(self):
