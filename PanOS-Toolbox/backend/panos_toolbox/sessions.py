@@ -6,6 +6,7 @@ import getpass
 import hashlib
 import io
 import json
+import mimetypes
 import os
 import secrets
 import stat
@@ -18,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from .errors import IntegrityError, SessionError
@@ -398,6 +399,9 @@ class SessionStore:
             "warnings": list(patchset.warnings),
             "risks": [],
             "candidate_application": None,
+            "commit_review": None,
+            "precommit_guard": None,
+            "artifacts": [],
         }
         self._write_manifest(session_id, manifest)
         if planning_running is not None:
@@ -602,6 +606,54 @@ class SessionStore:
         }
         self.update(session_id, lambda manifest: manifest.__setitem__("candidate_application", record))
 
+    def record_commit_review(
+        self, session_id: str, review: Mapping[str, Any]
+    ) -> None:
+        """Persist the current reviewed running/candidate evidence."""
+
+        self.update(
+            session_id,
+            lambda manifest: manifest.__setitem__("commit_review", dict(review)),
+        )
+        self.append_event(
+            session_id,
+            "COMMIT_REVIEW_READY",
+            {
+                "generated_utc": review.get("generatedAt"),
+                "commit_ready": bool(review.get("commitReady")),
+                "candidate_semantic_sha256": (
+                    (review.get("candidate") or {}).get("semanticSha256")
+                    if isinstance(review.get("candidate"), Mapping)
+                    else None
+                ),
+                "scope_finding_count": (
+                    (review.get("scopeGuard") or {}).get("findingCount")
+                    if isinstance(review.get("scopeGuard"), Mapping)
+                    else None
+                ),
+            },
+        )
+
+    def record_precommit_guard(
+        self, session_id: str, guard: Mapping[str, Any]
+    ) -> None:
+        record = {**dict(guard), "checkedUtc": utc_now()}
+        self.update(
+            session_id,
+            lambda manifest: manifest.__setitem__("precommit_guard", record),
+        )
+        self.append_event(
+            session_id,
+            "PRECOMMIT_SCOPE_GUARD",
+            {
+                "passed": bool(record.get("passed")),
+                "finding_count": record.get("findingCount"),
+                "candidate_semantic_sha256": record.get(
+                    "candidateSemanticSha256"
+                ),
+            },
+        )
+
     def record_external_execution(
         self,
         session_id: str,
@@ -691,6 +743,106 @@ class SessionStore:
             lambda manifest: manifest.setdefault("artifacts", []).append(record),
         )
         return record
+
+    @staticmethod
+    def _content_type(filename: str) -> str:
+        suffix = PurePosixPath(filename).suffix.casefold()
+        explicit = {
+            ".json": "application/json; charset=utf-8",
+            ".xml": "application/xml; charset=utf-8",
+            ".txt": "text/plain; charset=utf-8",
+            ".log": "text/plain; charset=utf-8",
+            ".csv": "text/csv; charset=utf-8",
+            ".zip": "application/zip",
+        }
+        return explicit.get(
+            suffix,
+            mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        )
+
+    def artifact_catalog(
+        self,
+        session_id: str,
+        *,
+        manifest: Optional[Mapping[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """List every operator-facing, integrity-registered session file."""
+
+        manifest = manifest or self.load_manifest(session_id)
+        directory = self._directory(session_id)
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def include(
+            filename: str,
+            *,
+            kind: str,
+            sha256: Optional[str] = None,
+            written_utc: Optional[str] = None,
+        ) -> None:
+            if filename in seen:
+                return
+            seen.add(filename)
+            path = (directory / PurePosixPath(filename)).resolve()
+            if directory not in path.parents or not path.is_file():
+                raise IntegrityError(
+                    f"Zarejestrowany plik sesji nie istnieje: {filename}."
+                )
+            content_type = self._content_type(filename)
+            records.append(
+                {
+                    "file": filename,
+                    "kind": kind,
+                    "sha256": sha256,
+                    "writtenUtc": written_utc,
+                    "sizeBytes": path.stat().st_size,
+                    "contentType": content_type,
+                    "viewable": content_type.startswith("text/")
+                    or content_type.startswith("application/json")
+                    or content_type.startswith("application/xml"),
+                    "downloadable": True,
+                }
+            )
+
+        include("manifest.json", kind="manifest")
+        include(
+            str(manifest["patchset_file"]),
+            kind="patchset",
+            sha256=str(manifest.get("patchset_sha256") or "") or None,
+        )
+        for label, record in sorted((manifest.get("snapshots") or {}).items()):
+            include(
+                str(record["file"]),
+                kind=f"snapshot:{label}",
+                sha256=record.get("sha256"),
+                written_utc=record.get("written_utc"),
+            )
+        for record in manifest.get("entity_backups") or ():
+            include(
+                str(record["file"]),
+                kind=f"entity-backup:{record.get('entity_type') or 'entity'}",
+                sha256=record.get("sha256"),
+            )
+        for record in manifest.get("artifacts") or ():
+            include(
+                str(record["file"]),
+                kind=str(record.get("kind") or "artifact"),
+                sha256=record.get("sha256"),
+                written_utc=record.get("written_utc"),
+            )
+        records.append(
+            {
+                "file": "bundle",
+                "kind": "complete-session-zip",
+                "sha256": None,
+                "writtenUtc": manifest.get("updated_utc"),
+                "sizeBytes": None,
+                "contentType": "application/zip",
+                "viewable": False,
+                "downloadable": True,
+            }
+        )
+        return records
 
     def verify(
         self, session_id: str, *, manifest: Optional[dict[str, Any]] = None
@@ -861,18 +1013,23 @@ class SessionStore:
         return [item for item in self.list_sessions() if target in (item.get("targets") or [])]
 
     def resolve_download(self, session_id: str, filename: str) -> Path:
-        if Path(filename).name != filename:
+        relative = PurePosixPath(filename)
+        if (
+            not filename
+            or "\\" in filename
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative.as_posix() != filename
+        ):
             raise SessionError("Niepoprawna nazwa pobieranego artefaktu.")
         manifest = self.load_manifest(session_id)
         allowed = {"manifest.json", manifest["patchset_file"]}
         allowed.update(record["file"] for record in manifest.get("snapshots", {}).values())
         allowed.update(record["file"] for record in manifest.get("artifacts", []))
-        # Entity XML lives one directory deeper and is addressed by its exact
-        # manifest-relative path through the dedicated backup endpoint later;
-        # generic filename downloads intentionally stay flat.
+        allowed.update(record["file"] for record in manifest.get("entity_backups", []))
         if filename not in allowed:
             raise SessionError("Artefakt nie jest zarejestrowany w manifeście sesji.")
-        path = (self._directory(session_id) / filename).resolve()
+        path = (self._directory(session_id) / relative).resolve()
         if self._directory(session_id) not in path.parents or not path.is_file():
             raise SessionError("Artefakt nie istnieje lub wychodzi poza sesję.")
         return path

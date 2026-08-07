@@ -2,6 +2,7 @@ import type {
   ApiActionResult,
   AuditResult,
   CleanupPlan,
+  CommitReview,
   ConnectionDraft,
   ConnectionSession,
   DoctorResult,
@@ -12,6 +13,29 @@ import type {
 } from "./model";
 
 const stamp = "2026-07-15T10:28:00+02:00";
+
+const demoCommitReview: CommitReview = {
+  schemaVersion: 1,
+  sessionId: "cleanup-20260715-1028-7ea94f",
+  generatedAt: stamp,
+  commitReady: true,
+  running: { rawSha256: "demo-running", semanticSha256: "demo-running-semantic" },
+  candidate: { rawSha256: "demo-candidate", semanticSha256: "demo-candidate-semantic" },
+  native: { available: true, has_changes: true, detail: "6 zmian candidate" },
+  summary: { total: 6, planned: 6, outsidePlan: 0, added: 0, removed: 5, changed: 1 },
+  scopeGuard: { passed: true, findingCount: 0, outsidePlanCount: 0, checkedMutationCount: 6, candidateProjectionMatches: true, findings: [] },
+  changes: [
+    { key: "DG-PROD-EU/address/srv-legacy-01", change: "removed", entityType: "address", scope: "DG-PROD-EU", name: "srv-legacy-01", xpath: "/config/.../address/srv-legacy-01", planned: true, explanation: "Encja zostanie usunięta z candidate.", mutationIds: ["mutation-00003"], componentIds: ["component-a"], causes: ["10.42.16.19"], operations: [{ mutationId: "mutation-00003", action: "delete", xpath: "/config/.../address/srv-legacy-01" }] },
+  ],
+  artifacts: { reviewJson: "pre_commit_review_demo.json", reviewText: "pre_commit_review_demo.txt", candidateDiff: "candidate_diff_demo.txt", scopeGuard: "scope_guard_demo.txt" },
+};
+
+const demoArtifacts = [
+  { file: "commands.txt", kind: "api-operation-preview", contentType: "text/plain; charset=utf-8", sizeBytes: 2048, viewable: true, downloadable: true },
+  { file: "candidate_diff_demo.txt", kind: "full-running-candidate-diff", contentType: "text/plain; charset=utf-8", sizeBytes: 4096, viewable: true, downloadable: true },
+  { file: "manifest.json", kind: "manifest", contentType: "application/json; charset=utf-8", sizeBytes: 8192, viewable: true, downloadable: true },
+  { file: "bundle", kind: "complete-session-zip", contentType: "application/zip", viewable: false, downloadable: true },
+];
 
 export function demoConnection(input: ConnectionDraft): ConnectionSession {
   return {
@@ -111,6 +135,8 @@ export const demoCleanupPlan: CleanupPlan = {
     { id: "op-5", componentId: "component-b", order: 5, action: "delete", entityType: "policy", entityName: "DNAT-Legacy-03", scope: "DG-SHARED-SERVICES · post/nat", xpath: "/config/.../nat/DNAT-Legacy-03", summary: "Usuń regułę NAT, ponieważ obiekt jest jedynym źródłem", inverseSummary: "Odtwórz regułę 1:1 i przesuń przed Drop-RFC1918", fingerprint: "sha256:a402…cd17" },
     { id: "op-6", componentId: "component-b", order: 6, action: "delete", entityType: "address", entityName: "srv-legacy-03", scope: "DG-SHARED-SERVICES", xpath: "/config/.../address/srv-legacy-03", summary: "Usuń obiekt 10.42.16.21", inverseSummary: "Odtwórz pełny XML obiektu", fingerprint: "sha256:11b2…c748" },
   ],
+  commitReview: demoCommitReview,
+  artifacts: demoArtifacts,
 };
 
 export function demoExclusionPlan(plan: CleanupPlan, targets: string[], componentIds: string[] = []): CleanupPlan {
@@ -217,6 +243,8 @@ export function demoAction(sessionId: string, targetState: SessionState, kind: J
       state: targetState,
       updatedAt: stamp,
       jobs: [resultJob],
+      commitReview: demoCommitReview,
+      artifacts: demoArtifacts,
     },
   };
 }

@@ -19,8 +19,10 @@ const baseProps = {
   onPlanDependencies: vi.fn(),
   onRestoreTarget: vi.fn(),
   onApplyCandidate: vi.fn(),
+  onPrepareCommitReview: vi.fn(),
   onCommit: vi.fn(),
   onPush: vi.fn(),
+  onViewArtifact: vi.fn(async () => "preview"),
   onDownload: vi.fn(),
 };
 
@@ -108,9 +110,9 @@ describe("staged execution gates", () => {
     const commit = screen.getByRole("button", { name: "Commit" });
     expect(commit).toBeEnabled();
     fireEvent.click(commit);
-    expect(screen.getByRole("dialog")).toHaveTextContent(/potwierdź commit/i);
+    expect(screen.getByRole("dialog")).toHaveTextContent(/ostatni przegląd przed wysłaniem commit/i);
     expect(onCommit).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: /tak, uruchom commit/i }));
+    fireEvent.click(screen.getByRole("button", { name: /scope pass — wyślij commit/i }));
     expect(onCommit).toHaveBeenCalledTimes(1);
   });
 });

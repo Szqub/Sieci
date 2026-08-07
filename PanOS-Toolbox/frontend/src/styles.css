@@ -849,6 +849,40 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .commit-review__list > div > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .commit-review__list small { color: var(--text-muted); font-size: .58rem; }
 .commit-review__list code { display: block; overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; font-size: .55rem; }
+.stage-card-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.commit-ready-status { display: block; margin-top: 8px; font-size: .59rem; font-weight: 800; }
+.commit-ready-status.is-pass { color: var(--success); }
+.commit-ready-status.is-block { color: var(--danger); }
+.write-confirm--commit { width: min(1180px, 96vw); max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.write-confirm--commit > p { flex: 0 0 auto; margin-bottom: 10px; }
+.write-confirm--commit > .commit-review { min-height: 0; flex: 1 1 auto; margin: 4px 0 12px; padding: 12px; overflow: hidden; }
+.write-confirm--commit > div:last-child { flex: 0 0 auto; }
+.commit-review__metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.commit-review__metrics > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; padding: 8px 9px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 7px; }
+.commit-review__metrics small { color: var(--text-muted); font-size: .54rem; text-transform: uppercase; letter-spacing: .05em; }
+.commit-review__metrics strong { overflow: hidden; font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
+.commit-review__metrics .is-pass strong { color: var(--success); }
+.commit-review__metrics .is-danger strong { color: var(--danger); }
+.commit-scope-banner { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid; border-radius: 8px; }
+.commit-scope-banner.is-pass { color: var(--success); background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 30%, var(--border)); }
+.commit-scope-banner.is-block { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+.commit-scope-banner > span { display: flex; flex-direction: column; gap: 2px; }
+.commit-scope-banner strong { color: var(--text); font-size: .65rem; }
+.commit-scope-banner small { color: var(--text-muted); font-size: .55rem; }
+.commit-review__toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.commit-review__toolbar .table-search { min-width: min(420px, 100%); flex: 1 1 340px; }
+.commit-review__list { min-height: 180px; max-height: none; flex: 1 1 auto; }
+.commit-review__list > div { grid-template-columns: auto minmax(0, 1fr) minmax(100px, .28fr); padding: 7px 8px; border: 1px solid transparent; }
+.commit-review__list > div.is-outside { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); background: var(--danger-soft); }
+.commit-review__list > div > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.commit-change-causes { display: flex; align-items: flex-end; justify-content: flex-start; flex-direction: row !important; flex-wrap: wrap; gap: 3px !important; }
+.commit-change-causes i { padding: 2px 5px; color: var(--text-muted); background: var(--surface); border-radius: 4px; font-size: .52rem; font-style: normal; }
+.commit-review-empty { display: grid; min-height: 80px; place-items: center; color: var(--text-muted); font-size: .63rem; }
+.commit-guard-findings { display: flex; max-height: 150px; flex-direction: column; gap: 5px; overflow: auto; }
+.commit-guard-findings > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; padding: 7px 8px; color: var(--danger); background: var(--danger-soft); border-radius: 7px; }
+.commit-guard-findings > div > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.commit-guard-findings strong { color: var(--text); font-size: .61rem; }
+.commit-guard-findings small, .commit-guard-findings code { overflow: hidden; color: var(--text-muted); font-size: .53rem; text-overflow: ellipsis; white-space: nowrap; }
 @keyframes indeterminate-slide { to { left: 100%; } }
 .connection-modes { display: grid; gap: 9px; }
 .connection-modes > div { display: flex; flex-direction: column; gap: 4px; padding: 12px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 9px; }
@@ -1072,7 +1106,37 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .analysis-summary-grid small { color: var(--text-muted); font-size: .56rem; text-transform: uppercase; letter-spacing: .04em; }
 .analysis-summary-grid strong { font-size: .71rem; overflow-wrap: anywhere; }
 .analysis-downloads { display: flex; flex-wrap: wrap; gap: 7px; }
+.artifact-catalog { overflow: hidden; border: 1px solid var(--border); border-radius: 9px; }
+.artifact-catalog > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; background: var(--surface-soft); border-bottom: 1px solid var(--border); }
+.artifact-catalog > header > div { display: flex; align-items: center; gap: 8px; }
+.artifact-catalog > header svg { color: var(--blue); }
+.artifact-catalog > header span { display: flex; flex-direction: column; gap: 2px; }
+.artifact-catalog > header strong { font-size: .67rem; }
+.artifact-catalog > header small { color: var(--text-muted); font-size: .55rem; }
+.artifact-catalog > div { display: flex; max-height: 330px; flex-direction: column; overflow: auto; }
+.artifact-catalog article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.artifact-catalog article:last-child { border-bottom: 0; }
+.artifact-catalog article > svg { color: var(--text-muted); }
+.artifact-catalog article > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.artifact-catalog article strong { overflow: hidden; font-size: .61rem; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-catalog article small { color: var(--text-muted); font-size: .53rem; }
+.artifact-catalog article > div { display: flex; align-items: center; gap: 4px; }
+.artifact-binary-note { padding: 3px 6px; color: var(--text-muted); background: var(--surface-soft); border-radius: 4px; font-size: .52rem; font-weight: 800; }
 .operations-table td > small { display: block; margin-top: 3px; color: var(--text-muted); font-size: .55rem; }
+
+.artifact-viewer-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(2, 8, 14, .82); backdrop-filter: blur(7px); }
+.artifact-viewer { width: min(1320px, 97vw); height: min(900px, 94vh); display: flex; flex-direction: column; overflow: hidden; color: var(--text); background: var(--surface-raised); border: 1px solid color-mix(in srgb, var(--blue) 42%, var(--border)); border-radius: 14px; box-shadow: 0 30px 110px rgba(0, 0, 0, .58); }
+.artifact-viewer > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; background: var(--surface-soft); border-bottom: 1px solid var(--border); }
+.artifact-viewer > header > div { display: flex; align-items: center; gap: 9px; }
+.artifact-viewer > header > div:first-child > svg { color: var(--blue); }
+.artifact-viewer > header span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.artifact-viewer > header strong { overflow: hidden; font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-viewer > header small { color: var(--text-muted); font-size: .56rem; }
+.artifact-viewer > header button { display: grid; width: 32px; height: 32px; place-items: center; color: var(--text-muted); background: transparent; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+.artifact-viewer > pre { flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0; padding: 14px 16px 30px; color: var(--text-soft); background: var(--bg); font: .62rem/1.55 "Cascadia Code", "Consolas", monospace; tab-size: 2; white-space: pre; }
+.artifact-viewer-loading { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--blue); font-size: .68rem; }
+.artifact-viewer > .callout { margin: 16px; }
+.preflight-notice { color: var(--warning); font-weight: 750; }
 
 .session-actions, .restore-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .persistent-backup-note { display: flex; align-items: flex-start; gap: 9px; padding: 12px; color: var(--blue); background: var(--blue-soft); border: 1px solid color-mix(in srgb, var(--blue) 25%, var(--border)); border-radius: 9px; font-size: .65rem; line-height: 1.45; }
@@ -1125,4 +1189,11 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
   .execution-progress-status { grid-column: 1 / -1; justify-content: space-between; }
   .execution-operation-log > div { grid-template-columns: 18px minmax(0, 1fr); }
   .execution-operation-log time { grid-column: 2; }
+  .commit-review__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .commit-review__list > div { grid-template-columns: auto minmax(0, 1fr); }
+  .commit-change-causes { grid-column: 2; }
+  .artifact-catalog article { grid-template-columns: auto minmax(0, 1fr); }
+  .artifact-catalog article > div { grid-column: 2; flex-wrap: wrap; }
+  .artifact-viewer-backdrop { padding: 6px; }
+  .artifact-viewer { width: 100%; height: 97vh; }
 }

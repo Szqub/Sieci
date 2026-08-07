@@ -50,7 +50,7 @@ const initialAdGroupDraft: AdGroupDraft = {
 };
 
 type MainBusy = "connect" | "doctor" | "analyze" | "ad-groups" | "policy-request" | "audit" | "history" | null;
-type StageBusy = "candidate" | "commit" | "push" | "download" | null;
+type StageBusy = "candidate" | "review" | "commit" | "push" | "download" | null;
 type RestoreBusy = "plan" | "candidate" | "commit" | "push" | "download" | null;
 type DemoModule = typeof import("./demo");
 
@@ -497,6 +497,21 @@ export default function App() {
     } catch (actionError) { setError(getErrorMessage(actionError)); } finally { setStageBusy(null); }
   };
 
+  const prepareCommitReview = async () => {
+    if (!cleanupPlan) return;
+    const sessionId = executionSession?.id ?? cleanupPlan.sessionId;
+    setStageBusy("review"); setExecutionJob(null); setError(null);
+    try {
+      if (demoMode && demoApi) {
+        setExecutionSession(demoApi.demoAction(sessionId, "CANDIDATE_APPLIED", "candidate").session);
+      } else {
+        const started = await api.startCommitReviewJob(sessionId);
+        const job = await waitForExecutionJob(started, setExecutionJob);
+        setExecutionSession(job.session);
+      }
+    } catch (reviewError) { setError(getErrorMessage(reviewError)); } finally { setStageBusy(null); }
+  };
+
   const createPolicyRequestPlan = async (text: string) => {
     setMainBusy("policy-request");
     setError(null);
@@ -543,15 +558,26 @@ export default function App() {
     } catch (actionError) { setError(getErrorMessage(actionError)); } finally { setStageBusy(null); }
   };
 
-  const downloadCleanup = async (artifact: "commands" | "report" | "manifest") => {
+  const downloadCleanup = async (artifact: string) => {
     if (!cleanupPlan) return;
     setStageBusy("download"); setError(null);
     try {
       const blob = demoMode && demoApi
         ? new Blob([artifact === "commands" ? demoApi.demoCleanupPlan.operations.map((operation) => `${operation.action} ${operation.xpath}`).join("\n") : JSON.stringify(demoApi.demoCleanupPlan, null, 2)], { type: "text/plain" })
         : await api.downloadSessionArtifact(cleanupPlan.sessionId, artifact);
-      saveBlob(blob, `${cleanupPlan.sessionId}_${artifact}.${artifact === "manifest" ? "json" : "txt"}`);
+      const aliasName = artifact === "commands" ? "commands.txt" : artifact === "report" ? "raport.txt" : artifact === "manifest" ? "manifest.json" : artifact;
+      saveBlob(blob, aliasName === "bundle" ? `PanOS-Toolbox-${cleanupPlan.sessionId}.zip` : aliasName.split("/").pop() || "artifact.txt");
     } catch (downloadError) { setError(getErrorMessage(downloadError)); } finally { setStageBusy(null); }
+  };
+
+  const viewCleanupArtifact = async (artifact: string): Promise<string> => {
+    if (!cleanupPlan) throw new Error("Brak aktywnej sesji.");
+    if (demoMode && demoApi) {
+      return artifact === "commands"
+        ? demoApi.demoCleanupPlan.operations.map((operation) => `${operation.action} ${operation.xpath}`).join("\n")
+        : JSON.stringify(demoApi.demoCleanupPlan, null, 2);
+    }
+    return api.viewSessionArtifact(cleanupPlan.sessionId, artifact);
   };
 
   const runAudit = async () => {
@@ -685,7 +711,7 @@ export default function App() {
   else if (view === "warnings") page = <WarningsPage notices={notices} />;
   else if (view === "ad-groups") page = <AdGroupsPage draft={adGroupDraft} onDraftChange={setAdGroupDraft} result={adGroupResult} busy={mainBusy === "ad-groups"} error={error} onGenerate={() => void generateAdGroup()} />;
   else if (view === "policy-requests") page = <PolicyRequestsPage connection={Boolean(connection)} busy={mainBusy === "policy-request"} error={error} plan={policyRequestPlan} onCreatePlan={(text) => void createPolicyRequestPlan(text)} onOpenConnection={() => navigate("connection")} onOpenPlan={() => navigate("plan")} />;
-  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
+  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onPrepareCommitReview={() => void prepareCommitReview()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onViewArtifact={viewCleanupArtifact} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
   else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} executionJob={restoreExecutionJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;

@@ -20,6 +20,7 @@ from .doctor import run_doctor
 from .engine import (
     apply_candidate,
     commit_session,
+    prepare_commit_review,
     push_session,
     reconcile_external_execution,
 )
@@ -112,8 +113,17 @@ def _wire_operations(patch) -> list[dict[str, Any]]:
     return records
 
 
-def _wire_session(store: SessionStore, session_id: str) -> dict[str, Any]:
-    manifest = store.load_manifest(session_id)
+def _wire_session(
+    store: SessionStore,
+    session_id: str,
+    *,
+    verify: bool = True,
+) -> dict[str, Any]:
+    # Write-stage workers have already verified the session before mutation.
+    # Their terminal UI update may skip a second full re-hash of multi-MB XML
+    # snapshots so a completed Panorama job is reflected immediately.  Normal
+    # GET/history/restore paths keep the integrity-strict default.
+    manifest = store.load_manifest(session_id, verify=verify)
     patch = store.load_patchset(session_id)
     jobs = []
     job_records = list(manifest.get("jobs", []))
@@ -211,6 +221,9 @@ def _wire_session(store: SessionStore, session_id: str) -> dict[str, Any]:
             else "Cleanup Panorama"
         ),
         "jobs": jobs,
+        "commitReview": manifest.get("commit_review"),
+        "precommitGuard": manifest.get("precommit_guard"),
+        "artifacts": store.artifact_catalog(session_id, manifest=manifest),
     }
 
 
@@ -475,6 +488,8 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
         "warnings": manifest.get("warnings") or [],
         "addresses": addresses,
         "operations": _wire_operations(patch),
+        "commitReview": manifest.get("commit_review"),
+        "artifacts": store.artifact_catalog(session_id, manifest=manifest),
     }
 
 
@@ -865,6 +880,7 @@ def _contract() -> dict[str, Any]:
             "POST /cleanup/plans/{id}/exclusions": "derive a safe plan without selected targets and their atomic components",
             "POST /policy-requests/plans": "parse ServiceNow-style request text and prepare targeted create operations",
             "POST /sessions/{id}/candidate-jobs": "path-by-path candidate write with progress",
+            "POST /sessions/{id}/commit-review-jobs": "refresh full running/candidate diff and scope guard",
             "POST /sessions/{id}/commit-jobs": "background Panorama commit with phase timings",
             "POST /sessions/{id}/push-jobs": "background Panorama push with phase timings",
             "GET /execution-jobs/{id}": "poll candidate, commit or push progress",
@@ -876,6 +892,7 @@ def _contract() -> dict[str, Any]:
             "GET /sessions": "session history",
             "GET /sessions/{id}": "integrity-checked manifest",
             "POST /sessions/{id}/reconcile-external": "verify CLI/API post-state and admit restore history",
+            "GET /sessions/{id}/artifacts/{path}": "inline preview or download of every registered session file",
             "GET /sessions/{id}/artifacts/bundle": "download complete session backup ZIP",
         },
     }
@@ -1282,7 +1299,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.5.2", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.6.0", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -1839,10 +1856,11 @@ def create_app(
             }
         )
 
-    @app.get("/api/v1/sessions/<session_id>/artifacts/<filename>")
+    @app.get("/api/v1/sessions/<session_id>/artifacts/<path:filename>")
     def artifact_get(session_id: str, filename: str):
         reader()
         manifest = session_store.load_manifest(session_id)
+        inline = request.args.get("disposition", "attachment").casefold() == "inline"
         if filename == "bundle":
             payload = session_store.bundle_bytes(session_id)
             return Response(
@@ -1886,11 +1904,22 @@ def create_app(
                 return Response(
                     json.dumps(manifest.get("conflicts") or [], ensure_ascii=False, indent=2),
                     content_type="application/json",
-                    headers={"Content-Disposition": 'attachment; filename="conflicts.json"'},
+                    headers={
+                        "Content-Disposition": (
+                            'inline; filename="conflicts.json"'
+                            if inline
+                            else 'attachment; filename="conflicts.json"'
+                        )
+                    },
                 )
             else:
                 raise
-        return send_file(path, as_attachment=True)
+        return send_file(
+            path,
+            as_attachment=not inline,
+            download_name=Path(path).name,
+            max_age=0,
+        )
 
     @app.post("/api/v1/sessions/<session_id>/apply")
     @app.post("/api/v1/sessions/<session_id>/candidate")
@@ -1982,15 +2011,43 @@ def create_app(
             if job is None or job["owner"] != token:
                 raise InputError("Nieznany job wykonania dla tej sesji połączenia.")
             snapshot = dict(job)
-        if snapshot.get("state") in {"queued", "running"}:
-            try:
-                snapshot["session"] = _wire_session(
-                    session_store, snapshot["session_id"]
-                )
-            except ToolboxError:
-                pass
+        # Polling progress must stay lightweight.  Wiring a live session here
+        # re-hashed full XML snapshots and every large diff artifact every
+        # 350 ms.  The worker attaches one verified session payload at the
+        # terminal update, which is the only point the UI consumes it.
         payload = wire_execution_job(snapshot)
         return jsonify(payload)
+
+    @app.post("/api/v1/sessions/<session_id>/commit-review-jobs")
+    def session_commit_review_job_start(session_id: str):
+        token = request.headers.get("X-Toolbox-Session")
+        client = connections.get(token)
+        session_store.load_manifest(session_id)
+
+        def run_review(update):
+            review = prepare_commit_review(
+                session_store,
+                session_id,
+                client,
+                progress_callback=update,
+            )
+            return {
+                "message": (
+                    "Pełny diff i scope guard są gotowe"
+                    if review.get("commitReady")
+                    else "Pełny diff gotowy; scope guard blokuje commit"
+                ),
+                "session": _wire_session(session_store, session_id),
+            }
+
+        job = start_execution_job(
+            session_id=session_id,
+            owner=token,
+            kind="review",
+            initial_message="Oczekiwanie na pełny diff running → candidate",
+            runner=run_review,
+        )
+        return jsonify(wire_execution_job(job)), 202
 
     @app.post("/api/v1/sessions/<session_id>/commit-jobs")
     def session_commit_job_start(session_id: str):
@@ -2035,7 +2092,9 @@ def create_app(
             suffix = f" w {elapsed:.1f} s" if isinstance(elapsed, (int, float)) else ""
             return {
                 "message": f"Commit zakończony poprawnie{suffix}",
-                "session": _wire_session(session_store, session_id),
+                "session": _wire_session(
+                    session_store, session_id, verify=False
+                ),
             }
 
         job = start_execution_job(
@@ -2078,7 +2137,9 @@ def create_app(
             suffix = f" w {elapsed:.1f} s" if isinstance(elapsed, (int, float)) else ""
             return {
                 "message": f"Push zakończony poprawnie{suffix}",
-                "session": _wire_session(session_store, session_id),
+                "session": _wire_session(
+                    session_store, session_id, verify=False
+                ),
             }
 
         job = start_execution_job(

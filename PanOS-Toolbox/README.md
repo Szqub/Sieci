@@ -102,9 +102,12 @@ Ekran ma dwa tryby:
 Analiza batch działa jako asynchroniczny job i pokazuje procentowy postęp dla
 ICMP, pobierania/cache running i candidate, grafu zależności, Last Hit oraz
 zapisu artefaktów. Przed realnym WRITE cache nie jest zaufany: Candidate
-ponownie sprawdza live running/candidate i graf, commit pobiera po locku jeden
-live running i jeden live candidate, a push tylko jeden live running.
-Fingerprinty dotkniętych ścieżek pozostają sprawdzane przed wysłaniem joba.
+ponownie sprawdza live running/candidate i graf. Po zastosowaniu operacji
+automatycznie tworzy pełny diff running → candidate oraz ścisły scope guard.
+Commit pobiera po locku jeden live candidate i lekki `change-summary`; pełny
+running jest pobierany tylko jako awaryjny fallback, gdy dana wersja PAN-OS nie
+udostępnia change-summary. Push pobiera jeden live running. Fingerprinty
+dotkniętych ścieżek pozostają sprawdzane przed wysłaniem joba.
 Po analizie przy każdym bezpiecznym celu jest przycisk **Tylko ten**. Można też
 zaznaczyć dowolne wiersze albo konkretne zależności i przygotować nowy batch.
 Wydzielany jest cały atomowy komponent zależności, dzięki czemu obiekt, grupa
@@ -175,20 +178,37 @@ ostrzeżeniem; zapis do Candidate nadal wymaga zielonego WRITE.
 W sekcji **Wykonanie kontrolowane** nie ma wyboru „poziomu API”. Zielony WRITE
 odblokowuje trzy osobne przyciski zgodnie ze stanem sesji. Candidate wykonuje
 po XML API każdą operację XPath osobno; pasek pokazuje backup, locki, live
-recheck, bieżącą encję, liczbę operacji i walidację. Toolbox nie wgrywa całego
-pliku konfiguracji. Commit ma osobne ostrzeżenie, a push mocniejsze ostrzeżenie
-z listą device groups. Commit i push działają jako joby w tle: GUI pokazuje
-bieżącą fazę, czas od startu, job ID, status i procent raportowany przez
-Panoramę. Gdy PAN-OS nie zwraca procentu, pasek jest animowany, a log pokazuje
-kolejne odpytywania zamiast zatrzymywać się na pozornych 50%. Wpis techniczny
-`*-dispatched` znika z listy aktywnych po pojawieniu się terminalnego `FIN`.
-CLI nadal respektuje `api_max_stage` profilu.
+recheck, bieżącą encję, liczbę operacji, walidację i przygotowanie przeglądu
+przed commit. Toolbox nie wgrywa całego pliku konfiguracji.
 
-Optymalizacja v0.4.1 usuwa zbędne pełne transfery konfiguracji: commit wykonuje
-trzy odczyty zamiast pięciu (running + candidate przed jobem oraz kontrolny
-running po jobie), a push jeden zamiast czterech. Sam partial commit i
-specific-DG commit-all pozostają pojedynczymi jobami Panoramy — rozbijanie ich
-na commit per obiekt byłoby wolniejsze i zwiększałoby ryzyko częściowego stanu.
+Po Candidate duże, kompaktowe okno **Pełny przegląd przed Commit** pokazuje
+dokładne zmiany, operacje, XPath, device group/rulebase, przyczynę zmiany oraz
+wszystkie znaleziska scope guard. Można je szybko filtrować po nazwie obiektu,
+polityki, DG albo XPath. Pełny diff XML i szczegółowy raport są dostępne przez
+osobne akcje **Wyświetl** i **Pobierz**. Te same dwie akcje są dostępne dla
+każdego tekstowego artefaktu sesji, w tym CLI, manifestu i backupów encji.
+
+Scope guard odtwarza oczekiwany candidate lokalnie z dokładnego PatchSetu i
+porównuje go z live candidate. Commit jest blokowany, jeżeli znajdzie choć jedną
+zmianę poza planem albo pozostałą referencję do usuwanego adresu/grupy — na
+przykład w innej polityce, grupie nadrzędnej lub nieobsługiwanym polu. Operator
+może odświeżyć diff bez ponownego zapisu Candidate.
+
+Commit ma osobne ostrzeżenie, a push mocniejsze ostrzeżenie z listą device
+groups. Commit i push działają jako joby w tle. Przed realnym wysłaniem commit
+GUI jawnie pokazuje **job nie został jeszcze wysłany do Panoramy** i postęp
+preflightu. Dopiero po PASS pojawia się Panorama job ID, status i procent
+raportowany przez urządzenie. Gdy PAN-OS nie zwraca procentu, pasek jest
+animowany, a log pokazuje kolejne odpytywania zamiast zatrzymywać się na
+pozornych 50%. Wpis techniczny `*-dispatched` znika z listy aktywnych po
+pojawieniu się terminalnego `FIN`. CLI nadal respektuje `api_max_stage` profilu.
+
+Optymalizacja v0.6.0 ogranicza normalny preflight commit do jednego pełnego
+odczytu live candidate. Nie wykonuje blokującego pobrania running po zakończeniu
+joba — wynik Panorama `FIN/OK` od razu kończy etap, a running zostaje ponownie
+sprawdzony przez Push albo późniejszy Audit. Sam partial commit i specific-DG
+commit-all pozostają pojedynczymi jobami Panoramy; rozbijanie ich na commit per
+obiekt byłoby wolniejsze i zwiększałoby ryzyko częściowego stanu.
 
 ## Generator Custom LDAP Group z Active Directory
 
@@ -332,11 +352,16 @@ raportu restore.
 
 ## Zasady bezpieczeństwa wykonania
 
-- analiza zależności powstaje z running; diff z candidate i natywny
-  `change-summary` są informacją;
-- tuż przed candidate Toolbox pobiera live running/candidate; commit po locku
-  pobiera po jednym live running/candidate, a push jeden live running, zawsze
-  sprawdzając fingerprint każdego dotkniętego XPath;
+- analiza zależności powstaje z running; po Candidate pełny diff running →
+  candidate i natywny `change-summary` stają się obowiązkowym przeglądem przed
+  commit;
+- tuż przed Candidate Toolbox pobiera live running/candidate; commit po locku
+  pobiera jeden live candidate i lekki `change-summary` (pełny running tylko
+  jako fallback), a push jeden live running, zawsze sprawdzając fingerprint
+  każdego dotkniętego XPath;
+- commit porównuje live candidate z zatwierdzonym przeglądem, odtwarza
+  oczekiwany stan z PatchSetu i blokuje każdą zmianę poza planem lub referencję
+  do usuwanej encji pozostawioną poza zakresem;
 - dla cleanupu planner jest ponownie uruchamiany na aktualnym candidate;
   zmieniony zestaw zależności lub zakres DG konfliktuje tylko powiązany
   komponent zamiast wykonywać nieaktualny plan z running;
@@ -395,6 +420,9 @@ zawiera między innymi:
 - `manifest.json`, append-only journal, job IDs, ryzyka i konflikty;
 - `commands.txt`, `raport_krotki.txt`, `raport_szczegolowy.txt` oraz — po
   zapisie — `raport_wykonania_candidate.txt`;
+- po Candidate: `pre_commit_review_*.json`, czytelny
+  `pre_commit_review_*.txt`, pełny `candidate_diff_*.txt` i
+  `scope_guard_*.txt`; każdy plik można wyświetlić lub pobrać osobno z GUI;
 - dla konfliktowego restore: ręczny pakiet `manual_conflicts.json` i
   `manual_conflicts.xml`.
 

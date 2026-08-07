@@ -7,10 +7,12 @@ import hashlib
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from .cleaner_adapter import build_cleanup_patchset
 from .client import PanoramaReadClient, PanoramaWriteClient
+from .commit_review import build_commit_review, build_scope_guard
 from .errors import (
     CapabilityError,
     ConflictError,
@@ -20,12 +22,13 @@ from .errors import (
     ToolboxError,
     ValidationError,
 )
-from .models import ApiStage, Mutation, PatchSet, SessionState
+from .models import ApiStage, Mutation, PatchSet, SessionState, utc_now
 from .sessions import SessionStore
 from .restore import mutation_owner_xpath
 from .xmlutil import (
     device_group_from_xpath,
     find_xpath,
+    fingerprint_element,
     fingerprint_xpath,
     parent_xpath,
     rule_order_context_sha256,
@@ -117,6 +120,35 @@ def reconcile_external_execution(
                     "mutationCount": len(patch.mutations),
                 },
             )
+            if state is SessionState.CANDIDATE_APPLIED:
+                try:
+                    native_summary, native_error = _read_native_change_summary(reader)
+                    baseline = _review_baseline_candidate(
+                        store, session_id, fallback=running
+                    )
+                    _persist_commit_review(
+                        store,
+                        session_id,
+                        running=running,
+                        baseline_candidate=baseline,
+                        candidate=candidate,
+                        patch=patch,
+                        applied_mutation_ids=(
+                            mutation.mutation_id for mutation in patch.mutations
+                        ),
+                        native_summary=native_summary,
+                        native_error=native_error,
+                    )
+                except Exception as review_error:
+                    store.add_risk(
+                        session_id,
+                        "COMMIT_REVIEW_FAILED",
+                        (
+                            "Wykonanie zewnętrzne uzgodniono, ale pełny diff "
+                            f"wymaga ponowienia: {type(review_error).__name__}: "
+                            f"{review_error}"
+                        ),
+                    )
             return state
 
 
@@ -552,6 +584,208 @@ def _write_execution_report(
     )
 
 
+def _read_native_change_summary(
+    reader: PanoramaReadClient,
+) -> tuple[Optional[ET.Element], Optional[str]]:
+    """Read the small Panorama change-summary without invalidating review.
+
+    Some PAN-OS releases do not expose this operational command consistently.
+    The full running/candidate snapshots remain authoritative; an unavailable
+    native summary is recorded and forces a full-running fallback at commit.
+    """
+
+    try:
+        return reader.change_summary(), None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _review_baseline_candidate(
+    store: SessionStore,
+    session_id: str,
+    fallback: ET.Element,
+) -> ET.Element:
+    for label in ("pre_candidate", "plan_candidate"):
+        try:
+            return store.load_snapshot(session_id, label)
+        except (SessionError, ValidationError):
+            continue
+        except Exception:
+            continue
+    return fallback
+
+
+def _persist_commit_review(
+    store: SessionStore,
+    session_id: str,
+    *,
+    running: ET.Element,
+    baseline_candidate: ET.Element,
+    candidate: ET.Element,
+    patch: PatchSet,
+    applied_mutation_ids: Iterable[str],
+    native_summary: Optional[ET.Element],
+    native_error: Optional[str],
+) -> dict[str, Any]:
+    generated_at = utc_now()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    names = {
+        "reviewJson": f"pre_commit_review_{stamp}.json",
+        "reviewText": f"pre_commit_review_{stamp}.txt",
+        "candidateDiff": f"candidate_diff_{stamp}.txt",
+        "scopeGuard": f"scope_guard_{stamp}.txt",
+    }
+    documents = build_commit_review(
+        session_id=session_id,
+        generated_at=generated_at,
+        running=running,
+        baseline_candidate=baseline_candidate,
+        candidate=candidate,
+        patch=patch,
+        applied_mutation_ids=applied_mutation_ids,
+        native_summary=native_summary,
+        native_error=native_error,
+    )
+    documents.compact["artifacts"] = dict(names)
+    documents.payload["artifacts"] = dict(names)
+    store.write_snapshot(session_id, "review_running", running)
+    store.write_snapshot(session_id, "review_candidate", candidate)
+    store.write_artifact(
+        session_id,
+        names["reviewJson"],
+        json.dumps(documents.payload, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        kind="pre-commit-review-json",
+    )
+    store.write_artifact(
+        session_id,
+        names["reviewText"],
+        documents.review_text,
+        kind="pre-commit-review-text",
+    )
+    store.write_artifact(
+        session_id,
+        names["candidateDiff"],
+        documents.config_diff_text,
+        kind="full-running-candidate-diff",
+    )
+    store.write_artifact(
+        session_id,
+        names["scopeGuard"],
+        documents.scope_guard_text,
+        kind="pre-commit-scope-guard",
+    )
+    store.record_commit_review(session_id, documents.compact)
+    return documents.compact
+
+
+def prepare_commit_review(
+    store: SessionStore,
+    session_id: str,
+    reader: PanoramaReadClient,
+    *,
+    progress_callback: Optional[
+        Callable[[int, str, Optional[dict[str, Any]]], None]
+    ] = None,
+) -> dict[str, Any]:
+    """Refresh the exact diff/scope proof for an applied candidate session."""
+
+    with store.operation_lock(session_id):
+        with store.panorama_job_lock(reader.profile.host, session_id):
+            started = time.monotonic()
+
+            def progress(
+                value: int, message: str, detail: Optional[dict[str, Any]] = None
+            ) -> None:
+                if progress_callback is None:
+                    return
+                payload = dict(detail or {})
+                payload.setdefault(
+                    "elapsedSeconds", round(time.monotonic() - started, 1)
+                )
+                try:
+                    progress_callback(max(0, min(100, value)), message, payload)
+                except Exception:
+                    pass
+
+            progress(
+                1,
+                "Przygotowanie pełnego przeglądu przed commit",
+                {"event": "review-start"},
+            )
+            manifest = store.load_manifest(session_id)
+            if manifest["state"] not in {
+                SessionState.CANDIDATE_APPLIED.value,
+                SessionState.PARTIAL.value,
+                SessionState.RESTORED.value,
+            }:
+                raise SessionError(
+                    "Pełny diff przed commit wymaga zastosowanego candidate PatchSet."
+                )
+            patch = store.load_patchset(session_id)
+            _assert_session_identity(patch, reader)
+            application = manifest.get("candidate_application") or {}
+            applied_ids = application.get("applied_mutation_ids") or []
+            if not applied_ids:
+                raise SessionError(
+                    "Manifest nie zawiera listy zastosowanych mutacji candidate."
+                )
+            progress(
+                8,
+                "Pobieranie live running do pełnego diffu (1/2)",
+                {"event": "review-running", "indeterminate": True},
+            )
+            running = reader.fetch_config("running")
+            progress(
+                42,
+                "Pobieranie live candidate do pełnego diffu (2/2)",
+                {"event": "review-candidate", "indeterminate": True},
+            )
+            candidate = reader.fetch_config("candidate")
+            _check_expected_post_state(patch, candidate, applied_ids)
+            progress(
+                66,
+                "Pobieranie lekkiego Panorama change-summary",
+                {"event": "review-native-summary"},
+            )
+            native, native_error = _read_native_change_summary(reader)
+            baseline = _review_baseline_candidate(
+                store, session_id, fallback=running
+            )
+            progress(
+                74,
+                "Budowanie pełnego diffu i scope guard",
+                {"event": "review-build", "indeterminate": True},
+            )
+            review = _persist_commit_review(
+                store,
+                session_id,
+                running=running,
+                baseline_candidate=baseline,
+                candidate=candidate,
+                patch=patch,
+                applied_mutation_ids=applied_ids,
+                native_summary=native,
+                native_error=native_error,
+            )
+            progress(
+                100,
+                (
+                    "Diff gotowy — scope guard PASS"
+                    if review.get("commitReady")
+                    else "Diff gotowy — scope guard zablokował commit"
+                ),
+                {
+                    "event": "review-finished",
+                    "commitReady": bool(review.get("commitReady")),
+                    "findingCount": (
+                        (review.get("scopeGuard") or {}).get("findingCount")
+                    ),
+                },
+            )
+            return review
+
+
 def apply_candidate(
     store: SessionStore,
     session_id: str,
@@ -787,7 +1021,7 @@ def _apply_candidate_unlocked(
                     raise ValidationError(
                         f"Walidacja candidate zakończyła się {validation.result}."
                     )
-            progress(92, "Kontrola wyniku każdej dotkniętej ścieżki", None)
+            progress(90, "Kontrola wyniku każdej dotkniętej ścieżki", None)
             post_candidate = reader.fetch_config("candidate")
             post_failures = _postcondition_failures(safe, post_candidate)
             if post_failures:
@@ -812,10 +1046,62 @@ def _apply_candidate_unlocked(
                 applied_mutation_ids=(mutation.mutation_id for mutation in safe),
                 skipped_components=skipped,
             )
+            progress(
+                94,
+                "Candidate gotowy; budowanie pełnego diffu running → candidate",
+                {"event": "review-build", "indeterminate": True},
+            )
+            review: Optional[dict[str, Any]] = None
+            try:
+                native_summary, native_error = _read_native_change_summary(reader)
+                review = _persist_commit_review(
+                    store,
+                    session_id,
+                    running=running,
+                    baseline_candidate=candidate,
+                    candidate=post_candidate,
+                    patch=patch,
+                    applied_mutation_ids=(
+                        mutation.mutation_id for mutation in safe
+                    ),
+                    native_summary=native_summary,
+                    native_error=native_error,
+                )
+                progress(
+                    99,
+                    (
+                        "Pełny diff gotowy; scope guard PASS"
+                        if review.get("commitReady")
+                        else "Pełny diff gotowy; scope guard zablokował commit"
+                    ),
+                    {
+                        "event": "review-ready",
+                        "commitReady": bool(review.get("commitReady")),
+                        "findingCount": (
+                            (review.get("scopeGuard") or {}).get("findingCount")
+                        ),
+                    },
+                )
+            except Exception as review_error:
+                # Candidate has already passed every per-XPath postcondition.
+                # A local report-generation failure must not guess a rollback;
+                # it simply leaves commit unavailable until review is retried.
+                store.add_risk(
+                    session_id,
+                    "COMMIT_REVIEW_FAILED",
+                    (
+                        "Candidate zastosowany, ale nie przygotowano przeglądu "
+                        f"przed commit: {type(review_error).__name__}: {review_error}"
+                    ),
+                )
             store.transition(session_id, state)
             progress(
                 100,
-                "Candidate zapisany i zwalidowany",
+                (
+                    "Candidate zapisany, zwalidowany i gotowy do przeglądu"
+                    if review is not None
+                    else "Candidate zapisany; przed commit odśwież pełny diff"
+                ),
                 {
                     "event": "complete",
                     "completedOperations": completed_operations,
@@ -1003,12 +1289,23 @@ def _commit_session_unlocked(
     applied_ids = application.get("applied_mutation_ids") or []
     if not applied_ids:
         raise SessionError("Manifest nie zawiera listy zastosowanych mutacji candidate.")
+    review = manifest.get("commit_review")
+    if not isinstance(review, dict):
+        raise ConflictError(
+            "Commit zablokowany: sesja nie ma pełnego diffu running → candidate. "
+            "Uruchom „Odśwież diff i scope guard”, przejrzyj wynik i spróbuj ponownie."
+        )
+    review_guard = review.get("scopeGuard") or {}
+    if not review.get("commitReady") or not review_guard.get("passed"):
+        raise ConflictError(
+            "Commit zablokowany przez scope guard z przeglądu. Otwórz pełny "
+            "raport, usuń zależności lub zmiany spoza PatchSet i odśwież diff."
+        )
 
-    # Acquiring a config lock does not mutate configuration.  The old workflow
-    # downloaded running and candidate both before and after the lock (four
-    # full snapshots).  Read each tree once after the lock instead: the backup
-    # is newer, the fingerprint gate remains live, and large Panorama configs
-    # avoid two redundant downloads.
+    # The expensive two-tree review was already generated immediately after
+    # Candidate.  Commit now reads only live candidate and a small native
+    # change-summary before dispatch.  A full running read is a compatibility
+    # fallback only when PAN-OS does not expose change-summary.
     progress(5, "Sprawdzanie locków konfiguracji i commit", {"event": "lock-check"})
     reader.show_config_locks()
     reader.show_commit_locks()
@@ -1016,25 +1313,151 @@ def _commit_session_unlocked(
     dispatched = False
     terminal_job_result = False
     job_succeeded = False
+    full_config_reads = 0
     try:
         progress(9, "Zakładanie locków dla dotkniętych zakresów", {"event": "lock-acquire"})
         for scope in _direct_lock_scopes(patch):
             writer.acquire_config_lock(scope, f"PanOS Toolbox commit {session_id}")
             acquired.append(scope)
             store.append_event(session_id, "CONFIG_LOCK_ACQUIRED", {"scope": scope or "shared"})
-        progress(15, "Pobieranie live running (1/2)", {"event": "snapshot-running"})
-        pre_running = reader.fetch_config("running")
-        progress(23, "Pobieranie live candidate (2/2)", {"event": "snapshot-candidate"})
+        progress(
+            15,
+            "Preflight: job commit NIE został jeszcze wysłany — pobieranie jedynego live candidate",
+            {"event": "preflight-candidate", "indeterminate": True, "jobDispatched": False},
+        )
         candidate = reader.fetch_config("candidate")
-        store.write_snapshot(session_id, "pre_commit_running", pre_running)
+        full_config_reads += 1
         store.write_snapshot(session_id, "pre_commit_candidate", candidate)
-        progress(32, "Sprawdzanie fingerprintów zastosowanych zmian", {"event": "fingerprint-check"})
+        progress(
+            24,
+            "Preflight: sprawdzanie fingerprintów i zgodności z pokazanym diffem",
+            {"event": "fingerprint-check", "jobDispatched": False},
+        )
         try:
             _check_expected_post_state(patch, candidate, applied_ids)
         except ConflictError as exc:
             store.add_conflicts(session_id, [{"stage": "pre-commit", "detail": str(exc)}])
-            store.transition(session_id, SessionState.CONFLICT)
             raise
+        reviewed_candidate = review.get("candidate") or {}
+        reviewed_candidate_sha = reviewed_candidate.get("semanticSha256")
+        live_candidate_sha = fingerprint_element(candidate)
+        if not reviewed_candidate_sha or live_candidate_sha != reviewed_candidate_sha:
+            detail = (
+                "Candidate zmienił się po przygotowaniu przeglądu. Commit nie został "
+                "wysłany; odśwież pełny diff i scope guard."
+            )
+            store.add_conflicts(
+                session_id,
+                [
+                    {
+                        "stage": "pre-commit",
+                        "reason": "REVIEWED_CANDIDATE_CHANGED",
+                        "detail": detail,
+                        "reviewed_sha256": reviewed_candidate_sha,
+                        "live_sha256": live_candidate_sha,
+                    }
+                ],
+            )
+            raise ConflictError(detail)
+
+        progress(
+            28,
+            "Preflight: ponowny pełny scope guard zależności",
+            {"event": "preflight-scope-guard", "jobDispatched": False},
+        )
+        review_running = store.load_snapshot(session_id, "review_running")
+        baseline_candidate = _review_baseline_candidate(
+            store, session_id, fallback=review_running
+        )
+        live_guard = build_scope_guard(
+            running=review_running,
+            baseline_candidate=baseline_candidate,
+            candidate=candidate,
+            patch=patch,
+            applied_mutation_ids=applied_ids,
+        )
+        live_guard["candidateSemanticSha256"] = live_candidate_sha
+        live_guard["reviewGeneratedAt"] = review.get("generatedAt")
+        store.record_precommit_guard(session_id, live_guard)
+        if not live_guard.get("passed"):
+            store.add_conflicts(
+                session_id,
+                [
+                    {
+                        "stage": "pre-commit-scope-guard",
+                        **finding,
+                    }
+                    for finding in live_guard.get("findings") or ()
+                ],
+            )
+            raise ConflictError(
+                "Commit nie został wysłany: live scope guard znalazł zależność "
+                "lub zmianę poza zakresem. Odśwież diff i sprawdź raport."
+            )
+
+        progress(
+            32,
+            "Preflight: potwierdzanie, że running nie zmienił się od przeglądu",
+            {"event": "preflight-running-proof", "jobDispatched": False},
+        )
+        review_native = review.get("native") or {}
+        reviewed_native_sha = review_native.get("semanticSha256")
+        current_native, current_native_error = _read_native_change_summary(reader)
+        if current_native is not None and reviewed_native_sha:
+            current_native_sha = fingerprint_element(current_native)
+            if current_native_sha != reviewed_native_sha:
+                detail = (
+                    "Panorama change-summary zmienił się od wygenerowania diffu. "
+                    "Commit nie został wysłany; odśwież przegląd."
+                )
+                store.add_conflicts(
+                    session_id,
+                    [
+                        {
+                            "stage": "pre-commit",
+                            "reason": "RUNNING_OR_CHANGE_SUMMARY_CHANGED",
+                            "detail": detail,
+                            "reviewed_sha256": reviewed_native_sha,
+                            "live_sha256": current_native_sha,
+                        }
+                    ],
+                )
+                raise ConflictError(detail)
+        else:
+            progress(
+                34,
+                "Change-summary niedostępny; awaryjne pobieranie live running",
+                {
+                    "event": "preflight-running-fallback",
+                    "indeterminate": True,
+                    "jobDispatched": False,
+                    "detail": current_native_error,
+                },
+            )
+            live_running = reader.fetch_config("running")
+            full_config_reads += 1
+            reviewed_running_sha = (review.get("running") or {}).get(
+                "semanticSha256"
+            )
+            if (
+                not reviewed_running_sha
+                or fingerprint_element(live_running) != reviewed_running_sha
+            ):
+                detail = (
+                    "Running zmienił się od wygenerowania diffu. Commit nie został "
+                    "wysłany; odśwież przegląd."
+                )
+                store.add_conflicts(
+                    session_id,
+                    [
+                        {
+                            "stage": "pre-commit",
+                            "reason": "REVIEWED_RUNNING_CHANGED",
+                            "detail": detail,
+                        }
+                    ],
+                )
+                raise ConflictError(detail)
         if partial:
             store.add_risk(
                 session_id,
@@ -1048,7 +1471,11 @@ def _commit_session_unlocked(
                 "Full commit może objąć oczekujące zmiany innych administratorów.",
             )
         store.transition(session_id, SessionState.COMMITTING)
-        progress(40, "Wysyłanie żądania commit do Panorama", {"event": "panorama-job-dispatch"})
+        progress(
+            38,
+            "Preflight PASS — wysyłanie żądania commit do Panorama",
+            {"event": "panorama-job-dispatch", "jobDispatched": False},
+        )
         job_id = writer.commit(
             partial=partial,
             allow_unisolated_commit=allow_unisolated_commit,
@@ -1057,17 +1484,17 @@ def _commit_session_unlocked(
         dispatched = True
         store.add_job(session_id, "commit-dispatched", {"job_id": job_id})
         progress(
-            44,
+            42,
             f"Panorama przyjęła commit job {job_id}",
-            {"event": "panorama-job-dispatched", "jobId": job_id},
+            {"event": "panorama-job-dispatched", "jobId": job_id, "jobDispatched": True},
         )
 
         def job_progress(detail: dict[str, Any]) -> None:
             panorama_value = detail.get("panoramaProgress")
             mapped = (
-                44 + int(46 * int(panorama_value) / 100)
+                42 + int(53 * int(panorama_value) / 100)
                 if isinstance(panorama_value, int)
-                else 46
+                else 44
             )
             status = str(detail.get("status") or "UNKNOWN")
             suffix = (
@@ -1094,9 +1521,11 @@ def _commit_session_unlocked(
                 detail=f"Commit job {job_id} zakończył się {result.result}.",
             )
             raise PanoramaResponseError(f"Commit job zakończył się {result.result}.")
-        progress(92, "Commit zakończony; pobieranie kontrolnego post-running", {"event": "post-running"})
-        post_running = reader.fetch_config("running")
-        store.write_snapshot(session_id, "post_running", post_running)
+        progress(
+            97,
+            "Panorama potwierdziła sukces joba; finalizacja sesji bez kolejnego pełnego pobrania",
+            {"event": "commit-job-confirmed", "jobId": job_id},
+        )
         store.transition(session_id, SessionState.COMMITTED)
         _release_locks(store, session_id, writer, acquired)
         progress(100, "Commit zakończony poprawnie", {"event": "stage-finished", "jobId": job_id})
@@ -1109,7 +1538,8 @@ def _commit_session_unlocked(
                 "total_duration_seconds": total_duration,
                 "panorama_job_duration_seconds": job_record["duration_seconds"],
                 "phase_timeline_seconds": dict(phase_timeline),
-                "full_config_reads": 3,
+                "full_config_reads": full_config_reads,
+                "post_running_deferred_to_push_or_audit": True,
             },
         )
         return {**job_record, "phase_timeline_seconds": dict(phase_timeline), "total_duration_seconds": total_duration}

@@ -15,6 +15,7 @@ from panos_toolbox.engine import (
     _restore_history_conflicts,
     apply_candidate,
     commit_session,
+    prepare_commit_review,
     push_session,
     reconcile_external_execution,
     server_snapshot_filename,
@@ -47,7 +48,7 @@ from panos_toolbox.restore import (
     select_history,
 )
 from panos_toolbox.sessions import SessionStore
-from panos_toolbox.xmlutil import find_xpath, parent_xpath, parse_xml
+from panos_toolbox.xmlutil import find_xpath, fingerprint_element, parent_xpath, parse_xml
 
 
 class FakeLease:
@@ -77,6 +78,16 @@ class StatefulReader:
     def show_commit_locks(self):
         self.events.append("show:commit-locks")
         return parse_xml('<response status="success"><result /></response>')
+
+    def change_summary(self):
+        self.events.append("show:change-summary")
+        running = fingerprint_element(self.running)
+        candidate = fingerprint_element(self.candidate)
+        return parse_xml(
+            '<response status="success"><result><change-summary>'
+            f'<running>{running}</running><candidate>{candidate}</candidate>'
+            '</change-summary></result></response>'
+        )
 
 
 class StatefulWriter:
@@ -329,7 +340,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(store.load_manifest(session_id)["state"], "COMMITTED")
             self.assertEqual(
                 [event for event in reader.events if event.startswith("fetch:")],
-                ["fetch:running", "fetch:candidate", "fetch:running"],
+                ["fetch:candidate"],
             )
             self.assertEqual(commit_updates[-1][0], 100)
             self.assertIn("stage-finished", commit_result["phase_timeline_seconds"])
@@ -362,7 +373,7 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(push_updates[-1][0], 100)
             self.assertIn("stage-finished", push_result["phase_timeline_seconds"])
 
-    def test_partial_apply_commit_checks_only_applied_mutations(self):
+    def test_partial_apply_blocks_commit_when_candidate_contains_outside_change(self):
         profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
         with tempfile.TemporaryDirectory() as temporary:
             store = SessionStore(Path(temporary), enforce_acl=False)
@@ -379,14 +390,67 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(result.state, SessionState.PARTIAL)
             application = store.load_manifest(session_id)["candidate_application"]
             self.assertEqual(application["applied_mutation_ids"], ["mutation-00001"])
-            commit_session(
-                store,
-                session_id,
-                reader,
-                writer,
-                allow_unisolated_commit=True,
+            manifest = store.load_manifest(session_id)
+            self.assertFalse(manifest["commit_review"]["commitReady"])
+            self.assertTrue(
+                any(
+                    finding["code"] == "CANDIDATE_OUTSIDE_PATCHSET"
+                    for finding in manifest["commit_review"]["scopeGuard"]["findings"]
+                )
             )
-            self.assertEqual(store.load_manifest(session_id)["state"], "COMMITTED")
+            with self.assertRaises(ConflictError):
+                commit_session(
+                    store,
+                    session_id,
+                    reader,
+                    writer,
+                    allow_unisolated_commit=True,
+                )
+            self.assertNotIn("commit", writer.events)
+            self.assertEqual(store.load_manifest(session_id)["state"], "PARTIAL")
+
+    def test_refreshed_review_blocks_residual_reference_to_deleted_address(self):
+        profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
+        baseline = parse_xml(
+            '<config><shared><address>'
+            '<entry name="A"><ip-netmask>192.0.2.1/32</ip-netmask></entry>'
+            '</address><pre-rulebase><security><rules>'
+            '<entry name="KEEP"><source><member>any</member></source>'
+            '<destination><member>any</member></destination><action>allow</action></entry>'
+            '</rules></security></pre-rulebase></shared></config>'
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            reader = StatefulReader(profile, baseline)
+            session_id, _ = self.make_session(store, profile, (mutation(1, "A"),))
+            writer = StatefulWriter(reader)
+            apply_candidate(store, session_id, reader, writer)
+            source = find_xpath(
+                reader.candidate,
+                "/config/shared/pre-rulebase/security/rules/entry[@name='KEEP']/source",
+            )
+            self.assertIsNotNone(source)
+            source.append(parse_xml("<member>A</member>"))
+
+            review = prepare_commit_review(store, session_id, reader)
+            self.assertFalse(review["commitReady"])
+            residual = [
+                finding
+                for finding in review["scopeGuard"]["findings"]
+                if finding["code"] == "RESIDUAL_REFERENCE"
+            ]
+            self.assertEqual(len(residual), 1)
+            self.assertEqual(residual[0]["ownerName"], "KEEP")
+            self.assertEqual(residual[0]["target"], "shared/A")
+            with self.assertRaises(ConflictError):
+                commit_session(
+                    store,
+                    session_id,
+                    reader,
+                    writer,
+                    allow_unisolated_commit=True,
+                )
+            self.assertNotIn("commit", writer.events)
 
     def test_known_job_failures_return_to_retryable_stable_state(self):
         profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)

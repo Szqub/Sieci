@@ -34,14 +34,29 @@ bieżący nie ma jednoznacznego wyniku.
 8. Przerwij `Ctrl+C` po wysłaniu mutacji oraz podczas pollingu commit/push.
    Potwierdź `OUTCOME_UNKNOWN`, zachowane config locki i marker wymagający
    ręcznego reconciliation.
+9. Po poprawnym Candidate otwórz **Pełny przegląd przed Commit**. Potwierdź,
+   że pełny diff, lista zmian i `scope_guard` są zgodne z PatchSetem oraz że
+   każdy artefakt ma niezależne akcje Wyświetl/Pobierz.
+10. Dodaj do live candidate niezależną zmianę poza planem. Odśwież diff i
+    potwierdź `CANDIDATE_OUTSIDE_PATCHSET` oraz zablokowany Commit.
+11. Utwórz obcą politykę lub grupę nadal wskazującą usuwany adres/grupę.
+    Potwierdź `RESIDUAL_REFERENCE` z nazwą właściciela, polem i XPath.
 
 ## 3. Commit
 
 1. Ustaw `api_max_stage=commit`.
 2. Potwierdź, że bez `--allow-unisolated-commit` request nie jest wysyłany.
-3. Wykonaj partial commit testowego administratora i śledź job do `FIN/OK`.
-4. Sprawdź manifest joba, ryzyko same-admin i `post_running.xml`.
-5. Full commit testuj wyłącznie na czystym labie, z obiema jawnymi flagami.
+3. Potwierdź, że podczas preflightu GUI jawnie pokazuje brak wysłanego joba, a
+   Panorama nie ma jeszcze nowego job ID.
+4. Wykonaj partial commit testowego administratora i śledź job od momentu
+   nadania ID aż do `FIN/OK`.
+5. Sprawdź manifest joba, ryzyko same-admin, ostatni scope guard i zgodność
+   SHA live candidate z przeglądem. Po `FIN/OK` GUI ma natychmiast zakończyć
+   etap, bez oczekiwania na blokujący pełny odczyt running.
+6. Potwierdź w logu wydajności jeden pełny odczyt candidate. Jeżeli PAN-OS nie
+   obsługuje `change-summary`, dozwolony jest drugi, jawnie opisany odczyt
+   running jako fallback.
+7. Full commit testuj wyłącznie na czystym labie, z obiema jawnymi flagami.
 
 ## 4. Push
 

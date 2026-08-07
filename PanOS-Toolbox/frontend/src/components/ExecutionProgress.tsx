@@ -4,6 +4,7 @@ import { Card, StatusPill } from "./Primitives";
 
 const stageLabel = {
   candidate: "Candidate",
+  review: "Pełny diff i scope guard",
   commit: "Commit Panorama",
   push: "Push do urządzeń",
 };
@@ -29,14 +30,14 @@ function eventDetail(item: ExecutionProgressItem): string {
 
 export function ExecutionProgress({ job }: { job: ExecutionJob }) {
   const running = job.state === "queued" || job.state === "running";
-  const waitingForPanorama = running
-    && job.current?.event === "panorama-job-poll"
-    && typeof job.current.panoramaProgress !== "number";
+  const waitingForPanorama = running && job.current?.event === "panorama-job-poll" && typeof job.current.panoramaProgress !== "number";
+  const indeterminate = running && (waitingForPanorama || Boolean(job.current?.indeterminate) || ["preflight-candidate", "review-running", "review-candidate", "review-build"].includes(job.current?.event ?? ""));
+  const commitNotDispatched = running && job.kind === "commit" && !job.current?.jobId;
   const elapsed = job.current?.elapsedSeconds;
   const tone = job.state === "success" ? "success" : job.state === "failed" ? "danger" : "warning";
 
   return (
-    <Card className={`execution-progress-card ${waitingForPanorama ? "is-indeterminate" : ""}`} aria-live="polite">
+    <Card className={`execution-progress-card ${indeterminate ? "is-indeterminate" : ""}`} aria-live="polite">
       <div className="execution-progress-head">
         <span className="execution-progress-icon">
           {job.state === "success" ? <CheckCircle2 size={20} /> : job.state === "failed" ? <XCircle size={20} /> : <ServerCog className="spin" size={20} />}
@@ -54,12 +55,13 @@ export function ExecutionProgress({ job }: { job: ExecutionJob }) {
 
       <div className="execution-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={job.progress} aria-label={`Postęp ${stageLabel[job.kind]}`}>
         <span style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} />
-        {waitingForPanorama && <i />}
+        {indeterminate && <i />}
       </div>
 
       <div className="execution-progress-meta">
         <span><Clock3 size={14} /> {typeof elapsed === "number" ? `${elapsed.toFixed(1)} s` : "pomiar wystartował"}</span>
         {job.current?.jobId && <span>Panorama job <code>{job.current.jobId}</code></span>}
+        {commitNotDispatched && <span className="preflight-notice">Job nie jest jeszcze w Panoramie — trwa lokalny/live preflight</span>}
         {waitingForPanorama && <span>Panorama nie raportuje procentu — job jest aktywnie odpytywany</span>}
       </div>
 

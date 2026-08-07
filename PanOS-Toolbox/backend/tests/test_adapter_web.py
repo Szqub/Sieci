@@ -552,6 +552,96 @@ class WebBoundaryTests(unittest.TestCase):
                 self.assertTrue(any(item["event"] == "stage-finished" for item in job["items"]))
                 self.assertIsNotNone(job["finishedAt"])
 
+    def test_every_registered_text_artifact_supports_inline_view_and_download(self):
+        class FakeReadClient:
+            def __init__(self, profile):
+                self.profile = profile
+
+            def authenticate(self, _password):
+                return None
+
+            def system_info(self):
+                return parse_xml(
+                    '<response status="success"><result><system>'
+                    '<sw-version>10.2.16-h4</sw-version>'
+                    '</system></result></response>'
+                )
+
+            def change_summary(self):
+                return parse_xml('<response status="success"><result /></response>')
+
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            profile = PanoramaProfile("192.0.2.10", "admin", api_max_stage=ApiStage.PUSH)
+            patch = build_cleanup_patchset(
+                CleanerAdapterTests.fixture(),
+                (),
+                policy_names=("SEC-MIX",),
+                panorama_host=profile.host,
+                panorama_username=profile.username,
+            ).patchset
+            session_id = store.create(patch, profile)
+            store.write_artifact(
+                session_id,
+                "commands.txt",
+                "delete /config/example\n",
+                kind="api-operation-preview",
+            )
+            app = create_app(
+                static_dir=Path(temporary) / "static",
+                store=store,
+                profile_ceiling=profile,
+            )
+            headers = {"Host": "localhost", "Origin": "http://localhost"}
+            with mock.patch("panos_toolbox.web.PanoramaReadClient", FakeReadClient):
+                client = app.test_client()
+                connected = client.post(
+                    "/api/v1/connections",
+                    json={
+                        "host": profile.host,
+                        "username": profile.username,
+                        "password": "memory-only",
+                        "ssl": True,
+                        "verify_ssl": False,
+                        "api_max_stage": "push",
+                    },
+                    headers=headers,
+                )
+                token_headers = {
+                    "Host": "localhost",
+                    "X-Toolbox-Session": connected.json["session_token"],
+                }
+                inline = client.get(
+                    f"/api/v1/sessions/{session_id}/artifacts/commands.txt?disposition=inline",
+                    headers=token_headers,
+                )
+                self.assertEqual(inline.status_code, 200)
+                self.assertIn("inline", inline.headers["Content-Disposition"])
+                self.assertIn("delete /config/example", inline.get_data(as_text=True))
+
+                backup = store.load_manifest(session_id)["entity_backups"][0]["file"]
+                nested = client.get(
+                    f"/api/v1/sessions/{session_id}/artifacts/{backup}?disposition=inline",
+                    headers=token_headers,
+                )
+                self.assertEqual(nested.status_code, 200)
+                self.assertIn("inline", nested.headers["Content-Disposition"])
+                attached = client.get(
+                    f"/api/v1/sessions/{session_id}/artifacts/commands.txt",
+                    headers=token_headers,
+                )
+                self.assertIn("attachment", attached.headers["Content-Disposition"])
+                wired = _wire_session(store, session_id)
+                self.assertTrue(
+                    any(item["file"] == backup and item["viewable"] for item in wired["artifacts"])
+                )
+                inline.close()
+                nested.close()
+                attached.close()
+
     def test_async_analysis_reports_progress_and_can_split_single_component(self):
         fixture = CleanerAdapterTests.fixture()
 

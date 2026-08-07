@@ -105,6 +105,21 @@ async function download(path: string): Promise<Blob> {
   return response.blob();
 }
 
+function artifactPath(name: string): string {
+  return name.split("/").map((part) => encodeURIComponent(part)).join("/");
+}
+
+async function viewText(path: string): Promise<string> {
+  const headers = new Headers({ Accept: "text/plain, application/json, application/xml" });
+  if (sessionToken) headers.set("X-Toolbox-Session", sessionToken);
+  const response = await fetch(`${API_ROOT}${path}`, { headers, credentials: "same-origin" });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as ApiErrorPayload;
+    throw new ToolboxApiError(response.status, payload);
+  }
+  return response.text();
+}
+
 export const api = {
   async health(): Promise<{ status: string; version: string }> {
     return request("/health");
@@ -323,6 +338,13 @@ export const api = {
     });
   },
 
+  async startCommitReviewJob(sessionId: string): Promise<ExecutionJob> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/commit-review-jobs`, {
+      method: "POST",
+      body: {},
+    });
+  },
+
   async startCommitJob(sessionId: string, options: WriteOptions): Promise<ExecutionJob> {
     return request(`/sessions/${encodeURIComponent(sessionId)}/commit-jobs`, {
       method: "POST",
@@ -397,8 +419,12 @@ export const api = {
     });
   },
 
-  async downloadSessionArtifact(sessionId: string, name: "commands" | "report" | "manifest" | "conflicts" | "bundle"): Promise<Blob> {
-    return download(`/sessions/${encodeURIComponent(sessionId)}/artifacts/${name}`);
+  async downloadSessionArtifact(sessionId: string, name: string): Promise<Blob> {
+    return download(`/sessions/${encodeURIComponent(sessionId)}/artifacts/${artifactPath(name)}`);
+  },
+
+  async viewSessionArtifact(sessionId: string, name: string): Promise<string> {
+    return viewText(`/sessions/${encodeURIComponent(sessionId)}/artifacts/${artifactPath(name)}?disposition=inline`);
   },
 
   async createRestorePlan(input: {

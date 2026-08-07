@@ -115,6 +115,95 @@ export interface DiffSummary {
   diagnosticMismatch: boolean;
 }
 
+export interface SessionArtifact {
+  file: string;
+  kind: string;
+  sha256?: string;
+  writtenUtc?: string;
+  sizeBytes?: number;
+  contentType: string;
+  viewable: boolean;
+  downloadable: boolean;
+}
+
+export interface CommitReviewChange {
+  key: string;
+  change: "added" | "removed" | "changed";
+  entityType: string;
+  scope: string;
+  name: string;
+  rulebase?: string;
+  policyType?: string;
+  xpath: string;
+  planned: boolean;
+  explanation: string;
+  mutationIds: string[];
+  componentIds: string[];
+  causes: string[];
+  operations: Array<{
+    mutationId: string;
+    action: string;
+    xpath: string;
+    where?: string;
+    destination?: string;
+  }>;
+}
+
+export interface ScopeGuardFinding {
+  code: string;
+  detail: string;
+  target: string;
+  ownerType: string;
+  ownerName: string;
+  scope: string;
+  field: string;
+  xpath: string;
+  outsidePlan: boolean;
+}
+
+export interface ScopeGuardResult {
+  passed: boolean;
+  findingCount: number;
+  outsidePlanCount: number;
+  checkedMutationCount: number;
+  candidateProjectionMatches?: boolean;
+  candidateProjectionSha256?: string;
+  projectionError?: string;
+  findings: ScopeGuardFinding[];
+}
+
+export interface CommitReview {
+  schemaVersion: number;
+  sessionId: string;
+  generatedAt: string;
+  commitReady: boolean;
+  running: { rawSha256: string; semanticSha256: string };
+  candidate: { rawSha256: string; semanticSha256: string };
+  native: {
+    available: boolean;
+    has_changes?: boolean;
+    detail: string;
+    semanticSha256?: string;
+    error?: string;
+  };
+  summary: {
+    total: number;
+    planned: number;
+    outsidePlan: number;
+    added: number;
+    removed: number;
+    changed: number;
+  };
+  scopeGuard: ScopeGuardResult;
+  changes: CommitReviewChange[];
+  artifacts: {
+    reviewJson: string;
+    reviewText: string;
+    candidateDiff: string;
+    scopeGuard: string;
+  };
+}
+
 export type IcmpState = "responded" | "timeout" | "error" | "not-run";
 export type Decision = "process" | "skip-live" | "skip-error" | "not-found" | "blocked" | "excluded";
 
@@ -232,6 +321,8 @@ export interface CleanupPlan {
   warnings: string[];
   addresses: AddressAnalysis[];
   operations: PatchOperation[];
+  commitReview?: CommitReview;
+  artifacts?: SessionArtifact[];
 }
 
 export interface AnalysisJob {
@@ -264,12 +355,16 @@ export interface ExecutionProgressItem {
   details?: string;
   pollCount?: number;
   elapsedSeconds?: number;
+  indeterminate?: boolean;
+  jobDispatched?: boolean;
+  commitReady?: boolean;
+  findingCount?: number;
 }
 
 export interface ExecutionJob {
   id: string;
   sessionId: string;
-  kind: "candidate" | "commit" | "push";
+  kind: "candidate" | "review" | "commit" | "push";
   state: "queued" | "running" | "success" | "failed";
   progress: number;
   message: string;
@@ -353,6 +448,9 @@ export interface ToolboxSession {
   sourceSessionIds?: string[];
   description: string;
   jobs: JobStatus[];
+  commitReview?: CommitReview;
+  precommitGuard?: ScopeGuardResult;
+  artifacts?: SessionArtifact[];
 }
 
 export interface AuditResult {
