@@ -191,6 +191,7 @@ export const api = {
     policies: string[];
     runIcmp: boolean;
     recentHitDays: number;
+    allowDefaultPolicyOverride?: boolean;
   }): Promise<CleanupPlan> {
     return request("/cleanup/plans", {
       method: "POST",
@@ -202,6 +203,7 @@ export const api = {
         policies: input.policies,
         run_icmp: input.runIcmp,
         recent_hit_days: input.recentHitDays,
+        allow_default_policy_override: input.allowDefaultPolicyOverride ?? false,
       },
     });
   },
@@ -214,6 +216,7 @@ export const api = {
     policies: string[];
     runIcmp: boolean;
     recentHitDays: number;
+    allowDefaultPolicyOverride?: boolean;
   }): Promise<AnalysisJob> {
     return request("/cleanup/analysis-jobs", {
       method: "POST",
@@ -225,6 +228,7 @@ export const api = {
         policies: input.policies,
         run_icmp: input.runIcmp,
         recent_hit_days: input.recentHitDays,
+        allow_default_policy_override: input.allowDefaultPolicyOverride ?? false,
       },
     });
   },
@@ -265,6 +269,13 @@ export const api = {
         enable_api_write: options.enableApiWrite,
         execution_stage: options.executionStage,
       },
+    });
+  },
+
+  async createPolicyRequestPlan(text: string): Promise<CleanupPlan> {
+    return request("/policy-requests/plans", {
+      method: "POST",
+      body: { text },
     });
   },
 

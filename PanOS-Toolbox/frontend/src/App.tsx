@@ -26,6 +26,7 @@ import { CleanupPage } from "./pages/CleanupPage";
 import { ConnectionPage } from "./pages/ConnectionPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { PlanPage } from "./pages/PlanPage";
+import { PolicyRequestsPage } from "./pages/PolicyRequestsPage";
 import { RestorePage } from "./pages/RestorePage";
 import { WarningsPage } from "./pages/WarningsPage";
 
@@ -46,7 +47,7 @@ const initialAdGroupDraft: AdGroupDraft = {
   templateName: "",
 };
 
-type MainBusy = "connect" | "doctor" | "analyze" | "ad-groups" | "audit" | "history" | null;
+type MainBusy = "connect" | "doctor" | "analyze" | "ad-groups" | "policy-request" | "audit" | "history" | null;
 type StageBusy = "candidate" | "commit" | "push" | "download" | null;
 type RestoreBusy = "plan" | "candidate" | "commit" | "push" | "download" | null;
 type DemoModule = typeof import("./demo");
@@ -109,11 +110,13 @@ export default function App() {
   const [policyText, setPolicyText] = useState("");
   const [runIcmp, setRunIcmp] = useState(true);
   const [recentHitDays, setRecentHitDays] = useState(14);
+  const [allowDefaultPolicyOverride, setAllowDefaultPolicyOverride] = useState(false);
   const [cleanupPlan, setCleanupPlan] = useState<CleanupPlan | null>(null);
   const [executionSession, setExecutionSession] = useState<ToolboxSession | null>(null);
 
   const [adGroupDraft, setAdGroupDraft] = useState<AdGroupDraft>(initialAdGroupDraft);
   const [adGroupResult, setAdGroupResult] = useState<AdGroupGenerationResult | null>(null);
+  const [policyRequestPlan, setPolicyRequestPlan] = useState<CleanupPlan | null>(null);
 
   const [auditQuery, setAuditQuery] = useState("");
   const [auditResult, setAuditResult] = useState<AuditResult | null>(null);
@@ -141,13 +144,14 @@ export default function App() {
     lookupResult?.found.forEach((entity) => add("Lookup punktowy", `${entity.name} jest read-only`, entity.blockedReason, "warning", `${entity.scope} · ${entity.policyType ?? entity.type}`));
     cleanupPlan?.warnings.forEach((warning) => add("Plan cleanup", warning.includes("Application Override") ? "Application Override — read-only" : "Informacja z analizy", warning));
     cleanupPlan?.addresses.forEach((target) => target.entities?.forEach((entity) => add("Plan cleanup", `${entity.name} nie zostanie wykonany automatycznie`, entity.blockedReason, "warning", `${entity.scope} · ${entity.rulebase ?? entity.type}`)));
+    policyRequestPlan?.warnings.forEach((warning) => add("Nowe polityki", "Informacja z parsera / planu", warning));
     restorePlan?.warnings.forEach((warning) => add("Emergency Restore", "Konflikt bieżącego stanu", warning, "danger"));
     restorePlan?.entities.filter((entity) => entity.outcome === "conflict").forEach((entity) => add("Emergency Restore", `Konflikt: ${entity.name}`, entity.detail, "danger", `${entity.type} · ${entity.scope}`));
     adGroupResult?.warnings.forEach((warning) => add("Grupy AD", "Walidacja grup AD", warning));
     adGroupResult?.groups.filter((group) => group.status !== "valid").forEach((group) => add("Grupy AD", `${group.name}: ${group.status}`, group.detail, group.status === "error" ? "danger" : "warning"));
     if (auditResult?.residualReferenceCount) add("Audit", "Pozostały referencje", `Audit wykrył ${auditResult.residualReferenceCount} referencji wymagających przeglądu.`, "warning");
     return collected;
-  }, [connection, lookupResult, cleanupPlan, restorePlan, adGroupResult, auditResult]);
+  }, [connection, lookupResult, cleanupPlan, policyRequestPlan, restorePlan, adGroupResult, auditResult]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -227,6 +231,7 @@ export default function App() {
     setExecutionJob(null);
     setRestoreExecutionJob(null);
     setLookupResult(null);
+    setPolicyRequestPlan(null);
     setDemoMode(false);
     setDemoApi(null);
     setExecutionSession(null);
@@ -279,6 +284,7 @@ export default function App() {
     if (!connection) return;
     setMainBusy("analyze");
     setAnalysisJob(null);
+    setPolicyRequestPlan(null);
     setError(null);
     try {
       const addresses = parseAddressInput(addressText).addresses;
@@ -289,7 +295,7 @@ export default function App() {
       if (demoMode && demoApi) {
         plan = demoApi.demoCleanupPlan;
       } else {
-        let job = await api.createCleanupAnalysisJob({ connectionId: connection.id, addresses, addressObjects, addressGroups, policies, runIcmp, recentHitDays });
+        let job = await api.createCleanupAnalysisJob({ connectionId: connection.id, addresses, addressObjects, addressGroups, policies, runIcmp, recentHitDays, allowDefaultPolicyOverride });
         setAnalysisJob(job);
         while (job.state === "queued" || job.state === "running") {
           await wait(500);
@@ -435,6 +441,22 @@ export default function App() {
         setExecutionSession(job.session);
       }
     } catch (actionError) { setError(getErrorMessage(actionError)); } finally { setStageBusy(null); }
+  };
+
+  const createPolicyRequestPlan = async (text: string) => {
+    setMainBusy("policy-request");
+    setError(null);
+    try {
+      const plan = demoMode && demoApi ? demoApi.demoCleanupPlan : await api.createPolicyRequestPlan(text);
+      setPolicyRequestPlan(plan);
+      setCleanupPlan(plan);
+      setExecutionSession(null);
+      setExecutionJob(null);
+    } catch (policyError) {
+      setError(getErrorMessage(policyError));
+    } finally {
+      setMainBusy(null);
+    }
   };
 
   const commitCleanup = async (allowUnisolated: boolean, allowFull: boolean) => {
@@ -605,9 +627,10 @@ export default function App() {
 
   let page;
   if (view === "connection") page = <ConnectionPage draft={draft} onDraftChange={setDraft} connection={connection} doctor={doctor} busy={mainBusy === "connect" || mainBusy === "doctor" ? mainBusy : null} error={error} onConnect={() => void connect()} onDoctor={() => void runDoctor()} onDemo={enableDemo} demoAvailable={import.meta.env.DEV} />;
-  else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} busy={mainBusy === "analyze"} progress={analysisJob} lookupResult={lookupResult} lookupBusy={lookupBusy} error={error} onLookup={(kind, names, deviceGroup) => void runLookup(kind, names, deviceGroup)} onAddLookupEntities={addLookupEntitiesToBatch} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;
+  else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} allowDefaultPolicyOverride={allowDefaultPolicyOverride} onDefaultPolicyOverrideChange={setAllowDefaultPolicyOverride} busy={mainBusy === "analyze"} progress={analysisJob} lookupResult={lookupResult} lookupBusy={lookupBusy} error={error} onLookup={(kind, names, deviceGroup) => void runLookup(kind, names, deviceGroup)} onAddLookupEntities={addLookupEntitiesToBatch} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;
   else if (view === "warnings") page = <WarningsPage notices={notices} />;
   else if (view === "ad-groups") page = <AdGroupsPage draft={adGroupDraft} onDraftChange={setAdGroupDraft} result={adGroupResult} busy={mainBusy === "ad-groups"} error={error} onGenerate={() => void generateAdGroup()} />;
+  else if (view === "policy-requests") page = <PolicyRequestsPage connection={Boolean(connection)} busy={mainBusy === "policy-request"} error={error} plan={policyRequestPlan} onCreatePlan={(text) => void createPolicyRequestPlan(text)} onOpenConnection={() => navigate("connection")} onOpenPlan={() => navigate("plan")} />;
   else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;

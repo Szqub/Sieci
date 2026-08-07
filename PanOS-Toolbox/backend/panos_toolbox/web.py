@@ -34,6 +34,7 @@ from .errors import (
 )
 from .models import ApiStage, PatchSet, SessionState
 from .lookup import lookup_exact
+from .policy_requests import build_policy_creation_plan
 from .profile import PanoramaProfile, load_profile, normalize_host
 from .service import (
     make_writer,
@@ -330,9 +331,13 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
             "objects": [],
             "blocked_reasons": [],
         }
+        default_protected = any(
+            str(reason.get("code")) == "DEFAULT_POLICY_PROTECTED"
+            for reason in inventory.get("blocked_reasons") or ()
+        )
         decision = (
             "excluded"
-            if target in exclusion_impacted_targets
+            if target in exclusion_impacted_targets or default_protected
             else "skip-live"
             if ping_state == "responded"
             else "skip-error"
@@ -411,7 +416,11 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
                 "icmpDetail": ping.get("detail"),
                 "decision": decision,
                 "excludedByUser": target in excluded_targets,
+                "defaultPolicyProtected": default_protected,
                 "exclusionReason": (
+                    "Wykluczony: dotyka chronionej polityki DEFAULT."
+                    if default_protected
+                    else
                     "Wykluczony ręcznie przez operatora."
                     if target in excluded_targets
                     else "Wykluczony razem z atomowym komponentem zależności."
@@ -457,6 +466,8 @@ def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
         "exclusionImpactedTargets": sorted(exclusion_impacted_targets),
         "excludedComponentIds": sorted(excluded_component_ids),
         "parentSessionId": manifest.get("parent_session_id"),
+        "kind": patch.kind,
+        "defaultPolicyOverride": bool(manifest.get("allow_default_policy_override")),
         "recentHitCount": (manifest.get("last_hit") or {}).get("recent_hit_count", 0),
         "affectedDeviceGroups": manifest.get("affected_device_groups") or [],
         "diff": _wire_diff(manifest.get("diff_summary") or {}),
@@ -489,22 +500,22 @@ def _cleanup_exclusion_closure(
         if mutation.component_id in removed_components
         for cause in mutation.causes
     )
-    while True:
-        next_components = {
-            mutation.component_id
-            for mutation in patch.mutations
-            if mutation.component_id not in removed_components
-            and impacted.intersection(mutation.causes)
-        }
-        if not next_components:
-            break
-        removed_components.update(next_components)
-        impacted.update(
-            cause
-            for mutation in patch.mutations
-            if mutation.component_id in next_components
-            for cause in mutation.causes
-        )
+    # The PatchSet already contains connected-component IDs.  Do not perform
+    # another cause-based transitive walk here: it made a later exclusion of
+    # one row consume unrelated components that happened to share a target
+    # label.  A target removes only its own component; a caller that truly
+    # wants a larger closure sends explicit component IDs from the inspector.
+    removed_components.update(
+        mutation.component_id
+        for mutation in patch.mutations
+        if impacted.intersection(mutation.causes)
+    )
+    impacted.update(
+        cause
+        for mutation in patch.mutations
+        if mutation.component_id in removed_components
+        for cause in mutation.causes
+    )
     remaining = tuple(
         mutation
         for mutation in patch.mutations
@@ -603,6 +614,9 @@ def _create_cleanup_child_plan(
 
     def enrich_child(manifest: dict[str, Any]) -> None:
         manifest["parent_session_id"] = parent_id
+        manifest["allow_default_policy_override"] = bool(
+            parent_manifest.get("allow_default_policy_override")
+        )
         manifest["selected_targets"] = list(component_targets if exclusion_mode else chosen)
         manifest["excluded_targets"] = list(excluded)
         manifest["exclusion_impacted_targets"] = list(exclusion_impacted)
@@ -827,6 +841,7 @@ def _contract() -> dict[str, Any]:
             "POST /cleanup/plans/{id}/components/{component}": "derive isolated component plan",
             "POST /cleanup/plans/{id}/selection": "derive plan for selected target rows",
             "POST /cleanup/plans/{id}/exclusions": "derive a safe plan without selected targets and their atomic components",
+            "POST /policy-requests/plans": "parse ServiceNow-style request text and prepare targeted create operations",
             "POST /sessions/{id}/candidate-jobs": "path-by-path candidate write with progress",
             "POST /sessions/{id}/commit-jobs": "background Panorama commit with phase timings",
             "POST /sessions/{id}/push-jobs": "background Panorama push with phase timings",
@@ -1066,6 +1081,11 @@ def create_app(
                 minimum=1,
                 maximum=3650,
             ),
+            allow_default_policy_override=_json_bool(
+                value,
+                "allow_default_policy_override",
+                default=_json_bool(value, "allowDefaultPolicyOverride", default=False),
+            ),
             progress_callback=progress_callback,
         )
 
@@ -1235,7 +1255,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.4.2", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.5.0", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -1416,6 +1436,58 @@ def create_app(
         value = body()
         result = plan_from_value(value, reader())
         return jsonify(_wire_cleanup_plan(session_store, result["session_id"])), 201
+
+    @app.post("/api/v1/policy-requests/plans")
+    def policy_request_plan():
+        value = body()
+        raw = value.get("text", value.get("request", value.get("payload")))
+        if not isinstance(raw, str) or not raw.strip():
+            raise InputError("Pole text z wklejką zlecenia nie może być puste.")
+        client = reader()
+        result = build_policy_creation_plan(client, raw)
+        session_id = session_store.create(result.patchset, client.profile)
+
+        def enrich(manifest: dict[str, Any]) -> None:
+            manifest["input_targets"] = {
+                **dict(result.input_targets),
+                "ordered": list(result.patchset.targets),
+            }
+            manifest["inventory"] = dict(result.inventory)
+            manifest["icmp"] = []
+            manifest["last_hit"] = {
+                "records": [],
+                "recent_hit_count": 0,
+                "review_count": 0,
+            }
+            manifest["request_kind"] = "policy-create"
+
+        session_store.update(session_id, enrich)
+        session_store.write_artifact(
+            session_id,
+            "commands.txt",
+            "\n".join(
+                json.dumps(operation, ensure_ascii=False, sort_keys=True)
+                for operation in _wire_operations(result.patchset)
+            )
+            + ("\n" if result.patchset.mutations else ""),
+            kind="api-operation-preview",
+        )
+        session_store.write_artifact(
+            session_id,
+            "raport_szczegolowy.txt",
+            "\n".join(
+                [
+                    f"Plan tworzenia polityk: {session_id}",
+                    "Źródło: wklejka ServiceNow / Passes ToDo",
+                    f"Przepływy: {len(result.input_targets.get('flows') or [])}",
+                    f"Mutacje: {len(result.patchset.mutations)}",
+                    *result.warnings,
+                ]
+            )
+            + "\n",
+            kind="detailed-report",
+        )
+        return jsonify(_wire_cleanup_plan(session_store, session_id)), 201
 
     @app.post("/api/v1/cleanup/analysis-jobs")
     def cleanup_analysis_job_start():

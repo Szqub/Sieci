@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_plan.add_argument(
         "--nat-translation", choices=("delete-rule", "block"), default="delete-rule"
     )
+    cleanup_plan.add_argument(
+        "--allow-default-policy-override",
+        action="store_true",
+        help="Jawnie zezwól na dotknięcie polityki DEFAULT i jej zależności (ryzykowne).",
+    )
     _add_connection(cleanup_plan)
     _add_store(cleanup_plan)
     cleanup_apply = cleanup_commands.add_parser("apply", help="Zastosuj PatchSet do candidate.")
@@ -202,6 +207,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ping_workers=args.ping_workers,
                 nat_translation_action=args.nat_translation,
                 recent_hit_days=args.recent_hit_days,
+                allow_default_policy_override=args.allow_default_policy_override,
             )
         elif args.command in {"cleanup", "restore"} and getattr(
             args, f"{args.command}_command"

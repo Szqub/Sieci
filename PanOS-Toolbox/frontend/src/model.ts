@@ -159,6 +159,7 @@ export interface AddressAnalysis {
   icmpDetail?: string;
   decision: Decision;
   excludedByUser?: boolean;
+  defaultPolicyProtected?: boolean;
   exclusionReason?: string;
   lastHit?: string;
   hitCount?: number;
@@ -205,6 +206,8 @@ export interface CleanupPlan {
   exclusionImpactedTargets?: string[];
   excludedComponentIds?: string[];
   parentSessionId?: string;
+  kind?: "cleanup" | "restore" | "future-create";
+  defaultPolicyOverride?: boolean;
   recentHitCount: number;
   affectedDeviceGroups: string[];
   diff: DiffSummary;
@@ -314,7 +317,7 @@ export interface JobStatus {
 
 export interface ToolboxSession {
   id: string;
-  kind: "cleanup" | "restore";
+  kind: "cleanup" | "restore" | "future-create";
   state: SessionState;
   createdAt: string;
   updatedAt: string;

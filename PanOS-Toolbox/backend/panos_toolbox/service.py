@@ -663,6 +663,7 @@ def plan_cleanup_session(
     ping_workers: int = 32,
     nat_translation_action: str = "delete-rule",
     recent_hit_days: int = 14,
+    allow_default_policy_override: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> dict[str, Any]:
     def progress(value: int, message: str) -> None:
@@ -737,6 +738,7 @@ def plan_cleanup_session(
             panorama_host=reader.profile.host,
             panorama_username=reader.profile.username,
             nat_translation_action=nat_translation_action,
+            allow_default_policy_override=allow_default_policy_override,
         )
         patch = result.patchset
         progress(84, "Sprawdzanie Last Hit znalezionych polityk")
@@ -799,6 +801,7 @@ def plan_cleanup_session(
         }
         manifest["inventory"] = inventory
         manifest["nat_translation_action"] = nat_translation_action
+        manifest["allow_default_policy_override"] = allow_default_policy_override
 
     store.update(session_id, enrich)
 

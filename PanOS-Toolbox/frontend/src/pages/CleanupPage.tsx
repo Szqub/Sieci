@@ -29,6 +29,8 @@ interface CleanupPageProps {
   onRunIcmpChange: (value: boolean) => void;
   recentHitDays: number;
   onRecentHitDaysChange: (value: number) => void;
+  allowDefaultPolicyOverride: boolean;
+  onDefaultPolicyOverrideChange: (value: boolean) => void;
   busy: boolean;
   progress: AnalysisJob | null;
   lookupResult: LookupResult | null;
@@ -67,7 +69,7 @@ function lastHitClass(item: Pick<LookupEntity, "lastHit" | "lastHitAgeDays" | "h
   return "last-hit last-hit--red";
 }
 
-export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, busy, progress, lookupResult, lookupBusy, error, onLookup, onAddLookupEntities, onAnalyze, onOpenConnection, onOpenWarnings }: CleanupPageProps) {
+export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIcmp, onRunIcmpChange, recentHitDays, onRecentHitDaysChange, allowDefaultPolicyOverride, onDefaultPolicyOverrideChange, busy, progress, lookupResult, lookupBusy, error, onLookup, onAddLookupEntities, onAnalyze, onOpenConnection, onOpenWarnings }: CleanupPageProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<WorkMode>("point");
   const [activeKind, setActiveKind] = useState<TargetKind>("policy");
@@ -183,7 +185,7 @@ export function CleanupPage({ connection, targetTexts, onTargetTextChange, runIc
           </Card>
 
           <div className="cleanup-options">
-            <Card><CardHeader title="Kontrole przed planem" description="Live walidacja nastąpi ponownie przed zapisem Candidate." action={<Radar size={20} />} /><div className="option-stack"><Toggle checked={runIcmp} onChange={onRunIcmpChange} label="Sprawdź ICMP" description="Odpowiedź lub błąd lokalny pomija IP; nie dotyczy nazw polityk i obiektów." /><label className="range-field"><div><strong>Próg świeżego Last Hit</strong><span>Kolorystyka wyniku pozostaje stała: 14 dni / miesiąc / pół roku.</span></div><div className="range-field__control"><input type="range" min="7" max="90" step="1" value={recentHitDays} onChange={(event) => onRecentHitDaysChange(Number(event.target.value))} /><output>{recentHitDays} dni</output></div></label></div></Card>
+            <Card><CardHeader title="Kontrole przed planem" description="Live walidacja nastąpi ponownie przed zapisem Candidate." action={<Radar size={20} />} /><div className="option-stack"><Toggle checked={runIcmp} onChange={onRunIcmpChange} label="Sprawdź ICMP" description="Odpowiedź lub błąd lokalny pomija IP; nie dotyczy nazw polityk i obiektów." /><Toggle checked={allowDefaultPolicyOverride} onChange={onDefaultPolicyOverrideChange} label="Zezwól na naruszenie DEFAULT" description="Domyślnie polityki DEFAULT i ich zależności są chronione i automatycznie wykluczane." />{allowDefaultPolicyOverride && <Callout severity="danger" title="DEFAULT override aktywny"><p>Plan może dotknąć polityki DEFAULT oraz zależnych obiektów. Ostrzeżenie zostanie zapisane w raporcie i będzie wymagane przed Candidate.</p></Callout>}<label className="range-field"><div><strong>Próg świeżego Last Hit</strong><span>Kolorystyka wyniku pozostaje stała: 14 dni / miesiąc / pół roku.</span></div><div className="range-field__control"><input type="range" min="7" max="90" step="1" value={recentHitDays} onChange={(event) => onRecentHitDaysChange(Number(event.target.value))} /><output>{recentHitDays} dni</output></div></label></div></Card>
             <Card><CardHeader title="Zakres grafu" description="Security, NAT, Application Override i grupy zagnieżdżone." action={<Workflow size={20} />} /><div className="scope-grid"><div><ShieldCheck size={18} /><span><strong>Security</strong><small>source · destination</small></span></div><div><Network size={18} /><span><strong>NAT</strong><small>rules · translation</small></span></div><div><Gauge size={18} /><span><strong>App Override</strong><small>wykrywane jako read-only</small></span></div><div><Workflow size={18} /><span><strong>Grupy</strong><small>pełne zależności</small></span></div></div></Card>
             <div className="analysis-preview"><StatCard label="Do sprawdzenia" value={total} detail="po deduplikacji" tone="accent" /><StatCard label="Snapshot" value="Cache 30 min" detail="kolejny batch bez ponownego downloadu" /><StatCard label="Zmiany" value="0" detail="analiza jest READ ONLY" tone="success" /></div>
             <Callout severity="info" title="Co stanie się przy WRITE?"><p>Toolbox nie ładuje całego configu. Po backupie i sprawdzeniu locków wykonuje osobne operacje XPath XML API, jedna po drugiej, z fingerprintem każdej ścieżki.</p></Callout>

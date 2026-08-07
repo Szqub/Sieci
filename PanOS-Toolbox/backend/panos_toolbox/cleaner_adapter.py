@@ -432,6 +432,7 @@ def build_cleanup_patchset(
     panorama_host: str,
     panorama_username: str,
     nat_translation_action: str = "delete-rule",
+    allow_default_policy_override: bool = False,
 ) -> CleanerPlanResult:
     _legacy_root()
     from panorama_cleanup.models import BlockReason, TargetToken  # type: ignore[import-not-found]
@@ -546,11 +547,29 @@ def build_cleanup_patchset(
         nat_translation_action=nat_translation_action,
     )
 
+    # Capture DEFAULT dependencies before any other safety re-plan.  A single
+    # object can reach both an Application Override and DEFAULT; collecting the
+    # protected rule from the first plan makes sure the DEFAULT warning is not
+    # lost when the App Override branch removes that token first.
+    default_policy_paths: dict[Any, set[str]] = {}
+    for key in plan.deleted_rules:
+        if key.name.casefold() != "default":
+            continue
+        for target in plan.rule_causes.get(key, ()):
+            default_policy_paths.setdefault(target, set()).add(model.rules[key].xpath)
+    for (key, _field), removals in plan.rule_field_removals.items():
+        if key.name.casefold() != "default":
+            continue
+        for affected_tokens in removals.values():
+            for target in affected_tokens:
+                default_policy_paths.setdefault(target, set()).add(model.rules[key].xpath)
+
     # Application Override rules are commonly inherited/read-only on Panorama.
     # Never let one such reference fail halfway through a candidate batch.  A
     # target touching App Override is reported as blocked and the planner is
     # rerun without its complete dependency component.
     app_override_paths: dict[Any, set[str]] = {}
+    blocked_tokens_for_planner: set[Any] = set()
     for key in plan.deleted_rules:
         if key.policy_type != "application-override":
             continue
@@ -565,6 +584,7 @@ def build_cleanup_patchset(
 
     if app_override_paths:
         blocked_tokens = set(app_override_paths)
+        blocked_tokens_for_planner.update(blocked_tokens)
         plan = plan_cleanup_targets(
             model,
             set(tokens) - blocked_tokens,
@@ -597,6 +617,59 @@ def build_cleanup_patchset(
         for cause, record in discovery.items():
             if cause in {target.ip for target in blocked_tokens}:
                 record["status"] = "blocked-app-override"
+
+    # DEFAULT is a platform safety boundary, not an ordinary cleanup target.
+    # A target that reaches a DEFAULT rule is removed from the executable
+    # planner as a whole, including its dependent objects/groups.  The only
+    # way to cross that boundary is an explicit GUI/API override.
+    if default_policy_paths:
+        if allow_default_policy_override:
+            plan.warnings.append(
+                "OSTRZEŻENIE: jawnie włączono override polityki DEFAULT. "
+                "Plan może naruszyć tę politykę oraz jej zależności. "
+                "Przed Candidate/commit wymagana jest ręczna akceptacja zakresu."
+            )
+        else:
+            blocked_tokens = set(default_policy_paths)
+            blocked_tokens_for_planner.update(blocked_tokens)
+            previous_blocked = {
+                target: list(reasons) for target, reasons in plan.blocked_ips.items()
+            }
+            plan = plan_cleanup_targets(
+                model,
+                set(tokens) - blocked_tokens_for_planner,
+                forced_groups={
+                    key: target
+                    for key, target in forced_groups.items()
+                    if target not in blocked_tokens_for_planner
+                },
+                forced_rules={
+                    key: target
+                    for key, target in forced_rules.items()
+                    if target not in blocked_tokens_for_planner
+                },
+                nat_translation_action=nat_translation_action,
+            )
+            for target, reasons in previous_blocked.items():
+                plan.blocked_ips.setdefault(target, []).extend(reasons)
+            for target, paths in sorted(
+                default_policy_paths.items(), key=lambda item: item[0].ip
+            ):
+                plan.blocked_ips[target.ip] = [
+                    BlockReason(
+                        "DEFAULT_POLICY_PROTECTED",
+                        "Cel dotyka polityki DEFAULT; usuwanie i zależności "
+                        "zostały automatycznie wykluczone.",
+                        sorted(paths)[0],
+                    )
+                ]
+                if target.ip in discovery:
+                    discovery[target.ip]["status"] = "blocked-default-policy"
+            plan.warnings.append(
+                "Polityka DEFAULT oraz wszystkie dotykające jej cele zostały "
+                "wykluczone z usuwania. Włącz jawny override tylko po ręcznej "
+                "akceptacji ryzyka."
+            )
 
     for cause, keys in unsupported.items():
         plan.blocked_ips[cause] = [

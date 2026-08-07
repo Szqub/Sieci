@@ -87,6 +87,29 @@ class PointLookupTests(unittest.TestCase):
             ["A", "B"],
         )
 
+    @mock.patch("panos_toolbox.lookup._attach_hit_counts")
+    def test_default_policy_is_read_only_in_point_lookup(self, attach_hits):
+        class DefaultReader(FakeLookupReader):
+            def fetch_xpath(self, xpath, *, config_type):
+                self.assert_running(config_type)
+                if "security/rules" in xpath and "DEFAULT" in xpath:
+                    return parse_xml(
+                        '<response status="success"><result><entry name="DEFAULT">'
+                        '<source><member>OLD-HOST</member></source>'
+                        '<destination><member>any</member></destination>'
+                        '<action>allow</action></entry></result></response>'
+                    )
+                return parse_xml('<response status="success"><result /></response>')
+
+        result = lookup_exact(DefaultReader(), "policy", ["DEFAULT"], device_group="DG-A")
+        self.assertGreaterEqual(len(result["found"]), 1)
+        default_items = [item for item in result["found"] if item["name"] == "DEFAULT"]
+        self.assertTrue(default_items)
+        self.assertTrue(all(item["readOnly"] for item in default_items))
+        self.assertTrue(all("DEFAULT" in item["blockedReason"] for item in default_items))
+        self.assertTrue(any("DEFAULT" in warning for warning in result["warnings"]))
+        attach_hits.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

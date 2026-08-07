@@ -247,7 +247,13 @@ def _wire_entry(entry: ET.Element, query: _Query) -> dict[str, Any]:
             _dependency(query, name=name, relation="translated-address")
             for name in sorted(translated_names - {"any", "none"})
         )
-        if query.policy_type == "application-override":
+        if name.casefold() == "default":
+            read_only = True
+            blocked_reason = (
+                "Polityka DEFAULT jest chroniona. Jej usunięcie i dotknięcie "
+                "zależności wymaga jawnego override w planie cleanup."
+            )
+        elif query.policy_type == "application-override":
             read_only = True
             blocked_reason = (
                 "Application Override jest oznaczony jako read-only: usuń regułę ręcznie "
@@ -356,6 +362,10 @@ def lookup_exact(
     if any(item["policyType"] == "application-override" for item in items):
         warnings.append(
             "Wykryto Application Override. Toolbox pokazuje XPath, ale nie doda tej reguły do automatycznego usuwania."
+        )
+    if any(item["name"].casefold() == "default" for item in items):
+        warnings.append(
+            "Wykryto politykę DEFAULT. Jest chroniona przed usunięciem i dotknięciem zależności bez jawnego override."
         )
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     return {

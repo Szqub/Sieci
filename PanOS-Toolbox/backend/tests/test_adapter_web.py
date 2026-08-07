@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from panos_toolbox.cleaner_adapter import build_cleanup_patchset
+from panos_toolbox.policy_requests import build_policy_creation_plan, parse_policy_request
 from panos_toolbox.models import ApiStage
 from panos_toolbox.profile import PanoramaProfile
 from panos_toolbox.sessions import SessionStore
@@ -134,6 +135,59 @@ class CleanerAdapterTests(unittest.TestCase):
                     any("Application Override" in item for item in result.patchset.warnings)
                 )
 
+    def test_default_policy_is_protected_unless_explicit_override_is_enabled(self):
+        config = self.fixture()
+        shared = config.find("./shared")
+        self.assertIsNotNone(shared)
+        address = shared.find("./address")
+        security_rules = shared.find("./pre-rulebase/security/rules")
+        self.assertIsNotNone(address)
+        self.assertIsNotNone(security_rules)
+        address.append(parse_xml('<entry name="DEFAULT_TARGET"><ip-netmask>198.51.100.77/32</ip-netmask></entry>'))
+        security_rules.append(
+            parse_xml(
+                '<entry name="DEFAULT"><source><member>DEFAULT_TARGET</member></source>'
+                '<destination><member>any</member></destination><action>allow</action></entry>'
+            )
+        )
+
+        protected = build_cleanup_patchset(
+            config,
+            ("198.51.100.77",),
+            panorama_host="pano",
+            panorama_username="admin",
+        )
+        self.assertIn("198.51.100.77", protected.blocked_ips)
+        self.assertEqual(
+            protected.blocked_ips["198.51.100.77"][0].code,
+            "DEFAULT_POLICY_PROTECTED",
+        )
+        self.assertFalse(protected.patchset.mutations)
+        self.assertTrue(any("DEFAULT" in warning for warning in protected.patchset.warnings))
+
+        direct = build_cleanup_patchset(
+            config,
+            (),
+            policy_names=("DEFAULT",),
+            panorama_host="pano",
+            panorama_username="admin",
+        )
+        self.assertIn("policy:DEFAULT", direct.blocked_ips)
+        self.assertEqual(
+            direct.blocked_ips["policy:DEFAULT"][0].code,
+            "DEFAULT_POLICY_PROTECTED",
+        )
+
+        overridden = build_cleanup_patchset(
+            config,
+            ("198.51.100.77",),
+            panorama_host="pano",
+            panorama_username="admin",
+            allow_default_policy_override=True,
+        )
+        self.assertTrue(overridden.patchset.mutations)
+        self.assertTrue(any("override polityki DEFAULT" in warning for warning in overridden.patchset.warnings))
+
     def test_exclusion_expands_over_the_whole_atomic_dependency_component(self):
         result = build_cleanup_patchset(
             self.fixture(),
@@ -165,6 +219,81 @@ class CleanerAdapterTests(unittest.TestCase):
             {cause for mutation in remaining for cause in mutation.causes},
             {"192.0.2.2", "192.0.2.3"},
         )
+
+    def test_sequential_exclusions_keep_unrelated_component_available(self):
+        result = build_cleanup_patchset(
+            self.fixture(),
+            ("192.0.2.1", "192.0.2.2", "192.0.2.3"),
+            panorama_host="pano",
+            panorama_username="admin",
+        )
+        after_first, _, impacted_first = _cleanup_exclusion_closure(
+            result.patchset, ("192.0.2.1",)
+        )
+        self.assertEqual(impacted_first, ("192.0.2.1",))
+        self.assertEqual(
+            {cause for mutation in after_first for cause in mutation.causes},
+            {"192.0.2.2", "192.0.2.3"},
+        )
+        after_second, _, impacted_second = _cleanup_exclusion_closure(
+            result.patchset, ("192.0.2.2",)
+        )
+        self.assertEqual(set(impacted_second), {"192.0.2.2", "192.0.2.3"})
+        self.assertEqual(
+            {cause for mutation in after_second for cause in mutation.causes},
+            {"192.0.2.1"},
+        )
+
+
+class PolicyRequestTests(unittest.TestCase):
+    SAMPLE = """API Answer Success: true
+Passes Done
+[]
+Passes ToDo
+['[GRUPA/USER AD] -> 443-tcp |  |  | bezterminowo',
+ '10.10.10.0/24 -> 10.20.30.40 | 8443-tcp | ssl | bezterminowo']
+Info Src
+{
+  '[GRUPA/USER AD]': {
+    'IdType': 'paloGroup', 'zone': 'USERS', 'device_group': 'DG-APP'
+  },
+  '10.10.10.0/24': {
+    'zone': 'SERVERS', 'device_group': 'DG-APP'
+  }
+}
+Info Dst
+{
+  '443-tcp': {'zone': 'INET', 'device_group': 'DG-APP', 'hg': 'none'},
+  '10.20.30.40': {'zone': 'INET', 'device_group': 'DG-APP', 'hg': 'none'}
+}
+"""
+
+    def test_parser_accepts_mixed_service_request_and_ignores_passes_done(self):
+        parsed = parse_policy_request(self.SAMPLE)
+        self.assertEqual(len(parsed.flows), 2)
+        self.assertEqual(parsed.flows[0].device_group, "DG-APP")
+        self.assertEqual(parsed.flows[0].source_zone, "USERS")
+        self.assertTrue(any("Passes Done" in warning for warning in parsed.warnings))
+
+    def test_creation_plan_uses_targeted_reads_and_naming_conventions(self):
+        class FakeReader:
+            profile = PanoramaProfile("pano", "admin")
+
+            def __init__(self):
+                self.reads = []
+
+            def fetch_xpath(self, xpath, *, config_type="running"):
+                self.reads.append((xpath, config_type))
+                return parse_xml('<response status="success"><result /></response>')
+
+        reader = FakeReader()
+        result = build_policy_creation_plan(reader, self.SAMPLE)
+        self.assertEqual(len(reader.reads), len(result.patchset.mutations) * 2)
+        self.assertTrue(any(m.entity_key.endswith("/H-10.20.30.40-32") for m in result.patchset.mutations))
+        self.assertTrue(any(m.entity_key.endswith("/N-10.10.10.0-24") for m in result.patchset.mutations))
+        self.assertTrue(any(m.entity_type == "service" and "SVC__8443-tcp" in m.entity_key for m in result.patchset.mutations))
+        policy = next(m for m in result.patchset.mutations if m.entity_type == "policy" and "N-10.10.10.0-24__H-10.20.30.40-32" in m.entity_key)
+        self.assertIn("<action>allow</action>", policy.after_xml or "")
 
 
 class WebBoundaryTests(unittest.TestCase):

@@ -227,6 +227,9 @@ def _cleanup_candidate_replan_conflicts(
             nat_translation_action=str(
                 manifest.get("nat_translation_action") or "delete-rule"
             ),
+            allow_default_policy_override=bool(
+                manifest.get("allow_default_policy_override")
+            ),
         ).patchset
     except Exception as exc:
         return components, [

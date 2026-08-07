@@ -130,6 +130,14 @@ oraz każdy obiekt/grupa zależna od takiej reguły są oznaczone
 `APP_OVERRIDE_READ_ONLY`, raportowane w GUI i wyłączane z automatycznych mutacji.
 Chroni to batch przed zatrzymaniem na regule dziedziczonej albo read-only.
 
+Polityka o nazwie `DEFAULT` jest dodatkową granicą bezpieczeństwa. Jeżeli
+wybrany IP, obiekt, grupa albo polityka dotyka `DEFAULT` lub jej zależności,
+cały powiązany komponent zostaje automatycznie wykluczony z usuwania i jest
+oznaczony `DEFAULT_POLICY_PROTECTED`. W ekranie Cleanup opcja **Zezwól na
+naruszenie DEFAULT** jest domyślnie wyłączona. Jej włączenie zapisuje jawne
+ostrzeżenie w manifeście i raporcie, a przed Candidate pojawia się osobne
+potwierdzenie ryzyka; bez niego polityka `DEFAULT` nie jest modyfikowana.
+
 Wszystkie ostrzeżenia analizy, blokady read-only, puste/brakujące grupy AD i
 konflikty Restore są dodatkowo zebrane w jednej sekcji **Uwagi** w sidebarze.
 Pomarańczowy badge pokazuje liczbę aktywnych uwag; lista główna nie jest przez
@@ -138,6 +146,26 @@ nie zasłaniana. Szczegóły planu i operacji pozostają w rozwijanym panelu na 
 Kliknięcie **Analizuj zależności** niczego nie zapisuje. Wynikiem są: plan GUI,
 komendy CLI, raport krótki, raport szczegółowy i manifest. Candidate, commit i
 push pozostają trzema osobnymi, jawnymi etapami.
+
+Lista planu jest domyślnie sortowana od najnowszego Last Hit. Przyciski **<14
+dni**, **<1 miesiąc** i **<3 miesiące** pozwalają jednym kliknięciem wykluczyć
+świeże cele przed wykonaniem; wykluczenie dotyczy tylko wybranych atomowych
+komponentów i nie blokuje niezależnych pozycji.
+
+## Nowe polityki z wklejki ServiceNow
+
+Sekcja **Nowe polityki** przyjmuje bezpośrednio wklejkę zawierającą `Passes
+ToDo`, `Info Src` i `Info Dst` w JSON, Python repr albo mieszanym formacie.
+`Passes Done` jest ignorowane i trafia do ostrzeżeń. Toolbox nie pobiera
+pełnego configu: dla każdego obiektu, grupy, usługi i reguły wykonuje punktowe
+odczyty XML API w running oraz candidate, a następnie pokazuje plan do ręcznej
+akceptacji.
+
+Generator przygotowuje osobne mutacje z backupem i rollbackiem w podanym DG,
+rulebase oraz strefach. Konwencje nazw to `H-IP-32` dla hosta, `N-SIEC-PREFIX`
+dla sieci, `HG__NAZWA` dla grupy, `SVC__PORT-protocol` dla usługi i
+`SOURCE__DESTINATION` dla polityki. Istniejące encje są pomijane z
+ostrzeżeniem; zapis do Candidate nadal wymaga zielonego WRITE.
 
 W sekcji **Wykonanie kontrolowane** nie ma wyboru „poziomu API”. Zielony WRITE
 odblokowuje trzy osobne przyciski zgodnie ze stanem sesji. Candidate wykonuje
@@ -244,6 +272,13 @@ python .\panos-toolbox.py cleanup plan --object "OLD-WEB-SERVER"
 python .\panos-toolbox.py cleanup plan --group "GRP-LEGACY-SERVERS"
 python .\panos-toolbox.py cleanup plan --policy "ALLOW LEGACY APP"
 python .\panos-toolbox.py cleanup plan --ip 10.0.0.10 --object "OLD-WEB-SERVER" --group "GRP-LEGACY-SERVERS" --policy "ALLOW LEGACY APP"
+```
+
+Chronioną politykę `DEFAULT` można jawnie objąć planem wyłącznie po świadomej
+akceptacji ryzyka:
+
+```powershell
+python .\panos-toolbox.py cleanup plan --policy DEFAULT --allow-default-policy-override
 ```
 
 Etapy zapisu wymagają profilu z odpowiednim limitem i jawnej flagi:

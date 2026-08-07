@@ -122,10 +122,9 @@ code {
 }
 .brand__mark::before { content: ""; position: absolute; inset: 2px; background: #0a1723; clip-path: inherit; }
 .brand__mark b { position: relative; z-index: 1; font: 800 .82rem/1 "Cascadia Code", Consolas, monospace; letter-spacing: -.08em; }
-.brand__copy { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-.brand__copy strong { font-size: 1.17rem; line-height: 1; letter-spacing: -.035em; background: linear-gradient(90deg, #f5fbff, #9fefff); background-clip: text; -webkit-background-clip: text; color: transparent; }
-.brand__copy small { display: flex; align-items: center; gap: 5px; color: var(--brand-cyan); font-size: .6rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
-.brand__copy i { width: 10px; height: 1px; background: var(--brand-cyan); opacity: .6; }
+.brand__copy { min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 5px; text-align: center; }
+.brand__copy strong { display: block; font-size: 1.17rem; line-height: 1; letter-spacing: -.035em; background: linear-gradient(90deg, #f5fbff, #9fefff); background-clip: text; -webkit-background-clip: text; color: transparent; }
+.brand__copy small { display: block; color: var(--brand-cyan); font-size: .6rem; font-weight: 750; letter-spacing: .1em; line-height: 1; text-transform: uppercase; white-space: nowrap; }
 .sidebar__close { display: none; margin-left: auto; border: 0; background: none; }
 
 .environment-card {
@@ -917,6 +916,19 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .plan-list-toolbar strong { font-size: .76rem; }
 .plan-list-toolbar span { color: var(--text-muted); font-size: .62rem; }
 .selection-counter { color: var(--accent) !important; font-weight: 750; }
+.recent-exclusion-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 9px 17px; color: var(--text-muted); background: color-mix(in srgb, var(--danger) 4%, var(--surface)); border-bottom: 1px solid var(--border); }
+.recent-exclusion-toolbar > span { margin-right: auto; font-size: .62rem; }
+.recent-exclusion-toolbar > span strong { color: var(--text-soft); }
+.policy-request-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr); gap: 15px; align-items: start; }
+.policy-request-input-card { display: flex; flex-direction: column; gap: 12px; }
+.policy-request-editor { width: 100%; min-height: 560px; resize: vertical; padding: 14px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; font: .72rem/1.55 "Cascadia Code", Consolas, monospace; }
+.policy-request-info { display: flex; flex-direction: column; gap: 15px; }
+.policy-request-checklist { display: grid; gap: 9px; }
+.policy-request-checklist > div { display: flex; flex-direction: column; gap: 3px; padding: 10px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 9px; }
+.policy-request-checklist strong { color: var(--accent); font: .72rem "Cascadia Code", Consolas, monospace; }
+.policy-request-checklist span { color: var(--text-muted); font-size: .64rem; line-height: 1.4; }
+.policy-request-result { display: flex; flex-direction: column; gap: 10px; }
+.policy-request-result .stat-card { min-height: 86px; }
 .exclusion-summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 17px; color: var(--text-soft); background: color-mix(in srgb, var(--warning) 8%, var(--surface-soft)); border-bottom: 1px solid color-mix(in srgb, var(--warning) 28%, var(--border)); }
 .exclusion-summary > div:first-child { display: flex; min-width: 0; align-items: flex-start; gap: 9px; }
 .exclusion-summary > div:first-child > svg { flex: none; color: var(--warning); }
@@ -1076,7 +1088,9 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
   .inspector-fields, .entity-field-grid, .analysis-summary-grid { grid-template-columns: 1fr; }
   .entity-last-hit { grid-template-columns: 1fr; }
   .entity-backups > div { grid-template-columns: 1fr; }
-  .plan-list-toolbar, .exclusion-summary { align-items: stretch; flex-direction: column; }
+  .policy-request-layout { grid-template-columns: 1fr; }
+  .policy-request-editor { min-height: 400px; }
+  .plan-list-toolbar, .recent-exclusion-toolbar, .exclusion-summary { align-items: stretch; flex-direction: column; }
   .plan-list-toolbar > div:last-child { flex-wrap: wrap; }
   .execution-components > section { grid-template-columns: 1fr; }
   .execution-components > section > .button { grid-column: auto; justify-self: stretch; }

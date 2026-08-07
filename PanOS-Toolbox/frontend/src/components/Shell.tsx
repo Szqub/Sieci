@@ -22,7 +22,7 @@ import type { ConnectionSession } from "../model";
 import { shortId } from "../model";
 import { Button, StatusPill } from "./Primitives";
 
-export type ViewId = "connection" | "cleanup" | "plan" | "execute" | "warnings" | "ad-groups" | "audit" | "history" | "restore";
+export type ViewId = "connection" | "cleanup" | "plan" | "execute" | "warnings" | "ad-groups" | "policy-requests" | "audit" | "history" | "restore";
 
 const navItems: Array<{ id: ViewId; label: string; description: string; icon: typeof Network }> = [
   { id: "connection", label: "Połączenie", description: "Panorama i Doctor", icon: LayoutDashboard },
@@ -31,6 +31,7 @@ const navItems: Array<{ id: ViewId; label: string; description: string; icon: ty
   { id: "execute", label: "Wykonaj", description: "Candidate · Commit · Push", icon: Zap },
   { id: "warnings", label: "Uwagi", description: "Analiza i blokady", icon: AlertTriangle },
   { id: "ad-groups", label: "Grupy AD", description: "Custom LDAP Group", icon: UsersRound },
+  { id: "policy-requests", label: "Nowe polityki", description: "Wklejka → API plan", icon: Network },
   { id: "audit", label: "Audit", description: "Pozostałe referencje", icon: SearchCheck },
   { id: "history", label: "Backup i restore", description: "Sesje i joby", icon: History },
   { id: "restore", label: "Emergency Restore", description: "Bezpieczne odtworzenie", icon: RefreshCcw },
@@ -74,7 +75,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
         <div className="brand">
           <div className="bytetech-brand" title="ByteTech">
             <span className="brand__mark"><b>BT</b></span>
-            <span className="brand__copy"><strong>ByteTech</strong><small><i /> PanOS ToolBox <i /></small></span>
+            <span className="brand__copy"><strong>ByteTech</strong><small>PanOS Toolbox</small></span>
           </div>
           <button className="sidebar__close" onClick={() => setMobileOpen(false)} aria-label="Zamknij nawigację"><X size={20} /></button>
         </div>
@@ -108,7 +109,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
         <div className="sidebar__footer">
           <div className="safety-note"><ShieldCheck size={17} /><span>API i GUI dostępne wyłącznie na localhost.</span></div>
           <div className="paloalto-brand"><span>Built for</span><img src="/paloalto-logo-light.png" alt="Palo Alto Networks" /><small>{connection ? `PAN-OS ${connection.panoramaVersion}` : "Panorama XML API"}</small></div>
-          <span>Open source · ByteTech · v0.4.2</span>
+          <span>Open source · ByteTech · v0.5.0</span>
           <strong className="author-brand">Szymon Żołnierczyk · Devops Engineer NET</strong>
         </div>
       </aside>
