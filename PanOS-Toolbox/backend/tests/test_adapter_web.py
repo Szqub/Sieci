@@ -428,6 +428,8 @@ class WebBoundaryTests(unittest.TestCase):
                         "ssl": False,
                         "verify_ssl": False,
                         "api_max_stage": "candidate",
+                        "save_profile": True,
+                        "profile_name": "Test Panorama",
                     },
                     headers={"Host": "localhost", "Origin": "http://localhost"},
                 )
@@ -435,7 +437,13 @@ class WebBoundaryTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json["api_max_stage"], "push")
                 self.assertEqual(response.json["panorama_version"], "10.2.16-h4")
+                self.assertTrue(response.json["profile_saved"])
                 self.assertNotIn("not-persisted", response.get_data(as_text=True))
+                profiles = client.get(
+                    "/api/v1/profiles", headers={"Host": "localhost"}
+                )
+                self.assertEqual(profiles.status_code, 200)
+                self.assertEqual(profiles.json["profiles"][0]["name"], "Test Panorama")
                 token = response.json["session_token"]
                 disconnected = client.delete(
                     "/api/v1/connections/current",

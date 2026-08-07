@@ -1,22 +1,26 @@
-import { CircleGauge, FlaskConical, KeyRound, LoaderCircle, LockKeyhole, Radar, Server, ShieldCheck, Wifi } from "lucide-react";
-import type { ConnectionDraft, ConnectionSession, DoctorResult } from "../model";
+import { CircleGauge, FlaskConical, KeyRound, LoaderCircle, LockKeyhole, Radar, Server, ShieldCheck, Trash2, Wifi } from "lucide-react";
+import type { ConnectionDraft, ConnectionSession, DoctorResult, SavedProfile } from "../model";
 import { formatDate } from "../model";
 import { Button, Callout, Card, CardHeader, PageHeader, ResultIcon, StatusPill, Toggle } from "../components/Primitives";
 
 interface ConnectionPageProps {
   draft: ConnectionDraft;
   onDraftChange: (draft: ConnectionDraft) => void;
+  savedProfiles: SavedProfile[];
+  profileStorage: string;
   connection: ConnectionSession | null;
   doctor: DoctorResult | null;
   busy: "connect" | "doctor" | null;
   error: string | null;
   onConnect: () => void;
   onDoctor: () => void;
+  onSelectProfile: (profileId: string) => void;
+  onDeleteProfile: (profileId: string) => void;
   onDemo: () => void;
   demoAvailable: boolean;
 }
 
-export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy, error, onConnect, onDoctor, onDemo, demoAvailable }: ConnectionPageProps) {
+export function ConnectionPage({ draft, onDraftChange, savedProfiles, profileStorage, connection, doctor, busy, error, onConnect, onDoctor, onSelectProfile, onDeleteProfile, onDemo, demoAvailable }: ConnectionPageProps) {
   const update = <K extends keyof ConnectionDraft>(key: K, value: ConnectionDraft[K]) => onDraftChange({ ...draft, [key]: value });
 
   return (
@@ -24,7 +28,7 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
       <PageHeader
         eyebrow="Workspace / Connection"
         title="Połącz Toolbox z Panorama"
-        description="Poświadczenia żyją wyłącznie w pamięci procesu. Połączenie wykonuje keygen, odczyt prawdziwej wersji systemu i status Candidate — nie pobiera całej konfiguracji."
+        description="Możesz połączyć się jednorazowo albo zapisać profil użytkownika. Hasło zapisane w profilu jest szyfrowane przez Windows DPAPI; sesja API nadal żyje tylko w pamięci."
         actions={connection && <StatusPill tone="success">Połączono · {connection.panoramaVersion}</StatusPill>}
       />
 
@@ -34,6 +38,13 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
         <Card className="connection-form-card">
           <CardHeader title="Połączenie z Panorama" description="Jeden przełącznik READ ONLY / WRITE znajduje się stale w górnym pasku." action={<Server size={20} />} />
           <form onSubmit={(event) => { event.preventDefault(); onConnect(); }} className="form-stack" autoComplete="off">
+            <div className="saved-profile-row">
+              <label className="field">
+                <span>Zapisany profil <small>{savedProfiles.length ? `${savedProfiles.length} dostępne` : "brak"}</small></span>
+                <div className="input-with-icon"><ShieldCheck size={17} /><select value={draft.profileId ?? ""} onChange={(event) => onSelectProfile(event.target.value)} aria-label="Wybierz zapisany profil"><option value="">Nowe połączenie</option>{savedProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.host} · {profile.username}</option>)}</select></div>
+              </label>
+              {draft.profileId && <Button type="button" variant="ghost" icon={<Trash2 size={15} />} onClick={() => onDeleteProfile(draft.profileId!)}>Usuń profil</Button>}
+            </div>
             <div className="field-grid field-grid--2">
               <label className="field">
                 <span>Host Panorama</span>
@@ -44,17 +55,25 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
                 <div className="input-with-icon"><ShieldCheck size={17} /><input value={draft.username} onChange={(event) => update("username", event.target.value)} placeholder="superadmin" required autoComplete="username" /></div>
               </label>
             </div>
-            <label className="field">
-              <span>Hasło <small>nie zostanie zapisane</small></span>
-              <div className="input-with-icon"><KeyRound size={17} /><input type="password" value={draft.password} onChange={(event) => update("password", event.target.value)} placeholder="••••••••••••" required autoComplete="current-password" /></div>
+              <label className="field">
+              <span>Hasło <small>{draft.profileId ? "puste = użyj szyfrowanego profilu" : "nie jest zapisywane bez zgody"}</small></span>
+              <div className="input-with-icon"><KeyRound size={17} /><input type="password" value={draft.password} onChange={(event) => update("password", event.target.value)} placeholder={draft.profileId ? "•••••••• (z profilu)" : "••••••••••••"} required={!draft.profileId} autoComplete="current-password" /></div>
             </label>
+
+            <div className="field-grid field-grid--2">
+              <label className="field">
+                <span>Nazwa profilu <small>opcjonalnie</small></span>
+                <div className="input-with-icon"><Server size={17} /><input value={draft.profileName ?? ""} onChange={(event) => update("profileName", event.target.value)} placeholder="Panorama produkcja" /></div>
+              </label>
+              <div className="profile-save-option"><Toggle checked={Boolean(draft.rememberProfile)} onChange={(value) => update("rememberProfile", value)} label="Zapamiętaj profil" description="Host, użytkownik i zaszyfrowane hasło w profilu Windows" /></div>
+            </div>
 
             <div className="setting-panel">
               <Toggle checked={draft.ssl} onChange={(value) => onDraftChange({ ...draft, ssl: value, verifySsl: value ? draft.verifySsl : false })} label="HTTPS / SSL" description={draft.ssl ? "Połączenie przez HTTPS" : "Połączenie HTTP — tylko dla zaufanej sieci administracyjnej"} />
               <Toggle checked={draft.verifySsl} onChange={(value) => update("verifySsl", value)} label="Weryfikuj certyfikat" description={draft.verifySsl ? "Łańcuch certyfikatu musi być zaufany" : "Odpowiednik --insecure; tożsamość hosta nie jest weryfikowana"} disabled={!draft.ssl} danger={draft.ssl && !draft.verifySsl} />
             </div>
 
-            {!draft.verifySsl && draft.ssl && <Callout severity="warning" title="Certyfikat nie będzie weryfikowany"><p>Połączenie jest szyfrowane, ale podatne na podszycie się pod urządzenie. Używaj wyłącznie w kontrolowanej sieci.</p></Callout>}
+            {!draft.verifySsl && draft.ssl && <Callout severity="warning" title="Certyfikat domyślnie nie jest weryfikowany"><p>Połączenie jest szyfrowane, ale podatne na podszycie się pod urządzenie. Włącz weryfikację, gdy Panorama ma zaufany łańcuch CA.</p></Callout>}
 
             <div className="form-actions">
               <Button type="button" onClick={onDoctor} loading={busy === "doctor"} icon={<CircleGauge size={17} />}>Uruchom Doctor</Button>
@@ -68,6 +87,7 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
               </div>
             )}
           </form>
+          <div className="profile-storage-note"><LockKeyhole size={15} /><span>{profileStorage ? `Trwały magazyn: ${profileStorage}` : "Trwały magazyn: Dokumenty / PanOS Toolbox"}<small>profiles.json nie zawiera hasła w plaintext; katalog jest prywatny dla użytkownika.</small></span></div>
           {demoAvailable && (
             <button className="demo-link" type="button" onClick={onDemo}><FlaskConical size={15} /> Otwórz bezpieczne dane demonstracyjne</button>
           )}
@@ -98,7 +118,7 @@ export function ConnectionPage({ draft, onDraftChange, connection, doctor, busy,
 
           <Card className="safety-card">
             <LockKeyhole size={22} />
-            <div><h2>Granice bezpieczeństwa</h2><p>Backend nasłuchuje tylko na 127.0.0.1. Hasło i API key nie trafiają do plików, historii ani storage przeglądarki.</p></div>
+            <div><h2>Granice bezpieczeństwa</h2><p>Backend nasłuchuje tylko na 127.0.0.1. API key i hasło bieżącej sesji nie trafiają do historii ani storage przeglądarki; zapisany profil używa DPAPI konta Windows.</p></div>
           </Card>
 
           <Card>

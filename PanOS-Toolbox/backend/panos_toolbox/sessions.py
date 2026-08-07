@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import re
+import shutil
 import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from .errors import IntegrityError, SessionError
 from .models import Mutation, PatchSet, SessionState, canonical_json, json_sha256, utc_now
 from .profile import PanoramaProfile
+from .profile_store import default_toolbox_root
 from .xmlutil import raw_sha256
 
 
@@ -43,10 +45,7 @@ class AppliedCleanup:
 
 
 def default_session_root() -> Path:
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        return Path(local) / "PanOSToolbox" / "sessions"
-    return Path.home() / ".local" / "share" / "PanOSToolbox" / "sessions"
+    return default_toolbox_root() / "sessions"
 
 
 def _atomic_write(path: Path, payload: bytes, mode: int = 0o600) -> None:
@@ -195,9 +194,42 @@ _TRANSITIONS: dict[SessionState, set[SessionState]] = {
 
 class SessionStore:
     def __init__(self, root: Optional[Path] = None, *, enforce_acl: bool = True):
+        self._using_default_root = root is None
         self.root = (root or default_session_root()).expanduser().resolve()
         self.enforce_acl = enforce_acl
         _harden_directory(self.root, enforce=enforce_acl)
+        if self._using_default_root:
+            self._migrate_legacy_sessions()
+
+    def _migrate_legacy_sessions(self) -> None:
+        """Copy old portable/LOCALAPPDATA sessions into the stable user root."""
+
+        candidates: list[Path] = [
+            Path(__file__).resolve().parents[2] / "backupy" / "sessions",
+        ]
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            candidates.append(Path(localappdata) / "PanOSToolbox" / "sessions")
+        candidates.append(Path.home() / ".local" / "share" / "PanOSToolbox" / "sessions")
+        for source in candidates:
+            try:
+                source = source.expanduser().resolve()
+            except OSError:
+                continue
+            if source == self.root or not source.is_dir():
+                continue
+            for session in source.glob("session-*"):
+                if not session.is_dir() or (session / ".operation.lock").exists():
+                    continue
+                destination = self.root / session.name
+                if destination.exists():
+                    continue
+                try:
+                    shutil.copytree(session, destination)
+                except OSError:
+                    # A stale/partially copied legacy session must not prevent
+                    # a fresh GUI from starting; the original remains intact.
+                    continue
 
     def _directory(self, session_id: str) -> Path:
         if not session_id.startswith("session-") or any(

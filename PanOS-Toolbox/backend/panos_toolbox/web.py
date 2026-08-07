@@ -36,6 +36,7 @@ from .models import ApiStage, PatchSet, SessionState
 from .lookup import lookup_exact
 from .policy_requests import build_policy_creation_plan
 from .profile import PanoramaProfile, load_profile, normalize_host
+from .profile_store import ProfileStore
 from .service import (
     make_writer,
     normalize_ips,
@@ -774,14 +775,24 @@ class ConnectionRegistry:
             item[1].close()
 
 
-def _profile_from_json(value: dict[str, Any]) -> PanoramaProfile:
-    host = str(value.get("host", "")).strip()
-    username = str(value.get("username", "")).strip()
+def _profile_from_json(
+    value: dict[str, Any], saved: Optional[PanoramaProfile] = None
+) -> PanoramaProfile:
+    host = str(value.get("host", saved.host if saved else "")).strip()
+    username = str(value.get("username", saved.username if saved else "")).strip()
     if not host or not username:
         raise InputError("Połączenie wymaga host i username.")
-    use_ssl = _json_bool(value, "ssl", fallback_key="useSsl", default=True)
+    use_ssl = _json_bool(
+        value,
+        "ssl",
+        fallback_key="useSsl",
+        default=saved.use_ssl if saved else True,
+    )
     verify_ssl = _json_bool(
-        value, "verify_ssl", fallback_key="verifySsl", default=use_ssl
+        value,
+        "verify_ssl",
+        fallback_key="verifySsl",
+        default=saved.verify_ssl if saved else False,
     )
     if not use_ssl and verify_ssl:
         raise InputError("verify_ssl nie może być włączone dla HTTP.")
@@ -791,7 +802,15 @@ def _profile_from_json(value: dict[str, Any]) -> PanoramaProfile:
         use_ssl=use_ssl,
         verify_ssl=verify_ssl,
         api_max_stage=ApiStage.parse(
-            str(value.get("api_max_stage", value.get("apiMaxStage", "read-only")))
+            str(
+                value.get(
+                    "api_max_stage",
+                    value.get(
+                        "apiMaxStage",
+                        saved.api_max_stage.value if saved else "read-only",
+                    ),
+                )
+            )
         ),
     )
 
@@ -828,11 +847,14 @@ def _contract() -> dict[str, Any]:
         "writeStages": [stage.value for stage in ApiStage],
         "authentication": {
             "connectionTokenHeader": "X-Toolbox-Session",
-            "persistence": "memory-only",
+            "persistence": "encrypted-profiles-and-memory-session-token",
+            "profileStorage": "per-user Documents/PanOS Toolbox/profiles.json",
         },
         "paths": {
             "POST /connections": "keygen and create memory-only connection",
             "DELETE /connections/current": "destroy current connection",
+            "GET /profiles": "list saved profile metadata without secrets",
+            "DELETE /profiles/{id}": "delete an encrypted saved profile",
             "GET|POST /lookup": "targeted exact lookup without full running config",
             "POST /ad-groups/generate": "validate local AD groups and build custom LDAP filters",
             "POST /cleanup/plans": "read snapshots, ICMP/last-hit, create PatchSet session",
@@ -863,6 +885,7 @@ def create_app(
     *,
     static_dir: Optional[Path] = None,
     store: Optional[SessionStore] = None,
+    profile_store: Optional[ProfileStore] = None,
     profile_ceiling: Optional[PanoramaProfile] = None,
 ):
     try:
@@ -879,6 +902,10 @@ def create_app(
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
     session_store = store or SessionStore()
+    profiles = profile_store or ProfileStore(
+        session_store.root.parent if store is not None else None,
+        enforce_acl=session_store.enforce_acl,
+    )
     connections = ConnectionRegistry()
     analysis_jobs: dict[str, dict[str, Any]] = {}
     analysis_jobs_lock = threading.Lock()
@@ -1273,7 +1300,7 @@ def create_app(
                 if not isinstance(host, str) or not host.strip():
                     raise InputError("Pole host diagnostyki musi być niepustym tekstem.")
                 use_ssl = _json_bool(value, "ssl", default=True)
-                verify_ssl = _json_bool(value, "verify_ssl", default=use_ssl)
+                verify_ssl = _json_bool(value, "verify_ssl", default=False)
                 if not use_ssl and verify_ssl:
                     raise InputError("verify_ssl nie może być włączone dla HTTP.")
                 probe_profile = PanoramaProfile(
@@ -1309,19 +1336,47 @@ def create_app(
             )
         )
 
+    @app.get("/api/v1/profiles")
+    def profiles_list():
+        return jsonify({"profiles": profiles.list(), "storage": str(profiles.root)})
+
+    @app.delete("/api/v1/profiles/<profile_id>")
+    def profiles_delete(profile_id: str):
+        profiles.delete(profile_id)
+        return ("", 204)
+
     @app.post("/api/v1/connections")
     def connect():
         value = body()
+        saved_profile_id = value.get("profile_id", value.get("profileId"))
+        if saved_profile_id is not None and not isinstance(saved_profile_id, str):
+            raise InputError("profile_id musi być tekstem.")
+        saved_profile = None
+        saved_password = None
+        if saved_profile_id:
+            saved_profile, saved_password = profiles.get(saved_profile_id)
         profile, capability_warning = _apply_profile_ceiling(
-            _profile_from_json(value), profile_ceiling
+            _profile_from_json(value, saved_profile), profile_ceiling
         )
         password = value.get("password")
         if not isinstance(password, str) or not password:
-            raise InputError("Połączenie wymaga hasła; nie zostanie ono utrwalone.")
+            password = saved_password
+        if not isinstance(password, str) or not password:
+            raise InputError(
+                "Połączenie wymaga hasła albo wybranego zapisanego profilu."
+            )
+        remember_profile = _json_bool(
+            value,
+            "save_profile",
+            fallback_key="rememberProfile",
+            default=False,
+        )
+        profile_name = value.get("profile_name", value.get("profileName", ""))
+        if profile_name is not None and not isinstance(profile_name, str):
+            raise InputError("profile_name musi być tekstem.")
         client = PanoramaReadClient(profile)
         try:
             client.authenticate(password)
-            password = ""
             system_info = client.system_info()
             panorama_version = (
                 system_info.findtext(".//sw-version")
@@ -1342,8 +1397,18 @@ def create_app(
             except ToolboxError:
                 candidate_dirty = False
                 candidate_status = "unknown"
+            saved_record = None
+            if remember_profile:
+                saved_record = profiles.save(
+                    profile=profile,
+                    password=password,
+                    name=profile_name or "",
+                    profile_id=saved_profile_id or None,
+                )
+            password = ""
             token = connections.add(client)
         except Exception:
+            password = ""
             client.close()
             raise
         return jsonify(
@@ -1369,6 +1434,8 @@ def create_app(
                     "apiMaxStage": profile.api_max_stage.value,
                 },
                 "systemMode": system_info.findtext(".//system-mode") or "unknown",
+                "profile_id": saved_record["id"] if saved_record else saved_profile_id,
+                "profile_saved": bool(saved_record),
             }
         )
 

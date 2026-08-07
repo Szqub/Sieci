@@ -29,12 +29,12 @@ const navItems: Array<{ id: ViewId; label: string; description: string; icon: ty
   { id: "cleanup", label: "Cleanup", description: "Szukaj punktowo lub batch", icon: ListChecks },
   { id: "plan", label: "Plan", description: "Operacje pojedynczo", icon: ClipboardCheck },
   { id: "execute", label: "Wykonaj", description: "Candidate · Commit · Push", icon: Zap },
-  { id: "warnings", label: "Uwagi", description: "Analiza i blokady", icon: AlertTriangle },
   { id: "ad-groups", label: "Grupy AD", description: "Custom LDAP Group", icon: UsersRound },
   { id: "policy-requests", label: "Nowe polityki", description: "Wklejka → API plan", icon: Network },
   { id: "audit", label: "Audit", description: "Pozostałe referencje", icon: SearchCheck },
   { id: "history", label: "Backup i restore", description: "Sesje i joby", icon: History },
   { id: "restore", label: "Emergency Restore", description: "Bezpieczne odtworzenie", icon: RefreshCcw },
+  { id: "warnings", label: "Uwagi", description: "Analiza i blokady", icon: AlertTriangle },
 ];
 
 interface ShellProps {

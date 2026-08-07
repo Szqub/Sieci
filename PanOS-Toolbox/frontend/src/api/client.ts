@@ -10,6 +10,7 @@ import type {
   ConnectionDraft,
   ConnectionSession,
   DoctorResult,
+  SavedProfile,
   LookupKind,
   LookupResult,
   RestorePlan,
@@ -37,12 +38,15 @@ export class ToolboxApiError extends Error {
 }
 
 interface WireConnectionDraft {
-  host: string;
-  username: string;
+  host?: string;
+  username?: string;
   password: string;
   ssl: boolean;
   verify_ssl: boolean;
   api_max_stage: CapabilityStage;
+  profile_id?: string;
+  profile_name?: string;
+  save_profile?: boolean;
 }
 
 type WireConnectionSession = Partial<ConnectionSession> & {
@@ -57,6 +61,8 @@ type WireConnectionSession = Partial<ConnectionSession> & {
   candidate_dirty?: boolean;
   candidate_status?: "clean" | "dirty" | "unknown";
   capability_warning?: string;
+  profile_id?: string;
+  profile_saved?: boolean;
 };
 
 interface JsonOptions extends Omit<RequestInit, "body"> {
@@ -135,12 +141,15 @@ export const api = {
 
   async connect(input: ConnectionDraft): Promise<ConnectionSession> {
     const body: WireConnectionDraft = {
-      host: input.host,
-      username: input.username,
+      host: input.host.trim() || undefined,
+      username: input.username.trim() || undefined,
       password: input.password,
       ssl: input.ssl,
       verify_ssl: input.verifySsl,
       api_max_stage: input.apiMaxStage,
+      profile_id: input.profileId || undefined,
+      profile_name: input.profileName?.trim() || undefined,
+      save_profile: Boolean(input.rememberProfile),
     };
     const wire = await request<WireConnectionSession>("/connections", { method: "POST", body });
     sessionToken = wire.sessionToken ?? wire.session_token;
@@ -154,8 +163,33 @@ export const api = {
       candidateDirty: wire.candidateDirty ?? wire.candidate_dirty ?? false,
       candidateStatus: wire.candidateStatus ?? wire.candidate_status ?? "unknown",
       capabilityWarning: wire.capabilityWarning ?? wire.capability_warning,
+      profileId: wire.profileId ?? wire.profile_id,
+      profileSaved: wire.profileSaved ?? wire.profile_saved,
     };
     return connection;
+  },
+
+  async listProfiles(): Promise<{ profiles: SavedProfile[]; storage: string }> {
+    const wire = await request<{ profiles: Array<Record<string, unknown>>; storage: string }>("/profiles");
+    return {
+      storage: wire.storage,
+      profiles: (wire.profiles || []).map((profile) => ({
+        id: String(profile.id),
+        name: String(profile.name || profile.host || profile.id),
+        host: String(profile.host || ""),
+        username: String(profile.username || ""),
+        ssl: Boolean(profile.ssl),
+        verifySsl: Boolean(profile.verify_ssl ?? profile.verifySsl),
+        apiMaxStage: (profile.api_max_stage ?? profile.apiMaxStage ?? "read-only") as CapabilityStage,
+        hasPassword: Boolean(profile.has_password ?? profile.hasPassword),
+        createdAt: String(profile.created_at ?? profile.createdAt ?? ""),
+        updatedAt: String(profile.updated_at ?? profile.updatedAt ?? ""),
+      })),
+    };
+  },
+
+  async deleteProfile(profileId: string): Promise<void> {
+    await request(`/profiles/${encodeURIComponent(profileId)}`, { method: "DELETE" });
   },
 
   async lookup(input: {

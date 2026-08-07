@@ -16,6 +16,7 @@ import type {
   EntityDependency,
   ExecutionJob,
   RestorePlan,
+  SavedProfile,
   ToolboxNotice,
   ToolboxSession,
 } from "./model";
@@ -35,8 +36,9 @@ const initialConnection: ConnectionDraft = {
   username: "",
   password: "",
   ssl: true,
-  verifySsl: true,
+  verifySsl: false,
   apiMaxStage: "push",
+  rememberProfile: false,
 };
 
 const initialAdGroupDraft: AdGroupDraft = {
@@ -94,6 +96,8 @@ export default function App() {
   const [lookupBusy, setLookupBusy] = useState(false);
   const [singlePlanBusy, setSinglePlanBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<ConnectionDraft>(initialConnection);
+  const [savedProfiles, setSavedProfiles] = useState<SavedProfile[]>([]);
+  const [profileStorage, setProfileStorage] = useState("");
   const [connection, setConnection] = useState<ConnectionSession | null>(null);
   const [doctor, setDoctor] = useState<DoctorResult | null>(null);
   const [demoMode, setDemoMode] = useState(false);
@@ -158,6 +162,16 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (demoMode) return;
+    void api.listProfiles().then((result) => {
+      setSavedProfiles(result.profiles);
+      setProfileStorage(result.storage);
+    }).catch(() => {
+      // Profile storage is optional for first start; connection remains usable.
+    });
+  }, [demoMode]);
+
+  useEffect(() => {
     if (view === "history" && connection && sessions.length === 0) void refreshHistory();
     // refreshHistory is intentionally event-like; connection/view are the triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -175,6 +189,13 @@ export default function App() {
       const result = demoMode && demoApi ? demoApi.demoConnection(draft) : await api.connect(draft);
       setConnection(result);
       setDraft((current) => ({ ...current, password: "" }));
+      if (result.profileSaved || result.profileId) {
+        const refreshed = await api.listProfiles().catch(() => null);
+        if (refreshed) {
+          setSavedProfiles(refreshed.profiles);
+          setProfileStorage(refreshed.storage);
+        }
+      }
       setWriteEnabled(false);
       setView("cleanup");
     } catch (connectError) {
@@ -237,6 +258,39 @@ export default function App() {
     setExecutionSession(null);
     setRestoreSession(null);
     setView("connection");
+  };
+
+  const selectSavedProfile = (profileId: string) => {
+    if (!profileId) {
+      setDraft((current) => ({ ...current, profileId: undefined, profileName: "", password: "", rememberProfile: false }));
+      return;
+    }
+    const profile = savedProfiles.find((item) => item.id === profileId);
+    if (!profile) return;
+    setDraft({
+      host: profile.host,
+      username: profile.username,
+      password: "",
+      ssl: profile.ssl,
+      verifySsl: profile.verifySsl,
+      apiMaxStage: profile.apiMaxStage,
+      profileId: profile.id,
+      profileName: profile.name,
+      rememberProfile: true,
+    });
+    setError(null);
+  };
+
+  const deleteSavedProfile = async (profileId: string) => {
+    try {
+      await api.deleteProfile(profileId);
+      setSavedProfiles((current) => current.filter((profile) => profile.id !== profileId));
+      if (draft.profileId === profileId) {
+        setDraft((current) => ({ ...current, profileId: undefined, profileName: "", password: "", rememberProfile: false }));
+      }
+    } catch (profileError) {
+      setError(getErrorMessage(profileError));
+    }
   };
 
   const runLookup = async (kind: LookupKind, names: string[], deviceGroup?: string) => {
@@ -626,7 +680,7 @@ export default function App() {
   };
 
   let page;
-  if (view === "connection") page = <ConnectionPage draft={draft} onDraftChange={setDraft} connection={connection} doctor={doctor} busy={mainBusy === "connect" || mainBusy === "doctor" ? mainBusy : null} error={error} onConnect={() => void connect()} onDoctor={() => void runDoctor()} onDemo={enableDemo} demoAvailable={import.meta.env.DEV} />;
+  if (view === "connection") page = <ConnectionPage draft={draft} onDraftChange={setDraft} savedProfiles={savedProfiles} profileStorage={profileStorage} connection={connection} doctor={doctor} busy={mainBusy === "connect" || mainBusy === "doctor" ? mainBusy : null} error={error} onConnect={() => void connect()} onDoctor={() => void runDoctor()} onSelectProfile={selectSavedProfile} onDeleteProfile={(profileId) => void deleteSavedProfile(profileId)} onDemo={enableDemo} demoAvailable={import.meta.env.DEV} />;
   else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} allowDefaultPolicyOverride={allowDefaultPolicyOverride} onDefaultPolicyOverrideChange={setAllowDefaultPolicyOverride} busy={mainBusy === "analyze"} progress={analysisJob} lookupResult={lookupResult} lookupBusy={lookupBusy} error={error} onLookup={(kind, names, deviceGroup) => void runLookup(kind, names, deviceGroup)} onAddLookupEntities={addLookupEntitiesToBatch} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;
   else if (view === "warnings") page = <WarningsPage notices={notices} />;
   else if (view === "ad-groups") page = <AdGroupsPage draft={adGroupDraft} onDraftChange={setAdGroupDraft} result={adGroupResult} busy={mainBusy === "ad-groups"} error={error} onGenerate={() => void generateAdGroup()} />;

@@ -5,7 +5,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 $entrypoint = Join-Path $PSScriptRoot "panos-toolbox.py"
-$sessionRoot = Join-Path $PSScriptRoot "backupy\sessions"
 if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
     throw "Brak entrypointu: $entrypoint"
 }
@@ -23,13 +22,13 @@ foreach ($required in @($vendorFlask, $vendorWerkzeug, $staticIndex)) {
 }
 
 Write-Host "PanOS Toolbox: http://127.0.0.1:$Port/"
-Write-Host "Trwale backupy sesji: $sessionRoot"
+Write-Host "Trwale dane: Dokumenty\PanOS Toolbox\sessions oraz profiles.json"
 Write-Host "Zatrzymanie: Ctrl+C"
 if (Get-Command py -ErrorAction SilentlyContinue) {
-    & py -3 -I -S $entrypoint serve --port $Port --session-dir $sessionRoot
+    & py -3 -I -S $entrypoint serve --port $Port
 }
 elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    & python -I -S $entrypoint serve --port $Port --session-dir $sessionRoot
+    & python -I -S $entrypoint serve --port $Port
 }
 else {
     throw "Nie znaleziono Python 3 w PATH (py ani python)."

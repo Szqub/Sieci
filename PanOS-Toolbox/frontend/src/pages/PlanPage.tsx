@@ -15,6 +15,7 @@ import {
   ListTree,
   PackageCheck,
   RotateCcw,
+  Search,
   ServerCog,
   ShieldCheck,
   Undo2,
@@ -74,7 +75,9 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
   const [selectedTargets, setSelectedTargets] = useState<Set<string>>(new Set());
   const [selectedDependencies, setSelectedDependencies] = useState<Map<string, EntityDependency>>(new Map());
   const [confirmAction, setConfirmAction] = useState<"candidate" | "commit" | "push" | null>(null);
+  const [objectQuery, setObjectQuery] = useState("");
   useEffect(() => { setSelectedTargets(new Set()); setSelectedDependencies(new Map()); }, [plan?.sessionId]);
+  useEffect(() => { setObjectQuery(""); }, [plan?.sessionId]);
   const state = executionSession?.state ?? plan?.state ?? "PLANNED";
 
   const stages = useMemo(() => [
@@ -96,6 +99,25 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
     const byAge = age(left) - age(right);
     return byAge !== 0 ? byAge : (left.label ?? left.ip).localeCompare(right.label ?? right.ip, "pl");
   }), [plan.addresses]);
+  const normalizedQuery = objectQuery.trim().toLocaleLowerCase("pl");
+  const filteredAddresses = useMemo(() => {
+    if (!normalizedQuery) return sortedAddresses;
+    return sortedAddresses.filter((target) => {
+      const values = [
+        target.ip,
+        target.label,
+        target.targetType,
+        ...(target.objectNames ?? []),
+        ...(target.entities ?? []).flatMap((entity) => [entity.name, entity.type, entity.scope, entity.rulebase, entity.policyType, entity.path]),
+        ...(target.references ?? []).flatMap((reference) => [reference.name, reference.type, reference.scope, reference.deviceGroup, reference.rulebase, reference.policyType, reference.path]),
+      ];
+      return values.filter(Boolean).some((value) => String(value).toLocaleLowerCase("pl").includes(normalizedQuery));
+    });
+  }, [normalizedQuery, sortedAddresses]);
+  const filteredOperations = useMemo(() => {
+    if (!normalizedQuery) return plan.operations;
+    return plan.operations.filter((operation) => [operation.entityName, operation.entityType, operation.scope, operation.xpath, operation.summary, operation.inverseSummary].some((value) => value.toLocaleLowerCase("pl").includes(normalizedQuery)));
+  }, [normalizedQuery, plan.operations]);
   const canApplyCandidate = state === "PLANNED" && plan.operations.length > 0;
   const canCommit = state === "CANDIDATE_APPLIED" || state === "PARTIAL";
   const canPush = state === "COMMITTED";
@@ -127,13 +149,15 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
       <Card className="plan-entity-card">
         <div className="plan-list-toolbar">
           <div><strong>{plan.addresses.length} celów</strong><span>{plan.processCount} wykonywalnych · {plan.excludedCount ?? 0} wykluczonych · {plan.operations.length} operacji XPath · {plan.addresses.reduce((sum, target) => sum + (target.backupFiles?.length ?? 0), 0)} backupów encji</span></div>
+          <div className="table-search plan-search"><Search size={16} /><input value={objectQuery} onChange={(event) => setObjectQuery(event.target.value)} placeholder="Szukaj obiektu / polityki / IP / DG / XPath…" aria-label="Szukaj w planie" /></div>
           <div>{selectedTargets.size > 0 && <><span className="selection-counter">{selectedTargets.size} zazn.</span><Button variant="danger" icon={<Ban size={15} />} loading={singlePlanBusy === "exclude-selection" || (selectedTargetRows.length === 1 && singlePlanBusy === `exclude:${selectedTargetRows[0]?.ip}`)} disabled={Boolean(singlePlanBusy)} onClick={() => onExcludeTargets(selectedTargetRows)}>Wyklucz zaznaczone</Button><Button loading={singlePlanBusy === "selection"} disabled={Boolean(singlePlanBusy)} onClick={() => onCreateSelectionPlan(selectedTargetRows)}>Plan tylko z zaznaczonych</Button></>}</div>
         </div>
+        {objectQuery.trim() && <div className="plan-search-result"><Search size={15} /><span>Dopasowanie: <strong>{filteredAddresses.length}</strong> celów, <strong>{filteredOperations.length}</strong> operacji. Ten sam filtr jest widoczny w przeglądzie przed commitem.</span></div>}
         <div className="recent-exclusion-toolbar" aria-label="Szybkie wykluczenia Last Hit"><span><strong>Last Hit:</strong> wyklucz świeże cele</span>{[14, 30, 90].map((days) => { const candidates = sortedAddresses.filter((target) => { if (target.decision !== "process" || !target.lastHit || target.hitCount === 0 || target.lastHitStatus === "NEVER") return false; const age = target.lastHitAgeDays ?? Math.max(0, (Date.now() - new Date(target.lastHit).getTime()) / 86_400_000); return age < days; }); return <Button key={days} variant="ghost" disabled={!candidates.length || Boolean(singlePlanBusy)} loading={singlePlanBusy === "exclude-selection"} onClick={() => onExcludeTargets(candidates)}>{days === 14 ? "<14 dni" : days === 30 ? "<1 miesiąc" : "<3 miesiące"} ({candidates.length})</Button>; })}</div>
         {(plan.excludedCount ?? 0) > 0 && <div className="exclusion-summary"><div><Ban size={18} /><span><strong>{plan.excludedCount} {plan.excludedCount === 1 ? "cel" : "celów"} poza wykonaniem</strong><small>{plan.excludedTargets?.length ?? 0} wskazano bezpośrednio · {plan.excludedComponentIds?.length ?? 0} komponentów wyłączono. Pozostałe cele wynikają ze wspólnych atomowych zależności. Nie trafią do Candidate, backupów ani operacji XPath tej sesji.</small></span></div>{plan.parentSessionId && <Button icon={<Undo2 size={15} />} loading={singlePlanBusy === "undo-exclusion"} disabled={Boolean(singlePlanBusy)} onClick={onUndoLastExclusion}>Cofnij ostatnie wykluczenie</Button>}</div>}
         <div className="responsive-table plan-table policy-plan-table"><table>
           <thead><tr><th><span className="visually-hidden">Zaznacz</span></th><th>Cel / lokalizacja</th><th>Last Hit</th><th>Zależności</th><th>Backup</th><th>Decyzja</th><th>Akcja</th><th /></tr></thead>
-          <tbody>{sortedAddresses.map((target, index) => {
+          <tbody>{filteredAddresses.map((target, index) => {
             const expanded = expandedTargets.has(target.ip);
             const hit = hitPresentation(target);
             const locations = (target.entities ?? []).map((entity) => `${entity.scope} · ${entity.rulebase ?? entity.type}`).join(" | ");
@@ -189,13 +213,13 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
           <div className="analysis-summary-grid"><div><strong>Running ↔ Candidate</strong><span>{plan.diff.summary}</span><small>Natywne: {plan.diff.nativeEntries} · semantyczne: {plan.diff.semanticEntries}</small></div><div><strong>Device groups</strong><span>{plan.affectedDeviceGroups.join(", ") || "shared"}</span><small>Zakres push jest wyliczony z dotkniętych XPath.</small></div><div><strong>Bezpieczeństwo</strong><span>SHA256 · lock · per-XPath fingerprint</span><small>Candidate jest odczytywany live przed zapisem.</small></div></div>
           {plan.warnings.map((warning) => <Callout severity={warning.includes("DEFAULT") ? "warning" : warning.includes("Application Override") ? "warning" : "info"} title={warning.includes("DEFAULT") ? "DEFAULT — ochrona" : warning.includes("Application Override") ? "Application Override — read-only" : "Informacja z analizy"} key={warning}><p>{warning}</p></Callout>)}
           <div className="analysis-downloads"><Button icon={<Download size={15} />} onClick={() => onDownload("commands")}>Podgląd CLI</Button><Button icon={<Download size={15} />} onClick={() => onDownload("report")}>Raport</Button><Button icon={<Download size={15} />} onClick={() => onDownload("manifest")}>Manifest + backupy</Button></div>
-          <div className="responsive-table operations-table"><table><thead><tr><th>#</th><th>API</th><th>Encja</th><th>Zakres</th><th>XPath / rollback</th></tr></thead><tbody>{plan.operations.map((operation) => <tr key={operation.id}><td>{operation.order}</td><td><StatusPill tone={operation.action === "delete" ? "danger" : "warning"}>{operation.action.toUpperCase()}</StatusPill></td><td><strong>{operation.entityName}</strong><small>{operation.entityType}</small></td><td>{operation.scope}</td><td><code>{operation.xpath}</code><small><ShieldCheck size={12} /> {operation.inverseSummary}</small></td></tr>)}</tbody></table></div>
+          <div className="responsive-table operations-table"><table><thead><tr><th>#</th><th>API</th><th>Encja</th><th>Zakres</th><th>XPath / rollback</th></tr></thead><tbody>{filteredOperations.map((operation) => <tr key={operation.id}><td>{operation.order}</td><td><StatusPill tone={operation.action === "delete" ? "danger" : "warning"}>{operation.action.toUpperCase()}</StatusPill></td><td><strong>{operation.entityName}</strong><small>{operation.entityType}</small></td><td>{operation.scope}</td><td><code>{operation.xpath}</code><small><ShieldCheck size={12} /> {operation.inverseSummary}</small></td></tr>)}</tbody></table></div>
         </div>
       </details>
 
       <div className="safety-footer"><AlertOctagon size={18} /><span><strong>Restore jest ścieżkowy.</strong> Kliknij Restore przy konkretnym celu albo odtwórz całą sesję; closure zależności jest liczone z backupów.</span><ArrowRight size={18} /></div>
 
-      {confirmAction && <div className="write-confirm-backdrop"><div className={`write-confirm ${confirmAction !== "commit" ? "write-confirm--critical" : ""}`} role="dialog" aria-modal="true"><div><AlertTriangle size={22} /><strong>{confirmAction === "candidate" ? "UWAGA: Candidate może naruszyć DEFAULT" : confirmAction === "commit" ? "Potwierdź commit do Panorama" : "UWAGA: potwierdź push do urządzeń"}</strong></div><p>{confirmAction === "candidate" ? "W tym planie jawnie włączono override. Candidate zapisze operacje, które mogą dotknąć polityki DEFAULT i jej zależności. Sprawdź XPath oraz zakres przed wykonaniem." : confirmAction === "commit" ? "Candidate zostanie utrwalony partial commitem bieżącego administratora. To nadal nie wykonuje push do firewalli." : `Zmiany zostaną wysłane do: ${plan.affectedDeviceGroups.join(", ") || "zakresu shared"}. Zweryfikuj zakres i stan urządzeń przed kontynuacją.`}</p><div><Button onClick={() => setConfirmAction(null)}>Anuluj</Button><Button variant={confirmAction !== "commit" ? "danger" : "primary"} onClick={() => { const action = confirmAction; setConfirmAction(null); if (action === "candidate") onApplyCandidate(); else if (action === "commit") onCommit(); else onPush(); }}>{confirmAction === "candidate" ? "Tak, zapisz Candidate" : confirmAction === "commit" ? "Tak, uruchom commit" : "Tak, wykonaj PUSH"}</Button></div></div></div>}
+      {confirmAction && <div className="write-confirm-backdrop"><div className={`write-confirm ${confirmAction !== "commit" ? "write-confirm--critical" : ""}`} role="dialog" aria-modal="true"><div><AlertTriangle size={22} /><strong>{confirmAction === "candidate" ? "UWAGA: Candidate może naruszyć DEFAULT" : confirmAction === "commit" ? "Potwierdź commit do Panorama" : "UWAGA: potwierdź push do urządzeń"}</strong></div><p>{confirmAction === "candidate" ? "W tym planie jawnie włączono override. Candidate zapisze operacje, które mogą dotknąć polityki DEFAULT i jej zależności. Sprawdź XPath oraz zakres przed wykonaniem." : confirmAction === "commit" ? "Candidate zostanie utrwalony partial commitem bieżącego administratora. Przed zatwierdzeniem sprawdź pełną listę operacji poniżej; to nadal nie wykonuje push do firewalli." : `Zmiany zostaną wysłane do: ${plan.affectedDeviceGroups.join(", ") || "zakresu shared"}. Zweryfikuj zakres i stan urządzeń przed kontynuacją.`}</p>{confirmAction === "commit" && <div className="commit-review"><div className="commit-review__summary"><strong>{filteredOperations.length} operacji w przeglądzie</strong><span>{plan.affectedDeviceGroups.join(", ") || "shared"} · {plan.addresses.length} celów · {plan.addresses.reduce((sum, target) => sum + (target.references?.length ?? 0), 0)} referencji</span></div><div className="commit-review__list">{filteredOperations.map((operation) => <div key={operation.id}><StatusPill tone={operation.action === "delete" ? "danger" : "warning"}>{operation.action.toUpperCase()}</StatusPill><span><strong>{operation.entityName}</strong><small>{operation.entityType} · {operation.scope}</small><code>{operation.xpath}</code></span></div>)}</div></div>}<div><Button onClick={() => setConfirmAction(null)}>Anuluj</Button><Button variant={confirmAction !== "commit" ? "danger" : "primary"} onClick={() => { const action = confirmAction; setConfirmAction(null); if (action === "candidate") onApplyCandidate(); else if (action === "commit") onCommit(); else onPush(); }}>{confirmAction === "candidate" ? "Tak, zapisz Candidate" : confirmAction === "commit" ? "Tak, uruchom commit" : "Tak, wykonaj PUSH"}</Button></div></div></div>}
     </div>
   );
 }

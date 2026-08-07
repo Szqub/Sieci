@@ -24,6 +24,22 @@ export interface ConnectionDraft {
   ssl: boolean;
   verifySsl: boolean;
   apiMaxStage: CapabilityStage;
+  profileId?: string;
+  profileName?: string;
+  rememberProfile?: boolean;
+}
+
+export interface SavedProfile {
+  id: string;
+  name: string;
+  host: string;
+  username: string;
+  ssl: boolean;
+  verifySsl: boolean;
+  apiMaxStage: CapabilityStage;
+  hasPassword: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ConnectionSession {
@@ -36,6 +52,8 @@ export interface ConnectionSession {
   candidateDirty: boolean;
   candidateStatus?: "clean" | "dirty" | "unknown";
   capabilityWarning?: string;
+  profileId?: string;
+  profileSaved?: boolean;
 }
 
 export type LookupKind = "address" | "address-group" | "policy" | "ip";

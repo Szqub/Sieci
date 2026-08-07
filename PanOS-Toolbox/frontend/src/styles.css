@@ -378,6 +378,14 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 /* Connection */
 .connection-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(330px, 0.8fr); gap: 18px; align-items: start; }
 .connection-form-card { padding: 23px; }
+.saved-profile-row { display: flex; align-items: end; gap: 10px; }
+.saved-profile-row > .field { flex: 1; min-width: 0; }
+.saved-profile-row select { width: 100%; min-width: 0; color: var(--text); background: transparent; border: 0; outline: 0; font: .72rem "Cascadia Code", Consolas, monospace; }
+.profile-save-option { display: flex; align-items: center; min-height: 48px; }
+.profile-storage-note { display: flex; align-items: flex-start; gap: 8px; margin: 14px 0 0; padding: 10px 12px; color: var(--text-muted); background: var(--surface-soft); border: 1px solid var(--border); border-radius: 9px; font-size: .62rem; line-height: 1.45; }
+.profile-storage-note svg { flex: 0 0 auto; color: var(--accent); margin-top: 1px; }
+.profile-storage-note span { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.profile-storage-note small { color: var(--text-muted); }
 .connection-side { display: flex; flex-direction: column; gap: 14px; }
 .setting-panel { padding: 5px 13px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 10px; }
 .setting-panel .toggle-row + .toggle-row { border-top: 1px solid var(--border); }
@@ -829,6 +837,18 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .connection-progress small, .connection-progress p { color: var(--text-muted); font-size: .62rem; }
 .connection-progress__track, .lookup-live-progress > span { position: relative; height: 5px; overflow: hidden; background: var(--surface); border-radius: 99px; }
 .connection-progress__track i, .lookup-live-progress > span i { position: absolute; inset: 0 auto 0 -40%; width: 40%; background: linear-gradient(90deg, transparent, var(--blue), transparent); animation: indeterminate-slide 1.2s ease-in-out infinite; }
+.plan-list-toolbar .table-search { min-width: min(370px, 100%); }
+.plan-search-result { display: flex; align-items: center; gap: 7px; margin: 0 0 10px; padding: 8px 11px; color: var(--text-muted); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border)); border-radius: 8px; font-size: .63rem; }
+.plan-search-result svg { color: var(--accent); flex: 0 0 auto; }
+.commit-review { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; text-align: left; }
+.commit-review__summary { display: flex; flex-direction: column; gap: 2px; }
+.commit-review__summary strong { color: var(--text); font-size: .7rem; }
+.commit-review__summary span { color: var(--text-muted); font-size: .61rem; }
+.commit-review__list { max-height: 260px; overflow: auto; display: flex; flex-direction: column; gap: 5px; }
+.commit-review__list > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; align-items: start; padding: 6px 7px; background: var(--surface-soft); border-radius: 6px; }
+.commit-review__list > div > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.commit-review__list small { color: var(--text-muted); font-size: .58rem; }
+.commit-review__list code { display: block; overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; font-size: .55rem; }
 @keyframes indeterminate-slide { to { left: 100%; } }
 .connection-modes { display: grid; gap: 9px; }
 .connection-modes > div { display: flex; flex-direction: column; gap: 4px; padding: 12px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 9px; }
@@ -1083,6 +1103,9 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 }
 
 @media (max-width: 760px) {
+  .saved-profile-row { align-items: stretch; flex-direction: column; }
+  .saved-profile-row > .button { align-self: flex-start; }
+  .plan-list-toolbar .table-search { min-width: 0; width: 100%; }
   .cleanup-point-layout { grid-template-columns: 1fr; }
   .lookup-inspector { grid-column: auto; }
   .inspector-fields, .entity-field-grid, .analysis-summary-grid { grid-template-columns: 1fr; }

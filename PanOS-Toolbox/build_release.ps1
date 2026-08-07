@@ -157,8 +157,6 @@ foreach ($file in @(
     "README.md",
     "ROZPAKUJ_I_URUCHOM.txt",
     "LAB_VALIDATION.md",
-    "panorama_host.txt.example",
-    "ip.txt.example",
     "start_toolbox.cmd",
     "start_toolbox.ps1"
 )) {

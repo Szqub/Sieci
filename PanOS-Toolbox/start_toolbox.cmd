@@ -3,7 +3,6 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 set "TOOLBOX_PORT=8765"
-set "TOOLBOX_SESSIONS=%~dp0backupy\sessions"
 if not "%~1"=="" if /I not "%~1"=="doctor" if /I not "%~1"=="--doctor" set "TOOLBOX_PORT=%~1"
 
 if not exist "backend\vendor\flask\__init__.py" goto :missing_vendor
@@ -24,9 +23,9 @@ exit /b 2
 if /I "%~1"=="doctor" goto :doctor_py
 if /I "%~1"=="--doctor" goto :doctor_py
 echo PanOS Toolbox: http://127.0.0.1:%TOOLBOX_PORT%/
-echo Trwale backupy sesji: %TOOLBOX_SESSIONS%
+echo Trwale dane: Dokumenty\PanOS Toolbox\sessions oraz profiles.json
 echo Zatrzymanie: Ctrl+C albo zamkniecie tego okna.
-py -3 -I -S "%~dp0panos-toolbox.py" serve --port %TOOLBOX_PORT% --session-dir "%TOOLBOX_SESSIONS%"
+py -3 -I -S "%~dp0panos-toolbox.py" serve --port %TOOLBOX_PORT%
 exit /b %errorlevel%
 
 :doctor_py
@@ -37,9 +36,9 @@ exit /b %errorlevel%
 if /I "%~1"=="doctor" goto :doctor_python
 if /I "%~1"=="--doctor" goto :doctor_python
 echo PanOS Toolbox: http://127.0.0.1:%TOOLBOX_PORT%/
-echo Trwale backupy sesji: %TOOLBOX_SESSIONS%
+echo Trwale dane: Dokumenty\PanOS Toolbox\sessions oraz profiles.json
 echo Zatrzymanie: Ctrl+C albo zamkniecie tego okna.
-python -I -S "%~dp0panos-toolbox.py" serve --port %TOOLBOX_PORT% --session-dir "%TOOLBOX_SESSIONS%"
+python -I -S "%~dp0panos-toolbox.py" serve --port %TOOLBOX_PORT%
 exit /b %errorlevel%
 
 :doctor_python

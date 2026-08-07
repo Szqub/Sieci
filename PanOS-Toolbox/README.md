@@ -30,16 +30,14 @@ Checkout utworzony przez `git clone` jest kodem źródłowym i celowo nie zawier
 Najprościej: wybierz w Eksploratorze **Wyodrębnij wszystkie**, wejdź do katalogu
 `PanOS-Toolbox` i uruchom dwuklikiem `start_toolbox.cmd`. Launcher sprawdza
 kompletność paczki i uruchamia Pythona z `-I -S`, więc globalny Flask nie jest
-używany. Historia i backupy są zapisywane trwale obok programu w
-`backupy\sessions`; pozostają po zamknięciu aplikacji i można skopiować cały
-katalog razem z paczką.
+używany. Historia i backupy są zapisywane trwale w profilu użytkownika:
+`Dokumenty\PanOS Toolbox\sessions`; pozostają po zamknięciu aplikacji i nie
+zależą od miejsca rozpakowania ZIP-a. Ten sam folder zawiera zaszyfrowane
+profile połączeń w `profiles.json`.
 
 ```powershell
 Expand-Archive .\PanOS-Toolbox-YYYYMMDD-HHMMSS.zip -DestinationPath .\PanOS-Toolbox
 Set-Location .\PanOS-Toolbox
-Copy-Item .\panorama_host.txt.example .\panorama_host.txt
-notepad .\panorama_host.txt
-py -3 -I -S .\panos-toolbox.py doctor --host-file .\panorama_host.txt
 .\start_toolbox.ps1 -Port 8765
 ```
 
@@ -54,8 +52,11 @@ Alternatywny launcher CMD oraz jego diagnostyka:
 Następnie otwórz `http://127.0.0.1:8765/`. Serwera nie uruchamiaj z bindem
 `0.0.0.0` ani na interfejsie sieciowym.
 
-`start_toolbox.ps1` przekazuje domyślny `panorama_host.txt` jako profil dla CLI.
-Lokalny GUI używa jednego, nietrwałego grantu WRITE; nadal wymaga zgodności
+Host, użytkownik i hasło wpisujesz w GUI. Zaznaczenie **Zapamiętaj profil**
+zapisuje host, login, ustawienia SSL i hasło zaszyfrowane przez Windows DPAPI
+w profilu bieżącego użytkownika. Ponowne połączenie może użyć profilu bez
+ponownego wpisywania hasła; zmiana hasła następuje po wpisaniu nowego hasła i
+ponownym zapisaniu profilu. Lokalny GUI używa jednego, nietrwałego grantu WRITE; nadal wymaga zgodności
 hosta, aktywnego connection tokenu, poprawnego Origin i jawnego potwierdzenia
 przełącznika zapisu. Połączenie wykonuje keygen, odczyt `show system info` i
 `change-summary` — nie pobiera wtedy pełnego configu. Wyświetlana wersja PAN-OS
@@ -64,6 +65,10 @@ pochodzi bezpośrednio z `sw-version`, a nie z atrybutu pliku konfiguracji.
 Nie instaluj Flask ani innych modułów globalnie. Paczka release ma przypięty
 Flask i jego zależności w `backend/vendor`; tryb `-I -S` w poleceniu Doctor
 potwierdza, że Toolbox nie korzysta z przypadkowych pakietów użytkownika.
+
+`ip.txt` i `panorama_host.txt` nie są wymagane przez GUI. Pozostają wyłącznie
+opcjonalnymi wejściami kompatybilności dla CLI; połączenie, profil, historia i
+backupy działają z katalogu użytkownika `Dokumenty\PanOS Toolbox`.
 
 ## Cele cleanupu w GUI
 
@@ -223,9 +228,10 @@ Test read-only API (keygen, running, candidate) jest opcjonalny:
 python .\panos-toolbox.py doctor --host-file .\panorama_host.txt --api-check
 ```
 
-Hasło ani uzyskany przez keygen API key nie są zapisywane w profilu,
-local/session storage, raportach ani logach; backend trzyma klucz wyłącznie w
-pamięci procesu. Bez zmiennej środowiskowej CLI wyświetli ukryty prompt. W PowerShell 7
+Hasło ani uzyskany przez keygen API key nie są zapisywane w raportach, logach
+ani storage przeglądarki; klucz API bieżącej sesji jest wyłącznie w pamięci
+procesu. Tylko jawnie zapisany profil ma zaszyfrowane pole hasła DPAPI. Bez
+zmiennej środowiskowej CLI wyświetli ukryty prompt. W PowerShell 7
 można ustawić je na czas bieżącej konsoli bez wyświetlania:
 
 ```powershell
@@ -247,7 +253,8 @@ api_max_stage=read-only
 ```
 
 - `ssl=yes` oznacza HTTPS, `ssl=no` oznacza jawny HTTP;
-- `verify_ssl=yes` weryfikuje certyfikat HTTPS;
+- `verify_ssl=yes` weryfikuje certyfikat HTTPS; w GUI weryfikacja certyfikatu
+  jest domyślnie wyłączona i można ją włączyć na ekranie połączenia;
 - `api_max_stage`: `read-only`, `candidate`, `commit` albo `push`;
 - brak `api_max_stage` oznacza `read-only`.
 
@@ -369,12 +376,16 @@ sesję jako `CANDIDATE_APPLIED` albo `COMMITTED`, udostępniając ją dla Restor
 Paczka portable uruchamiana launcherem zapisuje sesje w:
 
 ```text
-<katalog PanOS-Toolbox>\backupy\sessions\session-...
+<Dokumenty użytkownika>\PanOS Toolbox\sessions\session-...
 ```
 
-Jawne uruchomienie CLI bez `--session-dir` nadal używa lokalizacji profilu
-użytkownika. Dane są plaintext, mają sumy SHA256 i nie są automatycznie
-kasowane. GUI pozwala pobrać integralnie zweryfikowany ZIP całej sesji. Sesja
+Jawne uruchomienie CLI bez `--session-dir` używa tego samego katalogu. Dane
+sesji są chronione ACL-em użytkownika, mają sumy SHA256 i nie są automatycznie
+kasowane. GUI pozwala wyszukać obiekt/politykę w historii, pobrać integralnie
+zweryfikowany ZIP całej sesji albo otworzyć Restore konkretnego celu. Sesja
+przy pierwszym uruchomieniu próbuje skopiować stare sesje z `backupy\sessions`
+obok poprzedniej paczki oraz z wcześniejszego `LOCALAPPDATA`; źródło pozostaje
+niezmienione.
 zawiera między innymi:
 
 - `plan_running.xml`, `plan_candidate.xml`;
