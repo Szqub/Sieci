@@ -33,7 +33,7 @@ def _add_connection(parser: argparse.ArgumentParser) -> None:
 def _add_store(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--session-dir",
-        help="Niestandardowy katalog sesji (domyślnie %%LOCALAPPDATA%%\\PanOSToolbox\\sessions).",
+        help="Niestandardowy katalog sesji (domyślnie Dokumenty\\PanOS Toolbox\\sessions).",
     )
 
 
@@ -124,10 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--host-file",
-        default=str(PROJECT_DIR / "panorama_host.txt"),
+        default=None,
         help=(
-            "Lokalny profil będący niezależnym sufitem zapisu GUI. "
-            "Brak pliku wymusza read-only."
+            "Opcjonalny legacy profil hosta będący dodatkowym sufitem zapisu GUI. "
+            "Bez tego pliku GUI korzysta z zapisanych profili i przełącznika READ ONLY/WRITE."
         ),
     )
     _add_store(serve)

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from panos_toolbox.cli import build_parser
 from panos_toolbox.cleaner_adapter import build_cleanup_patchset
 from panos_toolbox.policy_requests import build_policy_creation_plan, parse_policy_request
 from panos_toolbox.models import ApiStage
@@ -297,6 +298,10 @@ Info Dst
 
 
 class WebBoundaryTests(unittest.TestCase):
+    def test_gui_serve_does_not_require_legacy_hostname_file(self):
+        args = build_parser().parse_args(["serve"])
+        self.assertIsNone(args.host_file)
+
     def test_terminal_job_hides_dispatched_breadcrumb_instead_of_staying_at_50_percent(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
