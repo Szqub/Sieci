@@ -617,7 +617,10 @@ class WebBoundaryTests(unittest.TestCase):
             )
             headers = {"Host": "localhost", "Origin": "http://localhost"}
 
+            commit_options = {}
+
             def fake_commit(_store, _session_id, _reader, _writer, **kwargs):
+                commit_options.update(kwargs)
                 callback = kwargs["progress_callback"]
                 callback(44, "Panorama przyjęła commit job 88", {"event": "panorama-job-dispatched", "jobId": "88"})
                 callback(100, "Commit zakończony poprawnie", {"event": "stage-finished", "jobId": "88", "elapsedSeconds": 1.2})
@@ -649,6 +652,8 @@ class WebBoundaryTests(unittest.TestCase):
                         "enable_api_write": True,
                         "execution_stage": "push",
                         "allow_unisolated_commit": True,
+                        "allow_scope_guard_override": True,
+                        "acknowledged_scope_guard_digest": "a" * 64,
                     },
                     headers=session_headers,
                 )
@@ -667,6 +672,10 @@ class WebBoundaryTests(unittest.TestCase):
                 self.assertEqual(job["progress"], 100)
                 self.assertTrue(any(item["event"] == "stage-finished" for item in job["items"]))
                 self.assertIsNotNone(job["finishedAt"])
+                self.assertTrue(commit_options["allow_scope_guard_override"])
+                self.assertEqual(
+                    commit_options["acknowledged_scope_guard_digest"], "a" * 64
+                )
 
     def test_every_registered_text_artifact_supports_inline_view_and_download(self):
         class FakeReadClient:

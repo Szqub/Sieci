@@ -798,6 +798,10 @@ class SessionStore:
                 "candidate_semantic_sha256": record.get(
                     "candidateSemanticSha256"
                 ),
+                "finding_digest": record.get("findingDigest"),
+                "override_requested": bool(record.get("overrideRequested")),
+                "override_applied": bool(record.get("overrideApplied")),
+                "artifact": record.get("artifact"),
             },
         )
 

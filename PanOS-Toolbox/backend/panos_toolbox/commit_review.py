@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import difflib
 import ipaddress
+import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
@@ -19,7 +20,15 @@ from .cleaner_adapter import _legacy_root
 from .diffing import summarize_native_change_summary
 from .models import Mutation, PatchSet
 from .restore import apply_operation_to_tree
-from .xmlutil import fingerprint_element, raw_sha256, xpath_literal
+from .xmlutil import (
+    VOLATILE_ATTRIBUTES,
+    fingerprint_element,
+    raw_sha256,
+    xpath_literal,
+)
+
+
+_MAX_PATH_DIFFERENCES = 500
 
 
 @dataclass(frozen=True)
@@ -247,6 +256,206 @@ def _ip_causes(mutations: Sequence[Mutation]) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+def _child_identity(
+    child: ET.Element,
+    *,
+    tag_index: int,
+    duplicate_index: int,
+) -> tuple[tuple[str, str, str, int], str]:
+    """Return a stable comparison key and a human-readable exact XPath segment."""
+
+    name = child.get("name")
+    if name is not None:
+        base = (child.tag, "name", name, duplicate_index)
+        segment = f"{child.tag}[@name={xpath_literal(name)}]"
+    elif child.tag == "member" and (child.text or "").strip():
+        text = (child.text or "").strip()
+        base = (child.tag, "text", text, duplicate_index)
+        segment = f"{child.tag}[text()={xpath_literal(text)}]"
+    else:
+        base = (child.tag, "position", str(tag_index), duplicate_index)
+        segment = child.tag if tag_index == 1 else f"{child.tag}[{tag_index}]"
+    if duplicate_index > 1:
+        segment += f"[duplicate={duplicate_index}]"
+    return base, segment
+
+
+def _indexed_children(
+    parent: ET.Element,
+) -> list[tuple[tuple[str, str, str, int], str, ET.Element]]:
+    tag_counts: dict[str, int] = {}
+    identity_counts: dict[tuple[str, str, str], int] = {}
+    result: list[tuple[tuple[str, str, str, int], str, ET.Element]] = []
+    for child in list(parent):
+        tag_counts[child.tag] = tag_counts.get(child.tag, 0) + 1
+        name = child.get("name")
+        text = (child.text or "").strip()
+        if name is not None:
+            identity = (child.tag, "name", name)
+        elif child.tag == "member" and text:
+            identity = (child.tag, "text", text)
+        else:
+            identity = (child.tag, "position", str(tag_counts[child.tag]))
+        identity_counts[identity] = identity_counts.get(identity, 0) + 1
+        key, segment = _child_identity(
+            child,
+            tag_index=tag_counts[child.tag],
+            duplicate_index=identity_counts[identity],
+        )
+        result.append((key, segment, child))
+    return result
+
+
+def _candidate_path_differences(
+    expected: ET.Element,
+    candidate: ET.Element,
+) -> tuple[list[dict[str, str]], bool]:
+    """Locate the exact XML paths responsible for a projection mismatch.
+
+    Values are deliberately not copied into the report.  The path and the
+    structural difference are enough for an operator, while passwords,
+    certificates and other configuration values stay out of GUI diagnostics.
+    """
+
+    differences: list[dict[str, str]] = []
+    truncated = False
+
+    def add(xpath: str, kind: str, detail: str) -> None:
+        nonlocal truncated
+        if len(differences) >= _MAX_PATH_DIFFERENCES:
+            truncated = True
+            return
+        differences.append(
+            {"xpath": xpath, "differenceKind": kind, "detail": detail}
+        )
+
+    def compare(left: ET.Element, right: ET.Element, xpath: str) -> None:
+        left_attributes = {
+            key: value
+            for key, value in left.attrib.items()
+            if key not in VOLATILE_ATTRIBUTES
+        }
+        right_attributes = {
+            key: value
+            for key, value in right.attrib.items()
+            if key not in VOLATILE_ATTRIBUTES
+        }
+        changed_attributes = sorted(
+            key
+            for key in set(left_attributes) | set(right_attributes)
+            if left_attributes.get(key) != right_attributes.get(key)
+        )
+        if changed_attributes:
+            add(
+                xpath,
+                "attributes-changed",
+                "Candidate ma inne atrybuty niż projekcja PatchSet: "
+                + ", ".join(changed_attributes),
+            )
+        if (left.text or "").strip() != (right.text or "").strip():
+            add(
+                xpath,
+                "text-changed",
+                "Wartość elementu w candidate różni się od projekcji PatchSet.",
+            )
+
+        left_items = _indexed_children(left)
+        right_items = _indexed_children(right)
+        left_by_key = {key: (segment, child) for key, segment, child in left_items}
+        right_by_key = {key: (segment, child) for key, segment, child in right_items}
+        left_order = [key for key, _segment, _child in left_items]
+        right_order = [key for key, _segment, _child in right_items]
+        if set(left_order) == set(right_order) and left_order != right_order:
+            add(
+                xpath,
+                "child-order-changed",
+                "Kolejność elementów potomnych w candidate różni się od projekcji PatchSet.",
+            )
+
+        for key in left_order:
+            segment, left_child = left_by_key[key]
+            child_xpath = f"{xpath.rstrip('/')}/{segment}"
+            right_item = right_by_key.get(key)
+            if right_item is None:
+                add(
+                    child_xpath,
+                    "missing-from-candidate",
+                    "Element oczekiwany po zastosowaniu PatchSet nie istnieje w candidate.",
+                )
+                continue
+            compare(left_child, right_item[1], child_xpath)
+        for key in right_order:
+            if key in left_by_key:
+                continue
+            segment, _right_child = right_by_key[key]
+            add(
+                f"{xpath.rstrip('/')}/{segment}",
+                "unexpected-in-candidate",
+                "Candidate zawiera element, którego nie ma w projekcji PatchSet.",
+            )
+
+    compare(expected, candidate, "/config")
+    return differences, truncated
+
+
+def _finalize_scope_guard(
+    *,
+    candidate: ET.Element,
+    mutations: Sequence[Mutation],
+    findings: Sequence[dict[str, Any]],
+    projection_matches: Optional[bool],
+    projection_sha256: Optional[str],
+    projection_error: Optional[str],
+) -> dict[str, Any]:
+    canonical_findings = [
+        {
+            key: finding.get(key)
+            for key in (
+                "code",
+                "detail",
+                "target",
+                "ownerType",
+                "ownerName",
+                "scope",
+                "field",
+                "xpath",
+                "outsidePlan",
+                "differenceKind",
+            )
+        }
+        for finding in findings
+    ]
+    candidate_sha256 = fingerprint_element(candidate)
+    finding_digest = (
+        raw_sha256(
+            json.dumps(
+                {
+                    "candidateSemanticSha256": candidate_sha256,
+                    "findings": canonical_findings,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        if findings
+        else None
+    )
+    return {
+        "passed": not findings,
+        "findingCount": len(findings),
+        "outsidePlanCount": sum(bool(item["outsidePlan"]) for item in findings),
+        "checkedMutationCount": len(mutations),
+        "candidateProjectionMatches": projection_matches,
+        "candidateProjectionSha256": projection_sha256,
+        "candidateSemanticSha256": candidate_sha256,
+        "projectionError": projection_error,
+        "findingDigest": finding_digest,
+        "overrideEligible": bool(findings),
+        "findings": list(findings),
+    }
+
+
 def _scope_guard(
     running: ET.Element,
     baseline_candidate: ET.Element,
@@ -268,6 +477,7 @@ def _scope_guard(
         owner_scope: str = "",
         field: str = "",
         xpath: str = "",
+        difference_kind: str = "",
     ) -> None:
         outside = not any(_paths_overlap(xpath, item) for item in touched_xpaths) if xpath else True
         record = {
@@ -280,6 +490,7 @@ def _scope_guard(
             "field": field,
             "xpath": xpath,
             "outsidePlan": outside,
+            "differenceKind": difference_kind,
         }
         identity = (
             record["code"],
@@ -289,6 +500,7 @@ def _scope_guard(
             record["scope"],
             record["field"],
             record["xpath"],
+            record["differenceKind"],
         )
         if not any(
             (
@@ -299,6 +511,7 @@ def _scope_guard(
                 item["scope"],
                 item["field"],
                 item["xpath"],
+                item.get("differenceKind", ""),
             )
             == identity
             for item in findings
@@ -343,6 +556,26 @@ def _scope_guard(
                         "sesji. Commit mógłby utrwalić zmianę spoza zakresu."
                     ),
                 )
+                path_differences, path_differences_truncated = (
+                    _candidate_path_differences(expected, candidate)
+                )
+                for difference in path_differences:
+                    add_finding(
+                        code="CANDIDATE_PATH_OUTSIDE_PATCHSET",
+                        detail=difference["detail"],
+                        target="running + PatchSet",
+                        xpath=difference["xpath"],
+                        difference_kind=difference["differenceKind"],
+                    )
+                if path_differences_truncated:
+                    add_finding(
+                        code="CANDIDATE_PATH_DIFF_TRUNCATED",
+                        detail=(
+                            f"Wykryto więcej niż {_MAX_PATH_DIFFERENCES} różnic XML. "
+                            "Raport pokazuje pierwsze ścieżki; pełny diff pozostaje "
+                            "w artefakcie candidate_diff."
+                        ),
+                    )
         except Exception as exc:  # fail closed: an incomplete proof is unsafe
             projection_matches = False
             projection_error = f"{type(exc).__name__}: {exc}"
@@ -355,18 +588,14 @@ def _scope_guard(
             )
 
     if patch.kind != "cleanup":
-        return {
-            "passed": not findings,
-            "findingCount": len(findings),
-            "outsidePlanCount": sum(
-                bool(item["outsidePlan"]) for item in findings
-            ),
-            "checkedMutationCount": len(mutations),
-            "candidateProjectionMatches": projection_matches,
-            "candidateProjectionSha256": projection_sha256,
-            "projectionError": projection_error,
-            "findings": findings,
-        }
+        return _finalize_scope_guard(
+            candidate=candidate,
+            mutations=mutations,
+            findings=findings,
+            projection_matches=projection_matches,
+            projection_sha256=projection_sha256,
+            projection_error=projection_error,
+        )
 
     try:
         _legacy_root()
@@ -492,16 +721,14 @@ def _scope_guard(
             ),
         )
 
-    return {
-        "passed": not findings,
-        "findingCount": len(findings),
-        "outsidePlanCount": sum(bool(item["outsidePlan"]) for item in findings),
-        "checkedMutationCount": len(mutations),
-        "candidateProjectionMatches": projection_matches,
-        "candidateProjectionSha256": projection_sha256,
-        "projectionError": projection_error,
-        "findings": findings,
-    }
+    return _finalize_scope_guard(
+        candidate=candidate,
+        mutations=mutations,
+        findings=findings,
+        projection_matches=projection_matches,
+        projection_sha256=projection_sha256,
+        projection_error=projection_error,
+    )
 
 
 def _compact_change(entry: dict[str, Any]) -> dict[str, Any]:
@@ -592,10 +819,28 @@ def _render_review_text(payload: dict[str, Any]) -> str:
                 entry["unifiedDiff"] or "   (brak tekstowej różnicy)",
             ]
         )
+    lines.extend(["", "DOKŁADNE USTALENIA SCOPE GUARD"])
+    if guard["passed"]:
+        lines.append("Brak ustaleń blokujących.")
+    for index, finding in enumerate(guard["findings"], 1):
+        lines.extend(
+            [
+                f"{index}. {finding['code']}: {finding['detail']}",
+                f"   Typ różnicy: {finding.get('differenceKind') or '-'}",
+                f"   Cel: {finding['target'] or '-'}",
+                f"   Właściciel: {finding['ownerType'] or '-'} "
+                f"{finding['scope'] or '-'}/{finding['ownerName'] or '-'}",
+                f"   Pole: {finding['field'] or '-'}",
+                f"   XPath: {finding['xpath'] or '-'}",
+                f"   Poza planem: {'TAK' if finding['outsidePlan'] else 'NIE'}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
-def _render_scope_guard_text(session_id: str, generated_at: str, guard: dict[str, Any]) -> str:
+def render_scope_guard_text(
+    session_id: str, generated_at: str, guard: dict[str, Any]
+) -> str:
     lines = [
         "PANOS TOOLBOX — SCOPE GUARD PRZED COMMIT",
         f"Sesja: {session_id}",
@@ -603,6 +848,9 @@ def _render_scope_guard_text(session_id: str, generated_at: str, guard: dict[str
         f"Wynik: {'PASS' if guard['passed'] else 'BLOCK'}",
         f"Ustalenia: {guard['findingCount']}",
         f"Pełna projekcja candidate: {guard['candidateProjectionMatches']}",
+        f"Fingerprint blokady: {guard.get('findingDigest') or '-'}",
+        f"Override zażądany: {'TAK' if guard.get('overrideRequested') else 'NIE'}",
+        f"Override zastosowany: {'TAK' if guard.get('overrideApplied') else 'NIE'}",
         "",
     ]
     if guard["passed"]:
@@ -613,6 +861,7 @@ def _render_scope_guard_text(session_id: str, generated_at: str, guard: dict[str
         lines.extend(
             [
                 f"{index}. {finding['code']}: {finding['detail']}",
+                f"   Typ różnicy: {finding.get('differenceKind') or '-'}",
                 f"   Cel: {finding['target'] or '-'}",
                 f"   Właściciel: {finding['ownerType'] or '-'} "
                 f"{finding['scope'] or '-'}/{finding['ownerName'] or '-'}",
@@ -712,5 +961,5 @@ def build_commit_review(
         payload=payload,
         review_text=_render_review_text(payload),
         config_diff_text=config_diff_text,
-        scope_guard_text=_render_scope_guard_text(session_id, generated_at, guard),
+        scope_guard_text=render_scope_guard_text(session_id, generated_at, guard),
     )

@@ -17,6 +17,19 @@ Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
 następnego automatycznie. Narzędzie nigdy automatycznie nie ładuje pełnego
 backupu konfiguracji.
 
+## Najważniejsze w v0.7.2
+
+- każdy `BLOCK` pokazuje bezpośrednio w GUI dokładny kod, rodzaj różnicy,
+  właściciela, DG/rulebase, pole oraz XPath, który zatrzymał commit;
+- pełny opis przed commit oraz osobny raport live preflight zawierają te same
+  szczegóły, także gdy job zakończy się błędem przed wysłaniem do Panoramy;
+- operator może jawnie wybrać **Ignoruj tę blokadę**, ale dopiero po ostrzeżeniu
+  i akceptacji fingerprintu dokładnego zestawu findings;
+- backend ponawia live scope guard i odrzuca override, jeżeli candidate albo
+  choć jeden finding zmieni się pomiędzy wyświetleniem a commitem;
+- zaakceptowany override jest trwale zapisany w ryzykach, journalu i raporcie
+  sesji razem z fingerprintem oraz kodami ustaleń.
+
 ## Najważniejsze w v0.7.1
 
 - wykluczenie polityki, obiektu lub całego komponentu przebudowuje plan
@@ -214,6 +227,14 @@ porównuje go z live candidate. Commit jest blokowany, jeżeli znajdzie choć je
 zmianę poza planem albo pozostałą referencję do usuwanego adresu/grupy — na
 przykład w innej polityce, grupie nadrzędnej lub nieobsługiwanym polu. Operator
 może odświeżyć diff bez ponownego zapisu Candidate.
+
+Przy `BLOCK` GUI pokazuje każde ustalenie przed przyciskiem commit: kod, rodzaj
+różnicy XML, obiekt będący właścicielem, DG/rulebase, pole i dokładny XPath.
+Przycisk **Ignoruj tę blokadę** wymaga WRITE, osobnego ostrzeżenia i zaznaczenia
+potwierdzenia. Nie wyłącza scope guard globalnie: przekazuje fingerprint obecnego
+zestawu findings, a backend przed dispatch ponownie liczy live guard i pozwala
+kontynuować wyłącznie wtedy, gdy fingerprint jest identyczny. Override oraz jego
+raport są zapisywane w trwałej historii sesji.
 
 Commit ma osobne ostrzeżenie, a push mocniejsze ostrzeżenie z listą device
 groups. Commit i push działają jako joby w tle. Przed realnym wysłaniem commit

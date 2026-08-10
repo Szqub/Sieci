@@ -859,6 +859,38 @@ def _json_bool(
     return raw
 
 
+def _scope_guard_override(value: dict[str, Any]) -> tuple[bool, Optional[str]]:
+    allowed = _json_bool(
+        value,
+        "allow_scope_guard_override",
+        fallback_key="allowScopeGuardOverride",
+        default=False,
+    )
+    raw_digest = value.get(
+        "acknowledged_scope_guard_digest",
+        value.get("acknowledgedScopeGuardDigest"),
+    )
+    if raw_digest is None:
+        digest = None
+    elif isinstance(raw_digest, str):
+        digest = raw_digest.strip().lower() or None
+    else:
+        raise InputError("Fingerprint scope guard musi być tekstem SHA-256.")
+    if digest is not None and (
+        len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise InputError("Fingerprint scope guard musi zawierać dokładnie 64 znaki hex.")
+    if allowed and digest is None:
+        raise InputError(
+            "Jawny override scope guard wymaga fingerprintu dokładnie pokazanej blokady."
+        )
+    if digest is not None and not allowed:
+        raise InputError(
+            "Fingerprint blokady podano bez jawnego allow_scope_guard_override=true."
+        )
+    return allowed, digest
+
+
 def _contract() -> dict[str, Any]:
     return {
         "name": "PanOS Toolbox local API",
@@ -1305,7 +1337,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.7.1", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.7.2", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -2090,6 +2122,7 @@ def create_app(
             fallback_key="allowFullCommit",
             default=False,
         )
+        allow_scope_override, acknowledged_scope_digest = _scope_guard_override(value)
 
         def run_commit(update):
             result = commit_session(
@@ -2100,6 +2133,8 @@ def create_app(
                 partial=partial,
                 allow_unisolated_commit=allow_unisolated,
                 allow_full_commit=allow_full,
+                allow_scope_guard_override=allow_scope_override,
+                acknowledged_scope_guard_digest=acknowledged_scope_digest,
                 progress_callback=update,
             )
             elapsed = result.get("total_duration_seconds")
@@ -2177,6 +2212,7 @@ def create_app(
             ),
             operator_authorized_stage=execution_stage(value),
         )
+        allow_scope_override, acknowledged_scope_digest = _scope_guard_override(value)
         job = commit_session(
                 session_store,
                 session_id,
@@ -2195,6 +2231,8 @@ def create_app(
                     fallback_key="allowFullCommit",
                     default=False,
                 ),
+                allow_scope_guard_override=allow_scope_override,
+                acknowledged_scope_guard_digest=acknowledged_scope_digest,
             )
         return jsonify(
             {

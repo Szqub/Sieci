@@ -143,4 +143,62 @@ describe("staged execution gates", () => {
     fireEvent.click(screen.getByRole("button", { name: /scope pass — wyślij commit/i }));
     expect(onCommit).toHaveBeenCalledTimes(1);
   });
+
+  it("po live BLOCK pokazuje dokładny XPath i pozwala jawnie zaakceptować tylko jego fingerprint", () => {
+    const onCommit = vi.fn();
+    const digest = "b".repeat(64);
+    const precommitGuard = {
+      passed: false,
+      findingCount: 1,
+      outsidePlanCount: 1,
+      checkedMutationCount: 6,
+      candidateProjectionMatches: false,
+      findingDigest: digest,
+      overrideEligible: true,
+      artifact: "precommit_scope_guard_demo.txt",
+      findings: [{
+        code: "CANDIDATE_PATH_OUTSIDE_PATCHSET",
+        detail: "Candidate zawiera element, którego nie ma w projekcji PatchSet.",
+        target: "running + PatchSet",
+        ownerType: "policy",
+        ownerName: "KEEP-THIS",
+        scope: "DG-PROD",
+        field: "source",
+        xpath: "/config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='DG-PROD']/pre-rulebase/security/rules/entry[@name='KEEP-THIS']/source",
+        outsidePlan: true,
+        differenceKind: "unexpected-in-candidate",
+      }],
+    };
+    const failedSession = {
+      ...demoSessions[0],
+      state: "PARTIAL" as const,
+      commitReview: demoCleanupPlan.commitReview,
+      precommitGuard,
+      artifacts: demoCleanupPlan.artifacts,
+    };
+    const executionJob = {
+      id: "commit-failed",
+      sessionId: failedSession.id,
+      kind: "commit" as const,
+      state: "failed" as const,
+      progress: 28,
+      message: "Etap commit został zatrzymany",
+      items: [],
+      session: failedSession,
+      error: { code: "ConflictError", message: "Scope guard BLOCK" },
+    };
+
+    render(<PlanPage {...baseProps} executionSession={null} executionJob={executionJob} onCommit={onCommit} />);
+
+    expect(screen.getByText(/live preflight bezpośrednio przed wysłaniem joba/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/KEEP-THIS.*source/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/XPath: \/config\/devices/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Commit" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /ignoruj tę blokadę/i }));
+    expect(screen.getByRole("dialog")).toHaveTextContent(/jawny override scope guard/i);
+    const acknowledgement = screen.getByRole("checkbox", { name: /rozumiem, że ignoruję dokładnie/i });
+    fireEvent.click(acknowledgement);
+    fireEvent.click(screen.getByRole("button", { name: /ignoruj dokładnie tę blokadę i uruchom commit/i }));
+    expect(onCommit).toHaveBeenCalledWith(digest);
+  });
 });

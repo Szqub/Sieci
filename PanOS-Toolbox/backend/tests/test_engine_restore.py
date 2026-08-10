@@ -398,6 +398,29 @@ class EngineTests(unittest.TestCase):
                     for finding in manifest["commit_review"]["scopeGuard"]["findings"]
                 )
             )
+            path_findings = [
+                finding
+                for finding in manifest["commit_review"]["scopeGuard"]["findings"]
+                if finding["code"] == "CANDIDATE_PATH_OUTSIDE_PATCHSET"
+            ]
+            self.assertEqual(len(path_findings), 1)
+            self.assertEqual(
+                path_findings[0]["xpath"],
+                "/config/shared/address/entry[@name='B']/ip-netmask",
+            )
+            self.assertEqual(path_findings[0]["differenceKind"], "text-changed")
+            self.assertEqual(
+                len(manifest["commit_review"]["scopeGuard"]["findingDigest"]), 64
+            )
+            for artifact_key in ("reviewText", "scopeGuard"):
+                report = store.resolve_download(
+                    session_id,
+                    manifest["commit_review"]["artifacts"][artifact_key],
+                ).read_text(encoding="utf-8")
+                self.assertIn("CANDIDATE_PATH_OUTSIDE_PATCHSET", report)
+                self.assertIn(
+                    "/config/shared/address/entry[@name='B']/ip-netmask", report
+                )
             with self.assertRaises(ConflictError):
                 commit_session(
                     store,
@@ -408,6 +431,63 @@ class EngineTests(unittest.TestCase):
                 )
             self.assertNotIn("commit", writer.events)
             self.assertEqual(store.load_manifest(session_id)["state"], "PARTIAL")
+
+    def test_scope_guard_override_requires_exact_digest_and_is_audited(self):
+        profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            reader = StatefulReader(profile, config("A", "B"))
+            find_xpath(
+                reader.candidate, "/config/shared/address/entry[@name='B']/ip-netmask"
+            ).text = "198.51.100.200/32"
+            session_id, _ = self.make_session(
+                store, profile, (mutation(1, "A"), mutation(2, "B"))
+            )
+            writer = StatefulWriter(reader)
+            apply_candidate(store, session_id, reader, writer)
+            guard = store.load_manifest(session_id)["commit_review"]["scopeGuard"]
+
+            with self.assertRaises(ConflictError):
+                commit_session(
+                    store,
+                    session_id,
+                    reader,
+                    writer,
+                    allow_unisolated_commit=True,
+                    allow_scope_guard_override=True,
+                    acknowledged_scope_guard_digest="0" * 64,
+                )
+            self.assertNotIn("commit", writer.events)
+
+            commit_session(
+                store,
+                session_id,
+                reader,
+                writer,
+                allow_unisolated_commit=True,
+                allow_scope_guard_override=True,
+                acknowledged_scope_guard_digest=guard["findingDigest"],
+            )
+            manifest = store.load_manifest(session_id)
+            self.assertEqual(manifest["state"], "COMMITTED")
+            self.assertTrue(manifest["precommit_guard"]["overrideApplied"])
+            self.assertEqual(
+                manifest["precommit_guard"]["findingDigest"], guard["findingDigest"]
+            )
+            self.assertTrue(
+                any(risk["code"] == "SCOPE_GUARD_OVERRIDE" for risk in manifest["risks"])
+            )
+            self.assertTrue(
+                any(
+                    artifact["file"] == manifest["precommit_guard"]["artifact"]
+                    for artifact in store.artifact_catalog(session_id, manifest=manifest)
+                )
+            )
+            override_report = store.resolve_download(
+                session_id, manifest["precommit_guard"]["artifact"]
+            ).read_text(encoding="utf-8")
+            self.assertIn("Override zastosowany: TAK", override_report)
+            self.assertIn("CANDIDATE_PATH_OUTSIDE_PATCHSET", override_report)
 
     def test_refreshed_review_blocks_residual_reference_to_deleted_address(self):
         profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)

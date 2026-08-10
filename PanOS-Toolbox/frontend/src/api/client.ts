@@ -355,6 +355,8 @@ export const api = {
         full: Boolean(options.allowFullCommit),
         allow_unisolated_commit: Boolean(options.allowUnisolatedCommit),
         allow_full_commit: Boolean(options.allowFullCommit),
+        allow_scope_guard_override: Boolean(options.allowScopeGuardOverride),
+        acknowledged_scope_guard_digest: options.acknowledgedScopeGuardDigest,
       },
     });
   },
@@ -383,6 +385,8 @@ export const api = {
         full: Boolean(options.allowFullCommit),
         allow_unisolated_commit: Boolean(options.allowUnisolatedCommit),
         allow_full_commit: Boolean(options.allowFullCommit),
+        allow_scope_guard_override: Boolean(options.allowScopeGuardOverride),
+        acknowledged_scope_guard_digest: options.acknowledgedScopeGuardDigest,
       },
     });
   },

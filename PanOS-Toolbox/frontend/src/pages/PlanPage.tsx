@@ -24,7 +24,7 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import type { AddressAnalysis, CleanupPlan, EntityDependency, ExecutionJob, SessionArtifact, SessionState, ToolboxSession } from "../model";
+import type { AddressAnalysis, CleanupPlan, EntityDependency, ExecutionJob, ScopeGuardResult, SessionArtifact, SessionState, ToolboxSession } from "../model";
 import { formatDate, shortId } from "../model";
 import { ExecutionProgress } from "../components/ExecutionProgress";
 import { Button, Callout, Card, EmptyState, PageHeader, ProgressBar, StatusPill } from "../components/Primitives";
@@ -48,7 +48,7 @@ interface PlanPageProps {
   onRestoreTarget: (target: AddressAnalysis) => void;
   onApplyCandidate: () => void;
   onPrepareCommitReview: () => void;
-  onCommit: () => void;
+  onCommit: (scopeGuardOverrideDigest?: string) => void;
   onPush: () => void;
   onViewArtifact: (artifact: string) => Promise<string>;
   onDownload: (artifact: string) => void;
@@ -83,6 +83,22 @@ function formatBytes(value?: number): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function ScopeGuardFindings({ guard }: { guard: ScopeGuardResult }) {
+  return <div className="commit-guard-findings commit-guard-findings--visible">
+    {guard.findings.map((finding, index) => <div key={`${finding.code}:${finding.xpath}:${index}`}>
+      <AlertOctagon size={15} />
+      <span>
+        <strong>{index + 1}. {finding.code} · {finding.target || "pełny candidate"}</strong>
+        <small>{finding.detail}</small>
+        {finding.differenceKind && <code>Rodzaj różnicy: {finding.differenceKind}</code>}
+        <code>{finding.scope || "-"} · {finding.ownerType || "-"} · {finding.ownerName || "-"} · {finding.field || "-"}</code>
+        <code>XPath: {finding.xpath || "brak pojedynczego XPath — porównano pełny config"}</code>
+        <small>{finding.outsidePlan ? "Poza ścieżkami PatchSet: TAK" : "Ścieżka przecina PatchSet, ale stan candidate jest inny niż oczekiwany"}</small>
+      </span>
+    </div>)}
+  </div>;
+}
+
 export function PlanPage({ focus = "plan", plan, executionSession, executionJob, writeEnabled, busy, singlePlanBusy, error, onOpenCleanup, onCreateSinglePlan, onCreateSelectionPlan, onExcludeTargets, onExcludeComponents, onUndoLastExclusion, onPlanDependencies, onRestoreTarget, onApplyCandidate, onPrepareCommitReview, onCommit, onPush, onViewArtifact, onDownload }: PlanPageProps) {
   const [expandedTargets, setExpandedTargets] = useState<Set<string>>(new Set());
   const [selectedTargets, setSelectedTargets] = useState<Set<string>>(new Set());
@@ -90,12 +106,34 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
   const [confirmAction, setConfirmAction] = useState<"candidate" | "commit" | "push" | null>(null);
   const [objectQuery, setObjectQuery] = useState("");
   const [commitQuery, setCommitQuery] = useState("");
+  const [confirmScopeOverride, setConfirmScopeOverride] = useState(false);
+  const [scopeOverrideAcknowledged, setScopeOverrideAcknowledged] = useState(false);
   const [artifactViewer, setArtifactViewer] = useState<{ file: string; content: string; loading: boolean; error?: string } | null>(null);
   useEffect(() => { setSelectedTargets(new Set()); setSelectedDependencies(new Map()); }, [plan?.sessionId]);
   useEffect(() => { setObjectQuery(""); }, [plan?.sessionId]);
-  const state = executionSession?.state ?? plan?.state ?? "PLANNED";
-  const commitReview = executionSession?.commitReview ?? plan?.commitReview;
-  const artifacts = (executionSession?.artifacts ?? plan?.artifacts ?? []) as SessionArtifact[];
+  const latestSession = executionJob?.session ?? executionSession;
+  const state = latestSession?.state ?? plan?.state ?? "PLANNED";
+  const commitReview = latestSession?.commitReview ?? plan?.commitReview;
+  const precommitGuard = latestSession?.precommitGuard;
+  const overriddenGuard = precommitGuard?.overrideApplied ? precommitGuard : undefined;
+  const blockingGuard = overriddenGuard
+    ? undefined
+    : precommitGuard && !precommitGuard.passed
+      ? precommitGuard
+      : commitReview && !commitReview.scopeGuard.passed
+        ? commitReview.scopeGuard
+        : undefined;
+  const blockingGuardSource = precommitGuard && !precommitGuard.passed && !precommitGuard.overrideApplied
+    ? "live preflight bezpośrednio przed wysłaniem joba"
+    : "pełny przegląd running → candidate";
+  const blockingGuardArtifact = precommitGuard && !precommitGuard.passed
+    ? precommitGuard.artifact
+    : commitReview?.artifacts.scopeGuard;
+  const artifacts = (latestSession?.artifacts ?? plan?.artifacts ?? []) as SessionArtifact[];
+  useEffect(() => {
+    setConfirmScopeOverride(false);
+    setScopeOverrideAcknowledged(false);
+  }, [blockingGuard?.findingDigest]);
 
   const openArtifact = async (file: string) => {
     setArtifactViewer({ file, content: "", loading: true });
@@ -158,7 +196,7 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
   }), [artifacts]);
   const canApplyCandidate = state === "PLANNED" && plan.operations.length > 0;
   const candidateReadyForCommit = state === "CANDIDATE_APPLIED" || state === "PARTIAL" || state === "RESTORED";
-  const canCommit = candidateReadyForCommit && Boolean(commitReview?.commitReady && commitReview.scopeGuard.passed);
+  const canCommit = candidateReadyForCommit && !blockingGuard && Boolean(commitReview?.commitReady && commitReview.scopeGuard.passed);
   const canPush = state === "COMMITTED";
   const canRestore = ["CANDIDATE_APPLIED", "PARTIAL", "COMMITTED", "PUSHED"].includes(state);
 
@@ -243,10 +281,35 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
           <Card className={["COMMITTED", "PUSHED"].includes(state) ? "stage-card stage-card--done" : "stage-card"}><span className="stage-number">02</span><PackageCheck /><h3>Diff + Commit Panorama</h3><p>Pełny running → candidate diff i scope guard muszą mieć PASS. Sam Commit wykonuje potem tylko jeden live candidate preflight.</p><div className="stage-card-actions"><Button variant="ghost" icon={<RefreshCw size={14} />} loading={busy === "review"} disabled={!candidateReadyForCommit || Boolean(busy && busy !== "download")} onClick={onPrepareCommitReview}>Odśwież diff</Button><Button variant="primary" loading={busy === "commit"} disabled={!writeEnabled || !canCommit} onClick={() => { setCommitQuery(""); setConfirmAction("commit"); }}>Commit</Button></div>{candidateReadyForCommit && <small className={commitReview?.commitReady ? "commit-ready-status is-pass" : "commit-ready-status is-block"}>{commitReview?.commitReady ? `Scope guard PASS · ${commitReview.summary.total} zmian` : commitReview ? `BLOCK · ${commitReview.scopeGuard.findingCount} ustaleń` : "Brak przeglądu — odśwież diff"}</small>}</Card>
           <Card className={state === "PUSHED" ? "stage-card stage-card--done" : "stage-card"}><span className="stage-number">03</span><CloudUpload /><h3>Push do urządzeń</h3><p>Osobny job tylko do device groups wynikających z planu.</p><div className="push-targets">{plan.affectedDeviceGroups.map((group) => <StatusPill key={group}>{group}</StatusPill>)}</div><Button variant="primary" loading={busy === "push"} disabled={!writeEnabled || !canPush} onClick={() => setConfirmAction("push")}>Validate & Push</Button></Card>
         </div>
-        {candidateReadyForCommit && commitReview && !commitReview.commitReady && <Callout severity="danger" title="Commit zablokowany przez scope guard"><p>Znaleziono {commitReview.scopeGuard.findingCount} zależności lub zmian poza PatchSet. Otwórz pełny raport poniżej; backend nie wyśle joba commit do Panoramy.</p></Callout>}
+        {candidateReadyForCommit && blockingGuard && <Card className="scope-block-card">
+          <Callout
+            severity="danger"
+            title={`Commit zablokowany: ${blockingGuard.findingCount} ${blockingGuard.findingCount === 1 ? "konkretne ustalenie" : "konkretnych ustaleń"}`}
+            actions={<div className="scope-block-actions">
+              {blockingGuardArtifact && <Button icon={<Eye size={14} />} onClick={() => void openArtifact(blockingGuardArtifact)}>Wyświetl raport blokady</Button>}
+              <Button
+                variant="danger"
+                disabled={!writeEnabled || !blockingGuard.overrideEligible || !blockingGuard.findingDigest || Boolean(busy)}
+                onClick={() => setConfirmScopeOverride(true)}
+              >Ignoruj tę blokadę…</Button>
+            </div>}
+          >
+            <p>Źródło: {blockingGuardSource}. Poniżej widać dokładny kod, obiekt, DG/rulebase, pole i XPath. Job commit nie został wysłany do Panoramy.</p>
+            {!blockingGuard.findingDigest && <p>Ta starsza blokada nie ma fingerprintu. Odśwież diff, aby włączyć bezpieczny override.</p>}
+          </Callout>
+          <ScopeGuardFindings guard={blockingGuard} />
+          {blockingGuard.findingDigest && <code className="scope-block-digest">Fingerprint blokady: {blockingGuard.findingDigest}</code>}
+        </Card>}
+        {overriddenGuard && <Card className="scope-block-card scope-block-card--overridden">
+          <Callout severity="warning" title="Scope guard BLOCK został jawnie nadpisany">
+            <p>Backend zapisał fingerprint, kody findings i raport w historii sesji. To nie jest PASS — commit mógł objąć wskazane niżej zmiany poza PatchSet.</p>
+          </Callout>
+          <ScopeGuardFindings guard={overriddenGuard} />
+          {overriddenGuard.artifact && <Button icon={<Eye size={14} />} onClick={() => void openArtifact(overriddenGuard.artifact!)}>Wyświetl raport override</Button>}
+        </Card>}
         {candidateReadyForCommit && commitReview?.commitReady && <Callout severity="success" title="Pełny przegląd przed commit jest gotowy"><p>Diff wygenerowano {formatDate(commitReview.generatedAt)}. Przed wysłaniem joba backend jeszcze raz pobierze live candidate, sprawdzi hash, zależności i change-summary.</p></Callout>}
         {executionJob && <ExecutionProgress job={executionJob} />}
-        {executionSession?.jobs.length ? <Card className="jobs-card">{executionSession.jobs.map((job) => <div className="job-row" key={job.id}><div><StatusPill tone={job.state === "success" ? "success" : job.state === "failed" ? "danger" : "warning"}>{job.state}</StatusPill><div><strong>{job.kind.toUpperCase()} · {job.id}</strong><span>{job.message}</span></div></div><ProgressBar value={job.progress} label={`${job.progress}%`} /></div>)}</Card> : null}
+        {latestSession?.jobs.length ? <Card className="jobs-card">{latestSession.jobs.map((job) => <div className="job-row" key={job.id}><div><StatusPill tone={job.state === "success" ? "success" : job.state === "failed" ? "danger" : "warning"}>{job.state}</StatusPill><div><strong>{job.kind.toUpperCase()} · {job.id}</strong><span>{job.message}</span></div></div><ProgressBar value={job.progress} label={`${job.progress}%`} /></div>)}</Card> : null}
       </section>
 
       <details className="analysis-details-drawer">
@@ -269,12 +332,24 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
           <div className="commit-review__metrics"><div><small>Zmiany</small><strong>{commitReview.summary.total}</strong></div><div><small>W planie</small><strong>{commitReview.summary.planned}</strong></div><div className={commitReview.summary.outsidePlan ? "is-danger" : "is-pass"}><small>Poza planem</small><strong>{commitReview.summary.outsidePlan}</strong></div><div className={commitReview.scopeGuard.passed ? "is-pass" : "is-danger"}><small>Scope guard</small><strong>{commitReview.scopeGuard.passed ? "PASS" : "BLOCK"}</strong></div><div><small>Wygenerowano</small><strong>{formatDate(commitReview.generatedAt)}</strong></div></div>
           <div className={`commit-scope-banner ${commitReview.scopeGuard.passed ? "is-pass" : "is-block"}`}><ShieldCheck size={17} /><span><strong>{commitReview.scopeGuard.passed ? "Brak zależności i zmian poza zakresem" : `${commitReview.scopeGuard.findingCount} ustaleń blokujących commit`}</strong><small>Projekcja candidate: {commitReview.scopeGuard.candidateProjectionMatches === true ? "zgodna z PatchSet" : commitReview.scopeGuard.candidateProjectionMatches === false ? "różna od PatchSet" : "nie dotyczy"}</small></span></div>
           <div className="commit-review__toolbar"><div className="table-search"><Search size={15} /><input value={commitQuery} onChange={(event) => setCommitQuery(event.target.value)} placeholder="Szukaj po obiekcie, polityce, DG, XPath…" autoFocus /></div><Button icon={<Eye size={14} />} onClick={() => void openArtifact(commitReview.artifacts.candidateDiff)}>Pełny diff</Button><Button icon={<Eye size={14} />} onClick={() => void openArtifact(commitReview.artifacts.reviewText)}>Pełny opis</Button><Button icon={<Download size={14} />} onClick={() => onDownload(commitReview.artifacts.candidateDiff)}>Pobierz diff</Button></div>
-          {!commitReview.scopeGuard.passed && <div className="commit-guard-findings">{commitReview.scopeGuard.findings.map((finding, index) => <div key={`${finding.code}:${finding.xpath}:${index}`}><AlertOctagon size={15} /><span><strong>{finding.code} · {finding.target || "pełny candidate"}</strong><small>{finding.detail}</small><code>{finding.scope || "-"} · {finding.ownerType || "-"} · {finding.ownerName || "-"} · {finding.field || "-"}</code><code>{finding.xpath || "brak pojedynczego XPath — porównano pełny config"}</code></span></div>)}</div>}
+          {!commitReview.scopeGuard.passed && <ScopeGuardFindings guard={commitReview.scopeGuard} />}
           <div className="commit-review__list">{filteredReviewChanges.map((change) => <div key={change.key} className={!change.planned ? "is-outside" : ""}><StatusPill tone={!change.planned ? "danger" : change.change === "removed" ? "danger" : "warning"}>{change.change.toUpperCase()}</StatusPill><span><strong>{change.name}</strong><small>{change.entityType} · {change.scope}{change.rulebase ? ` · ${change.rulebase}` : ""}{change.policyType ? ` · ${change.policyType}` : ""}</small><small>{change.explanation}</small><code>{change.xpath}</code></span><span className="commit-change-causes">{change.causes.slice(0, 4).map((cause) => <i key={cause}>{cause}</i>)}</span></div>)}</div>
           {filteredReviewChanges.length === 0 && <div className="commit-review-empty">Brak zmian pasujących do filtra.</div>}
         </div>}
         {confirmAction === "commit" && !commitReview && <Callout severity="danger" title="Brak pełnego diffu"><p>Zamknij to okno i użyj „Odśwież diff”. Commit pozostaje zablokowany.</p></Callout>}
         <div><Button onClick={() => setConfirmAction(null)}>Anuluj</Button><Button variant={confirmAction !== "commit" ? "danger" : "primary"} disabled={confirmAction === "commit" && !canCommit} onClick={() => { const action = confirmAction; setConfirmAction(null); if (action === "candidate") onApplyCandidate(); else if (action === "commit") onCommit(); else onPush(); }}>{confirmAction === "candidate" ? "Tak, zapisz Candidate" : confirmAction === "commit" ? "Scope PASS — wyślij commit" : "Tak, wykonaj PUSH"}</Button></div>
+      </div></div>}
+
+      {confirmScopeOverride && blockingGuard?.findingDigest && <div className="write-confirm-backdrop"><div className="write-confirm write-confirm--critical scope-override-confirm" role="dialog" aria-modal="true" aria-labelledby="scope-override-title">
+        <div><AlertOctagon size={22} /><strong id="scope-override-title">Jawny override scope guard</strong></div>
+        <p>To może utrwalić zmianę spoza planu albo pozostawić zależność do usuwanego obiektu. Backend zaakceptuje wyłącznie dokładny fingerprint pokazany poniżej, ponownie wykona live preflight i zablokuje commit, jeżeli pojawi się choć jedna nowa lub zmieniona blokada.</p>
+        <ScopeGuardFindings guard={blockingGuard} />
+        <code className="scope-block-digest">{blockingGuard.findingDigest}</code>
+        <label className="scope-override-acknowledgement">
+          <input type="checkbox" checked={scopeOverrideAcknowledged} onChange={(event) => setScopeOverrideAcknowledged(event.target.checked)} />
+          <span>Rozumiem, że ignoruję dokładnie {blockingGuard.findingCount} {blockingGuard.findingCount === 1 ? "blokadę" : "blokad"} i commit może objąć zmianę poza PatchSet.</span>
+        </label>
+        <div><Button onClick={() => setConfirmScopeOverride(false)}>Anuluj</Button><Button variant="danger" disabled={!scopeOverrideAcknowledged || !writeEnabled} onClick={() => { const digest = blockingGuard.findingDigest; setConfirmScopeOverride(false); setScopeOverrideAcknowledged(false); onCommit(digest); }}>Ignoruj dokładnie tę blokadę i uruchom commit</Button></div>
       </div></div>}
 
       {artifactViewer && <div className="artifact-viewer-backdrop"><div className="artifact-viewer" role="dialog" aria-modal="true" aria-label={`Podgląd ${artifactViewer.file}`}><header><div><FileText size={19} /><span><strong>{artifactViewer.file}</strong><small>Podgląd tylko do odczytu · pełna zawartość pliku sesji</small></span></div><div><Button variant="ghost" icon={<Download size={14} />} onClick={() => onDownload(artifactViewer.file)}>Pobierz</Button><button onClick={() => setArtifactViewer(null)} aria-label="Zamknij podgląd"><X size={19} /></button></div></header>{artifactViewer.loading ? <div className="artifact-viewer-loading"><ServerCog className="spin" size={22} /><span>Pobieranie pliku do podglądu…</span></div> : artifactViewer.error ? <Callout severity="danger" title="Nie można wyświetlić pliku"><p>{artifactViewer.error}</p></Callout> : <pre>{artifactViewer.content}</pre>}</div></div>}

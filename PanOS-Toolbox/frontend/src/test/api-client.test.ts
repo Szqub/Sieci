@@ -68,6 +68,7 @@ describe("typed API client", () => {
       full: true,
       allow_unisolated_commit: true,
       allow_full_commit: true,
+      allow_scope_guard_override: false,
     });
   });
 
@@ -77,10 +78,20 @@ describe("typed API client", () => {
       .mockResolvedValueOnce(response())
       .mockResolvedValueOnce(response());
 
-    await api.startCommitJob("cleanup-1", { enableApiWrite: true, executionStage: "push", allowUnisolatedCommit: true });
+    await api.startCommitJob("cleanup-1", {
+      enableApiWrite: true,
+      executionStage: "push",
+      allowUnisolatedCommit: true,
+      allowScopeGuardOverride: true,
+      acknowledgedScopeGuardDigest: "a".repeat(64),
+    });
     await api.startPushJob("cleanup-1", ["DG-A"], { enableApiWrite: true, executionStage: "push" });
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/sessions/cleanup-1/commit-jobs");
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toMatchObject({
+      allow_scope_guard_override: true,
+      acknowledged_scope_guard_digest: "a".repeat(64),
+    });
     expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/sessions/cleanup-1/push-jobs");
     expect(JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)).toMatchObject({ device_groups: ["DG-A"] });
   });

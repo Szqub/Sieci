@@ -533,7 +533,11 @@ export default function App() {
     }
   };
 
-  const commitCleanup = async (allowUnisolated: boolean, allowFull: boolean) => {
+  const commitCleanup = async (
+    allowUnisolated: boolean,
+    allowFull: boolean,
+    scopeGuardOverrideDigest?: string,
+  ) => {
     if (!cleanupPlan) return;
     const sessionId = executionSession?.id ?? cleanupPlan.sessionId;
     setStageBusy("commit"); setExecutionJob(null); setError(null);
@@ -541,7 +545,14 @@ export default function App() {
       if (demoMode && demoApi) {
         setExecutionSession(demoApi.demoAction(sessionId, "COMMITTED", "commit").session);
       } else {
-        const started = await api.startCommitJob(sessionId, { enableApiWrite: writeEnabled, executionStage: "push", allowUnisolatedCommit: allowUnisolated, allowFullCommit: allowFull });
+        const started = await api.startCommitJob(sessionId, {
+          enableApiWrite: writeEnabled,
+          executionStage: "push",
+          allowUnisolatedCommit: allowUnisolated,
+          allowFullCommit: allowFull,
+          allowScopeGuardOverride: Boolean(scopeGuardOverrideDigest),
+          acknowledgedScopeGuardDigest: scopeGuardOverrideDigest,
+        });
         const job = await waitForExecutionJob(started, setExecutionJob);
         setExecutionSession(job.session);
       }
@@ -735,7 +746,7 @@ export default function App() {
   else if (view === "warnings") page = <WarningsPage notices={notices} />;
   else if (view === "ad-groups") page = <AdGroupsPage draft={adGroupDraft} onDraftChange={setAdGroupDraft} result={adGroupResult} busy={mainBusy === "ad-groups"} error={error} onGenerate={() => void generateAdGroup()} />;
   else if (view === "policy-requests") page = <PolicyRequestsPage connection={Boolean(connection)} busy={mainBusy === "policy-request"} error={error} plan={policyRequestPlan} onCreatePlan={(text) => void createPolicyRequestPlan(text)} onOpenConnection={() => navigate("connection")} onOpenPlan={() => navigate("plan")} />;
-  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onPrepareCommitReview={() => void prepareCommitReview()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onViewArtifact={viewCleanupArtifact} onDownload={(artifact) => void downloadCleanup(artifact)} />;
+  else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onPrepareCommitReview={() => void prepareCommitReview()} onCommit={(scopeGuardOverrideDigest) => void commitCleanup(true, false, scopeGuardOverrideDigest)} onPush={() => void pushCleanup()} onViewArtifact={viewCleanupArtifact} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
   else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} storage={historyCatalog?.storage ?? ""} issues={historyCatalog?.issues ?? []} connected={Boolean(connection)} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onViewArtifact={viewHistoryArtifact} onDownloadArtifact={(sessionId, artifact) => void downloadHistoryArtifact(sessionId, artifact)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
   else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} executionJob={restoreExecutionJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => { setReturnAfterConnect("restore"); navigate("connection"); }} onOpenWarnings={() => navigate("warnings")} />;

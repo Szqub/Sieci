@@ -159,6 +159,7 @@ export interface ScopeGuardFinding {
   field: string;
   xpath: string;
   outsidePlan: boolean;
+  differenceKind?: string;
 }
 
 export interface ScopeGuardResult {
@@ -168,7 +169,13 @@ export interface ScopeGuardResult {
   checkedMutationCount: number;
   candidateProjectionMatches?: boolean;
   candidateProjectionSha256?: string;
+  candidateSemanticSha256?: string;
   projectionError?: string;
+  findingDigest?: string;
+  overrideEligible?: boolean;
+  overrideRequested?: boolean;
+  overrideApplied?: boolean;
+  artifact?: string;
   findings: ScopeGuardFinding[];
 }
 
@@ -555,6 +562,8 @@ export interface WriteOptions {
   executionStage: CapabilityStage;
   allowUnisolatedCommit?: boolean;
   allowFullCommit?: boolean;
+  allowScopeGuardOverride?: boolean;
+  acknowledgedScopeGuardDigest?: string;
 }
 
 export interface ApiActionResult {

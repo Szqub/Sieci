@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -12,7 +13,11 @@ from typing import Any, Callable, Iterable, Optional
 
 from .cleaner_adapter import build_cleanup_patchset
 from .client import PanoramaReadClient, PanoramaWriteClient
-from .commit_review import build_commit_review, build_scope_guard
+from .commit_review import (
+    build_commit_review,
+    build_scope_guard,
+    render_scope_guard_text,
+)
 from .errors import (
     CapabilityError,
     ConflictError,
@@ -1208,6 +1213,39 @@ def _check_expected_post_state(
         )
 
 
+def _scope_guard_override_matches(
+    guard: dict[str, Any],
+    *,
+    allowed: bool,
+    acknowledged_digest: Optional[str],
+) -> bool:
+    current_digest = str(guard.get("findingDigest") or "")
+    supplied_digest = str(acknowledged_digest or "")
+    return bool(
+        allowed
+        and current_digest
+        and supplied_digest
+        and hmac.compare_digest(current_digest, supplied_digest)
+    )
+
+
+def _scope_guard_block_detail(guard: dict[str, Any]) -> str:
+    findings = list(guard.get("findings") or ())
+    if not findings:
+        return "Scope guard nie zwrócił szczegółowego findingu."
+    samples: list[str] = []
+    for finding in findings[:5]:
+        location = (
+            finding.get("xpath")
+            or finding.get("target")
+            or finding.get("detail")
+            or "brak ścieżki"
+        )
+        samples.append(f"{finding.get('code') or 'UNKNOWN'}: {location}")
+    suffix = f"; oraz {len(findings) - 5} kolejnych" if len(findings) > 5 else ""
+    return "; ".join(samples) + suffix
+
+
 def commit_session(
     store: SessionStore,
     session_id: str,
@@ -1217,6 +1255,8 @@ def commit_session(
     partial: bool = True,
     allow_unisolated_commit: bool = False,
     allow_full_commit: bool = False,
+    allow_scope_guard_override: bool = False,
+    acknowledged_scope_guard_digest: Optional[str] = None,
     progress_callback: Optional[
         Callable[[int, str, Optional[dict[str, Any]]], None]
     ] = None,
@@ -1231,6 +1271,8 @@ def commit_session(
                 partial=partial,
                 allow_unisolated_commit=allow_unisolated_commit,
                 allow_full_commit=allow_full_commit,
+                allow_scope_guard_override=allow_scope_guard_override,
+                acknowledged_scope_guard_digest=acknowledged_scope_guard_digest,
                 progress_callback=progress_callback,
             )
 
@@ -1244,6 +1286,8 @@ def _commit_session_unlocked(
     partial: bool = True,
     allow_unisolated_commit: bool = False,
     allow_full_commit: bool = False,
+    allow_scope_guard_override: bool = False,
+    acknowledged_scope_guard_digest: Optional[str] = None,
     progress_callback: Optional[
         Callable[[int, str, Optional[dict[str, Any]]], None]
     ] = None,
@@ -1296,10 +1340,19 @@ def _commit_session_unlocked(
             "Uruchom „Odśwież diff i scope guard”, przejrzyj wynik i spróbuj ponownie."
         )
     review_guard = review.get("scopeGuard") or {}
-    if not review.get("commitReady") or not review_guard.get("passed"):
+    review_override_accepted = _scope_guard_override_matches(
+        review_guard,
+        allowed=allow_scope_guard_override,
+        acknowledged_digest=acknowledged_scope_guard_digest,
+    )
+    if (
+        not review.get("commitReady") or not review_guard.get("passed")
+    ) and not review_override_accepted:
         raise ConflictError(
-            "Commit zablokowany przez scope guard z przeglądu. Otwórz pełny "
-            "raport, usuń zależności lub zmiany spoza PatchSet i odśwież diff."
+            "Commit zablokowany przez scope guard z przeglądu. "
+            + _scope_guard_block_detail(review_guard)
+            + " Otwórz dokładne ustalenia albo użyj jawnego override dla "
+            "fingerprintu tej konkretnej blokady."
         )
 
     # The expensive two-tree review was already generated immediately after
@@ -1378,8 +1431,27 @@ def _commit_session_unlocked(
         )
         live_guard["candidateSemanticSha256"] = live_candidate_sha
         live_guard["reviewGeneratedAt"] = review.get("generatedAt")
+        live_override_accepted = _scope_guard_override_matches(
+            live_guard,
+            allowed=allow_scope_guard_override,
+            acknowledged_digest=acknowledged_scope_guard_digest,
+        )
+        live_guard["overrideRequested"] = bool(allow_scope_guard_override)
+        live_guard["overrideApplied"] = bool(
+            not live_guard.get("passed") and live_override_accepted
+        )
+        checked_at = utc_now()
+        guard_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        guard_artifact = f"precommit_scope_guard_{guard_stamp}.txt"
+        live_guard["artifact"] = guard_artifact
+        store.write_artifact(
+            session_id,
+            guard_artifact,
+            render_scope_guard_text(session_id, checked_at, live_guard),
+            kind="live-precommit-scope-guard",
+        )
         store.record_precommit_guard(session_id, live_guard)
-        if not live_guard.get("passed"):
+        if not live_guard.get("passed") and not live_override_accepted:
             store.add_conflicts(
                 session_id,
                 [
@@ -1392,7 +1464,44 @@ def _commit_session_unlocked(
             )
             raise ConflictError(
                 "Commit nie został wysłany: live scope guard znalazł zależność "
-                "lub zmianę poza zakresem. Odśwież diff i sprawdź raport."
+                "lub zmianę poza zakresem. "
+                + _scope_guard_block_detail(live_guard)
+                + f" Dokładny raport: {guard_artifact}."
+            )
+        if not live_guard.get("passed") and live_override_accepted:
+            store.add_risk(
+                session_id,
+                "SCOPE_GUARD_OVERRIDE",
+                (
+                    "Operator jawnie zaakceptował dokładny fingerprint blokady "
+                    f"{live_guard.get('findingDigest')} obejmujący "
+                    f"{live_guard.get('findingCount')} ustaleń."
+                ),
+            )
+            store.append_event(
+                session_id,
+                "SCOPE_GUARD_OVERRIDE_APPLIED",
+                {
+                    "finding_digest": live_guard.get("findingDigest"),
+                    "finding_count": live_guard.get("findingCount"),
+                    "finding_codes": sorted(
+                        {
+                            str(finding.get("code") or "UNKNOWN")
+                            for finding in live_guard.get("findings") or ()
+                        }
+                    ),
+                    "artifact": guard_artifact,
+                },
+            )
+            progress(
+                30,
+                "Scope guard BLOCK — operator zaakceptował dokładny fingerprint; commit nadal nie został wysłany",
+                {
+                    "event": "scope-guard-override",
+                    "jobDispatched": False,
+                    "findingCount": live_guard.get("findingCount"),
+                    "findingDigest": live_guard.get("findingDigest"),
+                },
             )
 
         progress(
