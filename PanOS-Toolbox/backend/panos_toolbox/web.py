@@ -889,8 +889,9 @@ def _contract() -> dict[str, Any]:
             "POST /sessions/{id}/push": "one sequential specific-DG commit-all job",
             "POST /restore/plans": "three-way restore by IP/session",
             "POST /audits": "read-only dependency audit",
-            "GET /sessions": "session history",
-            "GET /sessions/{id}": "integrity-checked manifest",
+            "GET /history": "offline searchable session, mutation and backup catalog",
+            "GET /sessions": "offline integrity-checked session history",
+            "GET /sessions/{id}": "offline integrity-checked manifest",
             "POST /sessions/{id}/reconcile-external": "verify CLI/API post-state and admit restore history",
             "GET /sessions/{id}/artifacts/{path}": "inline preview or download of every registered session file",
             "GET /sessions/{id}/artifacts/bundle": "download complete session backup ZIP",
@@ -1299,7 +1300,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.6.0", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.7.0", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -1821,7 +1822,6 @@ def create_app(
 
     @app.get("/api/v1/sessions")
     def sessions_list():
-        reader()
         return jsonify(
             [
                 _wire_session(session_store, item["session_id"])
@@ -1831,8 +1831,14 @@ def create_app(
 
     @app.get("/api/v1/sessions/<session_id>")
     def session_get(session_id: str):
-        reader()
         return jsonify(_wire_session(session_store, session_id))
+
+    @app.get("/api/v1/history")
+    def history_get():
+        # History belongs to the local Windows user and remains available
+        # without a Panorama connection token.  The server is loopback-only;
+        # write/reconciliation endpoints continue to require live auth.
+        return jsonify(session_store.history_catalog())
 
     @app.post("/api/v1/sessions/<session_id>/reconcile-external")
     def session_reconcile_external(session_id: str):
@@ -1858,8 +1864,7 @@ def create_app(
 
     @app.get("/api/v1/sessions/<session_id>/artifacts/<path:filename>")
     def artifact_get(session_id: str, filename: str):
-        reader()
-        manifest = session_store.load_manifest(session_id)
+        manifest = session_store.load_manifest(session_id, verify=False)
         inline = request.args.get("disposition", "attachment").casefold() == "inline"
         if filename == "bundle":
             payload = session_store.bundle_bytes(session_id)

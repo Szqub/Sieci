@@ -5,6 +5,7 @@ import type {
   AnalysisJob,
   AuditResult,
   ExecutionJob,
+  HistoryCatalog,
   CapabilityStage,
   CleanupPlan,
   ConnectionDraft,
@@ -406,6 +407,10 @@ export const api = {
 
   async listSessions(): Promise<ToolboxSession[]> {
     return request("/sessions");
+  },
+
+  async history(): Promise<HistoryCatalog> {
+    return request("/history");
   },
 
   async getSession(sessionId: string): Promise<ToolboxSession> {

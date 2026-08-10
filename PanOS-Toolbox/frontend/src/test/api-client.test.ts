@@ -5,6 +5,21 @@ describe("typed API client", () => {
   beforeEach(() => clearApiSessionForTests());
   afterEach(() => vi.restoreAllMocks());
 
+  it("czyta lokalny indeks historii bez tokenu Panorama", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ generatedAt: "2026-08-10T10:00:00Z", storage: "C:\\Users\\test\\Documents\\PanOS Toolbox\\sessions", sessionCount: 0, mutationCount: 0, issues: [], sessions: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await api.history();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/history");
+    const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers);
+    expect(headers.get("X-Toolbox-Session")).toBeNull();
+  });
+
   it("trzyma token sesji wyłącznie w pamięci modułu", async () => {
     const storageWrite = vi.spyOn(Storage.prototype, "setItem");
     const fetchMock = vi.spyOn(globalThis, "fetch")

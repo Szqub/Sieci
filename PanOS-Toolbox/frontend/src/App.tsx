@@ -15,6 +15,7 @@ import type {
   LookupResult,
   EntityDependency,
   ExecutionJob,
+  HistoryCatalog,
   RestorePlan,
   SavedProfile,
   ToolboxNotice,
@@ -126,6 +127,8 @@ export default function App() {
   const [auditResult, setAuditResult] = useState<AuditResult | null>(null);
   const [sessions, setSessions] = useState<ToolboxSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ToolboxSession | null>(null);
+  const [historyCatalog, setHistoryCatalog] = useState<HistoryCatalog | null>(null);
+  const [returnAfterConnect, setReturnAfterConnect] = useState<ViewId | null>(null);
 
   const [restoreQuery, setRestoreQuery] = useState("");
   const [restorePlan, setRestorePlan] = useState<RestorePlan | null>(null);
@@ -172,10 +175,10 @@ export default function App() {
   }, [demoMode]);
 
   useEffect(() => {
-    if (view === "history" && connection && sessions.length === 0) void refreshHistory();
-    // refreshHistory is intentionally event-like; connection/view are the triggers.
+    if (view === "history" && !historyCatalog) void refreshHistory();
+    // History is local and intentionally independent from Panorama auth.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, connection]);
+  }, [view]);
 
   const navigate = (next: ViewId) => {
     setError(null);
@@ -197,7 +200,8 @@ export default function App() {
         }
       }
       setWriteEnabled(false);
-      setView("cleanup");
+      setView(returnAfterConnect ?? "cleanup");
+      setReturnAfterConnect(null);
     } catch (connectError) {
       setError(getErrorMessage(connectError));
     } finally {
@@ -234,6 +238,7 @@ export default function App() {
     setConnection(demo.demoConnection(demoDraft));
     setDoctor(demo.demoDoctor);
     setSessions(demo.demoSessions);
+    setHistoryCatalog({ generatedAt: new Date().toISOString(), storage: "Tryb demo", sessionCount: demo.demoSessions.length, mutationCount: 0, issues: [], sessions: demo.demoSessions });
     setAddressText("10.42.16.19\n10.42.16.20\n10.42.16.21\n10.42.16.22\n10.42.16.23\n10.42.16.99");
     setObjectText("OLD-WEB-SERVER");
     setGroupText("GRP-LEGACY-SERVERS");
@@ -592,10 +597,13 @@ export default function App() {
   async function refreshHistory() {
     setMainBusy("history"); setError(null);
     try {
-      const result = demoMode && demoApi ? demoApi.demoSessions : await api.listSessions();
-      setSessions(result);
-      const current = selectedSession ? result.find((session) => session.id === selectedSession.id) : undefined;
-      setSelectedSession(current ?? result.find((session) => session.kind === "cleanup" && session.canRestore) ?? result[0] ?? null);
+      const catalog = demoMode && demoApi
+        ? { generatedAt: new Date().toISOString(), storage: "Tryb demo", sessionCount: demoApi.demoSessions.length, mutationCount: 0, issues: [], sessions: demoApi.demoSessions }
+        : await api.history();
+      setHistoryCatalog(catalog);
+      setSessions(catalog.sessions);
+      const current = selectedSession ? catalog.sessions.find((session) => session.id === selectedSession.id) : undefined;
+      setSelectedSession(current ?? catalog.sessions.find((session) => session.kind === "cleanup" && session.canRestore) ?? catalog.sessions[0] ?? null);
     } catch (historyError) { setError(getErrorMessage(historyError)); } finally { setMainBusy(null); }
   }
 
@@ -631,12 +639,28 @@ export default function App() {
     } catch (downloadError) { setError(getErrorMessage(downloadError)); } finally { setMainBusy(null); }
   };
 
+  const viewHistoryArtifact = async (sessionId: string, artifact: string): Promise<string> => {
+    if (demoMode) return JSON.stringify(sessions.find((session) => session.id === sessionId), null, 2);
+    return api.viewSessionArtifact(sessionId, artifact);
+  };
+
+  const downloadHistoryArtifact = async (sessionId: string, artifact: string) => {
+    setMainBusy("history"); setError(null);
+    try {
+      const blob = demoMode
+        ? new Blob([JSON.stringify(sessions.find((session) => session.id === sessionId), null, 2)], { type: "application/json" })
+        : await api.downloadSessionArtifact(sessionId, artifact);
+      saveBlob(blob, artifact === "bundle" ? `PanOS-Toolbox-${sessionId}.zip` : artifact.split("/").pop() || "artifact.txt");
+    } catch (downloadError) { setError(getErrorMessage(downloadError)); } finally { setMainBusy(null); }
+  };
+
   const reconcileExternalSession = async (session: ToolboxSession) => {
     setMainBusy("history"); setError(null);
     try {
       const result = await api.reconcileExternalSession(session.id, "CLI");
       setSelectedSession(result.session);
       setSessions((current) => current.map((item) => item.id === result.session.id ? result.session : item));
+      setHistoryCatalog((current) => current ? { ...current, sessions: current.sessions.map((item) => item.id === result.session.id ? result.session : item) } : current);
     } catch (reconcileError) { setError(getErrorMessage(reconcileError)); } finally { setMainBusy(null); }
   };
 
@@ -713,8 +737,8 @@ export default function App() {
   else if (view === "policy-requests") page = <PolicyRequestsPage connection={Boolean(connection)} busy={mainBusy === "policy-request"} error={error} plan={policyRequestPlan} onCreatePlan={(text) => void createPolicyRequestPlan(text)} onOpenConnection={() => navigate("connection")} onOpenPlan={() => navigate("plan")} />;
   else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onPrepareCommitReview={() => void prepareCommitReview()} onCommit={() => void commitCleanup(true, false)} onPush={() => void pushCleanup()} onViewArtifact={viewCleanupArtifact} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
-  else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
-  else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} executionJob={restoreExecutionJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;
+  else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} storage={historyCatalog?.storage ?? ""} issues={historyCatalog?.issues ?? []} connected={Boolean(connection)} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onViewArtifact={viewHistoryArtifact} onDownloadArtifact={(sessionId, artifact) => void downloadHistoryArtifact(sessionId, artifact)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
+  else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} executionJob={restoreExecutionJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => { setReturnAfterConnect("restore"); navigate("connection"); }} onOpenWarnings={() => navigate("warnings")} />;
 
   return (
     <Shell activeView={view} onViewChange={navigate} connection={connection} writeEnabled={writeEnabled} onWriteEnabledChange={setWriteEnabled} theme={theme} onThemeChange={() => setTheme((current) => current === "dark" ? "light" : "dark")} onDisconnect={() => void disconnect()} demoMode={demoMode} warningCount={notices.length}>

@@ -22,11 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Optional
 
-from .errors import IntegrityError, SessionError
+from .errors import IntegrityError, SessionError, ToolboxError
 from .models import Mutation, PatchSet, SessionState, canonical_json, json_sha256, utc_now
 from .profile import PanoramaProfile
 from .profile_store import default_toolbox_root
-from .xmlutil import raw_sha256
+from .xmlutil import device_group_from_xpath, raw_sha256
 
 
 SCHEMA_VERSION = 1
@@ -127,6 +127,44 @@ def _harden_directory(path: Path, *, enforce: bool) -> None:
     )
     if completed.returncode != 0:
         raise SessionError(f"Nie można ustawić prywatnego ACL katalogu {path}.")
+
+
+def _history_xml_values(*fragments: Optional[str]) -> list[str]:
+    """Extract searchable values without returning complete configuration XML."""
+
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def include(value: Optional[str]) -> None:
+        if value is None:
+            return
+        normalized = " ".join(value.split()).strip()
+        if not normalized or len(normalized) > 2048:
+            return
+        key = normalized.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        values.append(normalized)
+
+    for fragment in fragments:
+        if not fragment or not fragment.strip():
+            continue
+        try:
+            root = ET.fromstring(f"<panos-toolbox-history>{fragment}</panos-toolbox-history>")
+        except ET.ParseError:
+            # The PatchSet parser already validates operation XML.  A legacy
+            # before/after fragment may still be incomplete; retain useful IP,
+            # object and XPath-like tokens without exposing the entire blob.
+            for token in re.findall(r"[A-Za-z0-9_.:/-]{2,256}", fragment):
+                include(token)
+            continue
+        for element in root.iter():
+            include(element.tag)
+            include(element.text)
+            for attribute in element.attrib.values():
+                include(attribute)
+    return values
 
 
 _TRANSITIONS: dict[SessionState, set[SessionState]] = {
@@ -698,6 +736,338 @@ class SessionStore:
             {"state": state.value, "source": source, **dict(evidence)},
         )
 
+    def load_journal(
+        self,
+        session_id: str,
+        *,
+        manifest: Optional[Mapping[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """Return the integrity-checked, hash-chained timeline for a session."""
+
+        current = dict(manifest or self.load_manifest(session_id, verify=False))
+        directory = self._directory(session_id)
+        previous = None
+        events: list[dict[str, Any]] = []
+        count = int(current.get("journal_count", 0))
+        for sequence in range(1, count + 1):
+            event = _decode_envelope(directory / "journal" / f"{sequence:06d}.json")
+            if event.get("sequence") != sequence or event.get("previous_sha256") != previous:
+                raise IntegrityError("Łańcuch journalu sesji jest przerwany.")
+            previous = json_sha256(event)
+            events.append(event)
+        if previous != current.get("journal_head_sha256"):
+            raise IntegrityError("Head journalu nie odpowiada manifestowi.")
+        return events
+
+    @staticmethod
+    def _history_job_records(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+        records = list(manifest.get("jobs") or ())
+        finished = {
+            str(record.get("stage", "")).split("-", 1)[0]
+            for record in records
+            if str(record.get("status", "")).upper() == "FIN"
+        }
+        jobs: list[dict[str, Any]] = []
+        for index, record in enumerate(records, 1):
+            stage = str(record.get("stage") or "candidate")
+            kind = "candidate" if stage == "validation" else stage.split("-", 1)[0]
+            if stage.endswith("-dispatched") and kind in finished:
+                continue
+            result = str(record.get("result") or "").upper()
+            status = str(record.get("status") or "").upper()
+            state = (
+                "success"
+                if status == "FIN" and result in {"OK", "SUCCESS"}
+                else "failed"
+                if status == "FIN"
+                else "running"
+            )
+            jobs.append(
+                {
+                    "id": str(record.get("job_id") or record.get("jobId") or f"local-{index}"),
+                    "kind": kind,
+                    "state": state,
+                    "progress": 100 if state in {"success", "failed"} else 50,
+                    "message": str(record.get("details") or stage),
+                    "startedAt": manifest.get("created_utc"),
+                    "finishedAt": manifest.get("updated_utc") if state in {"success", "failed"} else None,
+                }
+            )
+        return jobs
+
+    @staticmethod
+    def _history_timeline(events: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        labels = {
+            "SESSION_CREATED": "Utworzono plan i backup",
+            "STATE_CHANGED": "Zmiana stanu sesji",
+            "EXTERNAL_EXECUTION_RECONCILED": "Potwierdzono wykonanie zewnętrzne",
+            "COMMIT_REVIEW_READY": "Przygotowano kontrolę przed commitem",
+            "PRECOMMIT_SCOPE_GUARD": "Sprawdzono zakres przed commitem",
+            "STAGE_FAILED_RECOVERABLE": "Etap zakończony błędem; zachowano stabilny stan",
+            "TERMINAL_STATE": "Sesja zatrzymana",
+        }
+        timeline: list[dict[str, Any]] = []
+        for event in events:
+            details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
+            detail = details.get("detail")
+            timeline.append(
+                {
+                    "sequence": int(event.get("sequence") or 0),
+                    "timestamp": str(event.get("timestamp_utc") or ""),
+                    "eventType": str(event.get("event_type") or "UNKNOWN"),
+                    "state": str(details.get("state")) if details.get("state") else None,
+                    "source": str(details.get("source")) if details.get("source") else None,
+                    "label": labels.get(
+                        str(event.get("event_type") or ""),
+                        str(event.get("event_type") or "Zdarzenie sesji").replace("_", " ").title(),
+                    ),
+                    "detail": str(detail)[:500] if detail else None,
+                }
+            )
+        return timeline
+
+    @staticmethod
+    def _history_scope(xpath: str) -> tuple[str, Optional[str], Optional[str]]:
+        scope = "shared" if xpath.startswith("/config/shared/") else (device_group_from_xpath(xpath) or "unknown")
+        rulebase = next(
+            (name for name in ("pre-rulebase", "post-rulebase") if f"/{name}/" in xpath),
+            None,
+        )
+        policy_type = next(
+            (name for name in ("security", "nat", "application-override") if f"/{name}/" in xpath),
+            None,
+        )
+        return scope, rulebase, policy_type
+
+    def _history_session(self, session_id: str) -> dict[str, Any]:
+        """Build a compact searchable record without hashing multi-MB snapshots."""
+
+        manifest = self.load_manifest(session_id, verify=False)
+        patch = self.load_patchset(session_id)
+        events = self.load_journal(session_id, manifest=manifest)
+        timeline = self._history_timeline(events)
+        state_times: dict[str, str] = {}
+        for event in timeline:
+            if event.get("state") and event.get("timestamp"):
+                state_times[str(event["state"])] = str(event["timestamp"])
+
+        application = manifest.get("candidate_application")
+        application = application if isinstance(application, Mapping) else {}
+        applied_ids = {str(item) for item in application.get("applied_mutation_ids") or ()}
+        applied_at = str(application.get("recorded_utc") or "") or None
+        backup_by_mutation = {
+            str(record.get("mutation_id")): record
+            for record in manifest.get("entity_backups") or ()
+        }
+        stable_restore_states = {
+            SessionState.CANDIDATE_APPLIED.value,
+            SessionState.PARTIAL.value,
+            SessionState.COMMITTED.value,
+            SessionState.PUSHED.value,
+        }
+        session_state = str(manifest.get("state") or SessionState.PLANNED.value)
+        committed_at = state_times.get(SessionState.COMMITTED.value)
+        pushed_at = state_times.get(SessionState.PUSHED.value)
+        restored_at = state_times.get(SessionState.RESTORED.value)
+        history_items: list[dict[str, Any]] = []
+        backup_items: list[dict[str, Any]] = []
+
+        for mutation in patch.mutations:
+            backup = backup_by_mutation.get(mutation.mutation_id)
+            scope, rulebase, policy_type = self._history_scope(mutation.target_xpath)
+            entity_name = mutation.entity_key.rsplit("/", 1)[-1]
+            was_applied = mutation.mutation_id in applied_ids
+            if not was_applied:
+                execution_status = "planned"
+            elif patch.kind == "restore" and session_state not in {
+                SessionState.COMMITTED.value,
+                SessionState.PUSHED.value,
+            }:
+                execution_status = "restored"
+            elif session_state == SessionState.PUSHED.value:
+                execution_status = "pushed"
+            elif session_state == SessionState.COMMITTED.value:
+                execution_status = "committed"
+            elif session_state == SessionState.PARTIAL.value:
+                execution_status = "partial"
+            else:
+                execution_status = "candidate-applied"
+
+            operation_values: list[str] = []
+            operations: list[dict[str, Any]] = []
+            for direction, source in (("forward", mutation.forward), ("inverse", mutation.inverse)):
+                for operation in source:
+                    operations.append(
+                        {
+                            "direction": direction,
+                            "action": operation.action.value,
+                            "xpath": operation.xpath,
+                            "where": operation.where,
+                            "destination": operation.destination,
+                        }
+                    )
+                    operation_values.extend(
+                        item
+                        for item in (operation.xpath, operation.where, operation.destination)
+                        if item
+                    )
+            search_values = list(
+                dict.fromkeys(
+                    [
+                        mutation.mutation_id,
+                        mutation.component_id,
+                        mutation.entity_type,
+                        mutation.entity_key,
+                        entity_name,
+                        mutation.target_xpath,
+                        scope,
+                        *(item for item in (rulebase, policy_type) if item),
+                        *mutation.causes,
+                        *mutation.depends_on,
+                        *operation_values,
+                        *_history_xml_values(
+                            mutation.before_xml,
+                            mutation.after_xml,
+                            *(operation.element for operation in (*mutation.forward, *mutation.inverse)),
+                        ),
+                    ]
+                )
+            )
+            restore_targets = list(mutation.causes)
+            can_quick_restore = (
+                patch.kind == "cleanup"
+                and session_state in stable_restore_states
+                and was_applied
+                and bool(restore_targets)
+            )
+            effective_at = pushed_at or committed_at or restored_at or (applied_at if was_applied else None) or patch.created_utc
+            history_items.append(
+                {
+                    "id": f"{session_id}:{mutation.mutation_id}",
+                    "mutationId": mutation.mutation_id,
+                    "componentId": mutation.component_id,
+                    "entityType": mutation.entity_type,
+                    "entityName": entity_name,
+                    "entityKey": mutation.entity_key,
+                    "scope": scope,
+                    "rulebase": rulebase,
+                    "policyType": policy_type,
+                    "xpath": mutation.target_xpath,
+                    "targets": list(mutation.causes),
+                    "operations": operations,
+                    "backupFile": backup.get("file") if backup else None,
+                    "plannedAt": patch.created_utc,
+                    "appliedAt": applied_at if was_applied else None,
+                    "committedAt": committed_at if was_applied else None,
+                    "pushedAt": pushed_at if was_applied else None,
+                    "restoredAt": restored_at if was_applied else None,
+                    "effectiveAt": effective_at,
+                    "executionStatus": execution_status,
+                    "wasApplied": was_applied,
+                    "canQuickRestore": can_quick_restore,
+                    "restoreTargets": restore_targets if can_quick_restore else [],
+                    "searchValues": search_values,
+                }
+            )
+            if backup:
+                backup_items.append(
+                    {
+                        "mutationId": mutation.mutation_id,
+                        "entityType": mutation.entity_type,
+                        "entityName": mutation.entity_key,
+                        "file": backup.get("file"),
+                        "sha256": backup.get("sha256"),
+                        "targets": list(mutation.causes),
+                        "componentId": mutation.component_id,
+                    }
+                )
+
+        input_targets = manifest.get("input_targets") or {}
+        targets = list(input_targets.get("ordered") or manifest.get("targets") or patch.targets)
+        external = manifest.get("external_execution")
+        execution_source = (
+            str(external.get("source") or "GUI")
+            if isinstance(external, Mapping)
+            else "GUI"
+        )
+        session_search_values = list(
+            dict.fromkeys(
+                [
+                    session_id,
+                    patch.kind,
+                    session_state,
+                    patch.panorama_host,
+                    patch.panorama_username,
+                    *targets,
+                    *patch.affected_device_groups,
+                    *patch.warnings,
+                ]
+            )
+        )
+        return {
+            "id": session_id,
+            "kind": patch.kind,
+            "state": session_state,
+            "createdAt": str(manifest.get("created_utc") or patch.created_utc),
+            "updatedAt": str(manifest.get("updated_utc") or patch.created_utc),
+            "operator": patch.panorama_username,
+            "panoramaHost": patch.panorama_host,
+            "itemCount": len(targets),
+            "mutationCount": len(history_items),
+            "targets": targets,
+            "backupCount": len(backup_items),
+            "backupItems": backup_items,
+            "canRestore": patch.kind == "cleanup" and session_state in stable_restore_states,
+            "canReconcileExternal": (
+                patch.kind == "cleanup"
+                and session_state in {SessionState.PLANNED.value, SessionState.FAILED.value}
+                and bool(patch.mutations)
+            ),
+            "executionSource": execution_source,
+            "affectedDeviceGroups": list(patch.affected_device_groups),
+            "sourceSessionId": patch.source_session_id,
+            "sourceSessionIds": list(patch.source_session_ids),
+            "description": (
+                "Emergency Restore"
+                if patch.kind == "restore"
+                else "Tworzenie obiektów i polityk"
+                if patch.kind == "future-create"
+                else "Cleanup Panorama"
+            ),
+            "jobs": self._history_job_records(manifest),
+            "artifacts": self.artifact_catalog(session_id, manifest=manifest),
+            "timeline": timeline,
+            "historyItems": history_items,
+            "searchValues": session_search_values,
+            "indexIntegrity": "verified",
+        }
+
+    def history_catalog(self) -> dict[str, Any]:
+        """Build an offline catalog; one corrupt session never hides the rest."""
+
+        sessions: list[dict[str, Any]] = []
+        issues: list[dict[str, str]] = []
+        for directory in sorted(self.root.glob("session-*"), reverse=True):
+            if not directory.is_dir():
+                continue
+            try:
+                sessions.append(self._history_session(directory.name))
+            except (ToolboxError, OSError, ValueError, KeyError, TypeError) as exc:
+                issues.append(
+                    {
+                        "sessionId": directory.name,
+                        "message": str(exc) or exc.__class__.__name__,
+                    }
+                )
+        return {
+            "generatedAt": utc_now(),
+            "storage": str(self.root),
+            "sessionCount": len(sessions),
+            "mutationCount": sum(int(item.get("mutationCount") or 0) for item in sessions),
+            "issues": issues,
+            "sessions": sessions,
+        }
+
     def bundle_bytes(self, session_id: str) -> bytes:
         """Return an integrity-checked ZIP containing the complete session."""
 
@@ -864,15 +1234,7 @@ class SessionStore:
             path = (directory / record["file"]).resolve()
             if directory not in path.parents or raw_sha256(path.read_bytes()) != record["sha256"]:
                 raise IntegrityError(f"Błędna integralność artefaktu {record['file']}.")
-        previous = None
-        count = int(manifest.get("journal_count", 0))
-        for sequence in range(1, count + 1):
-            event = _decode_envelope(directory / "journal" / f"{sequence:06d}.json")
-            if event.get("sequence") != sequence or event.get("previous_sha256") != previous:
-                raise IntegrityError("Łańcuch journalu sesji jest przerwany.")
-            previous = json_sha256(event)
-        if previous != manifest.get("journal_head_sha256"):
-            raise IntegrityError("Head journalu nie odpowiada manifestowi.")
+        self.load_journal(session_id, manifest=manifest)
 
     def _list_sessions(self, *, strict: bool) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -1022,7 +1384,11 @@ class SessionStore:
             or relative.as_posix() != filename
         ):
             raise SessionError("Niepoprawna nazwa pobieranego artefaktu.")
-        manifest = self.load_manifest(session_id)
+        # Preview/download of one file verifies that file only.  This avoids
+        # re-hashing every multi-MB configuration snapshot when the operator
+        # merely opens a small per-entity backup.  Complete ZIP and Restore
+        # paths still call the full ``verify`` method.
+        manifest = self.load_manifest(session_id, verify=False)
         allowed = {"manifest.json", manifest["patchset_file"]}
         allowed.update(record["file"] for record in manifest.get("snapshots", {}).values())
         allowed.update(record["file"] for record in manifest.get("artifacts", []))
@@ -1032,4 +1398,26 @@ class SessionStore:
         path = (self._directory(session_id) / relative).resolve()
         if self._directory(session_id) not in path.parents or not path.is_file():
             raise SessionError("Artefakt nie istnieje lub wychodzi poza sesję.")
+        if filename == "manifest.json":
+            _decode_envelope(path)
+            return path
+        if filename == manifest["patchset_file"]:
+            patch = _decode_envelope(path)
+            if json_sha256(patch) != manifest.get("patchset_sha256"):
+                raise IntegrityError("Błędna suma PatchSet.")
+            return path
+        checksum = next(
+            (
+                record.get("sha256")
+                for record in (
+                    *manifest.get("snapshots", {}).values(),
+                    *manifest.get("artifacts", []),
+                    *manifest.get("entity_backups", []),
+                )
+                if record.get("file") == filename
+            ),
+            None,
+        )
+        if not checksum or raw_sha256(path.read_bytes()) != checksum:
+            raise IntegrityError(f"Błędna integralność artefaktu {filename}.")
         return path

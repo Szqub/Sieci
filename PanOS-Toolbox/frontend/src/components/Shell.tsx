@@ -90,7 +90,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
               <span>PAN-OS {connection.panoramaVersion}</span>
               <small>{connection.username} · {shortId(connection.id)}</small>
             </>
-          ) : <span>Połącz się z Panorama, aby rozpocząć.</span>}
+          ) : <span>Historia i backupy działają offline. Połącz się dopiero do operacji live.</span>}
         </div>
 
         <nav className="main-nav" aria-label="Główna nawigacja">
@@ -109,7 +109,7 @@ export function Shell({ activeView, onViewChange, connection, writeEnabled, onWr
         <div className="sidebar__footer">
           <div className="safety-note"><ShieldCheck size={17} /><span>API i GUI dostępne wyłącznie na localhost.</span></div>
           <div className="paloalto-brand"><span>Built for</span><img src="/paloalto-logo-light.png" alt="Palo Alto Networks" /><small>{connection ? `PAN-OS ${connection.panoramaVersion}` : "Panorama XML API"}</small></div>
-          <span>Open source · ByteTech · v0.6.0</span>
+          <span>Open source · ByteTech · v0.7.0</span>
           <strong className="author-brand">Szymon Żołnierczyk · Devops Engineer NET</strong>
         </div>
       </aside>

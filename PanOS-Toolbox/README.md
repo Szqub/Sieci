@@ -17,6 +17,16 @@ Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
 następnego automatycznie. Narzędzie nigdy automatycznie nie ładuje pełnego
 backupu konfiguracji.
 
+## Najważniejsze w v0.7.0
+
+- pełna historia i backupy dostępne bez logowania do Panoramy;
+- szybkie wyszukiwanie po IP, nazwie encji, DG, rulebase, XPath i session ID;
+- dokładna oś czasu per mutacja: plan, Candidate, commit, push i Restore;
+- rozróżnienie planu od potwierdzonego wykonania oraz szybkie przygotowanie
+  Restore dla atomowego komponentu zależności;
+- osobny podgląd/pobieranie każdego backupu bez ponownego haszowania wszystkich
+  dużych snapshotów sesji.
+
 ## Szybki start na maszynie docelowej
 
 Wymagany jest Python 3.10+ i rozpakowana paczka zawierająca gotowy frontend.
@@ -406,12 +416,36 @@ Paczka portable uruchamiana launcherem zapisuje sesje w:
 
 Jawne uruchomienie CLI bez `--session-dir` używa tego samego katalogu. Dane
 sesji są chronione ACL-em użytkownika, mają sumy SHA256 i nie są automatycznie
-kasowane. GUI pozwala wyszukać obiekt/politykę w historii, pobrać integralnie
-zweryfikowany ZIP całej sesji albo otworzyć Restore konkretnego celu. Sesja
+kasowane. Ekran **Backup i restore** działa także bez połączenia, hosta, loginu
+i hasła do Panoramy. Buduje lokalny indeks ze wszystkich zachowanych
+manifestów, PatchSetów i hash-chain journali. Wyszukiwanie jest natychmiastowe
+po pierwszym odczycie i obejmuje między innymi:
+
+- IP i prefiks, nazwę polityki, obiektu, grupy oraz usługę;
+- device group, shared, pre/post-rulebase i typ polityki;
+- XPath, session ID, operatora, host zapisany w sesji oraz cel wejściowy;
+- wartości i referencje zachowane wewnątrz backupów XML.
+
+Dla każdej mutacji GUI rozróżnia **tylko plan** (brak dowodu wykonania) od
+rzeczywistego zapisu i pokazuje dokładny czas Candidate, commit, push oraz
+Restore. Brak wyniku oznacza brak śladu w lokalnie zachowanych sesjach, a nie
+potwierdzenie, że encja nigdy nie istniała w Panoramie. Uszkodzona sesja jest
+jawnie raportowana i nie ukrywa pozostałej historii.
+
+Każdy tekstowy backup i artefakt ma osobne akcje **Wyświetl** oraz **Pobierz**.
+Podgląd sprawdza sumę tylko wskazanego pliku, dlatego nie czyta ponownie
+wszystkich dużych snapshotów. Pełny ZIP nadal przechodzi weryfikację całej
+sesji. Przy zastosowanej mutacji przycisk **Przygotuj Restore** przenosi jej
+atomowy komponent i zależności do Emergency Restore. Sam odczyt działa offline;
+przed utworzeniem planu Restore Toolbox wymaga połączenia, porównuje live
+running/candidate i niczego nie zapisuje bez osobnego WRITE oraz potwierdzeń.
+
+GUI pozwala też pobrać integralnie zweryfikowany ZIP całej sesji albo otworzyć
+Restore konkretnego celu. Sesja
 przy pierwszym uruchomieniu próbuje skopiować stare sesje z `backupy\sessions`
 obok poprzedniej paczki oraz z wcześniejszego `LOCALAPPDATA`; źródło pozostaje
 niezmienione.
-zawiera między innymi:
+Sesja zawiera między innymi:
 
 - `plan_running.xml`, `plan_candidate.xml`;
 - snapshoty `pre_*` i `post_*` dla wykonanych etapów;

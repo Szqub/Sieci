@@ -428,6 +428,65 @@ export interface JobStatus {
   finishedAt?: string;
 }
 
+export interface HistoryTimelineEvent {
+  sequence: number;
+  timestamp: string;
+  eventType: string;
+  state?: SessionState;
+  source?: string;
+  label: string;
+  detail?: string;
+}
+
+export interface HistoryOperation {
+  direction: "forward" | "inverse";
+  action: PatchAction;
+  xpath: string;
+  where?: string;
+  destination?: string;
+}
+
+export interface HistoryMutation {
+  id: string;
+  mutationId: string;
+  componentId: string;
+  entityType: string;
+  entityName: string;
+  entityKey: string;
+  scope: string;
+  rulebase?: string;
+  policyType?: string;
+  xpath: string;
+  targets: string[];
+  operations: HistoryOperation[];
+  backupFile?: string;
+  plannedAt: string;
+  appliedAt?: string;
+  committedAt?: string;
+  pushedAt?: string;
+  restoredAt?: string;
+  effectiveAt: string;
+  executionStatus: "planned" | "candidate-applied" | "committed" | "pushed" | "restored" | "partial";
+  wasApplied: boolean;
+  canQuickRestore: boolean;
+  restoreTargets: string[];
+  searchValues: string[];
+}
+
+export interface HistoryIssue {
+  sessionId: string;
+  message: string;
+}
+
+export interface HistoryCatalog {
+  generatedAt: string;
+  storage: string;
+  sessionCount: number;
+  mutationCount: number;
+  issues: HistoryIssue[];
+  sessions: ToolboxSession[];
+}
+
 export interface ToolboxSession {
   id: string;
   kind: "cleanup" | "restore" | "future-create";
@@ -451,6 +510,11 @@ export interface ToolboxSession {
   commitReview?: CommitReview;
   precommitGuard?: ScopeGuardResult;
   artifacts?: SessionArtifact[];
+  mutationCount?: number;
+  timeline?: HistoryTimelineEvent[];
+  historyItems?: HistoryMutation[];
+  searchValues?: string[];
+  indexIntegrity?: string;
 }
 
 export interface AuditResult {

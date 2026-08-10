@@ -25,6 +25,7 @@ from panos_toolbox.models import (
     MutationAction,
     MutationOperation,
     PatchSet,
+    SessionState,
 )
 from panos_toolbox.profile import PanoramaProfile, issue_write_lease, load_profile
 from panos_toolbox.service import make_writer
@@ -305,6 +306,95 @@ class ClientSerializationTests(unittest.TestCase):
 
 
 class SessionIntegrityTests(unittest.TestCase):
+    def test_offline_history_catalog_indexes_values_and_exact_execution_timeline(self):
+        profile = PanoramaProfile("pano", "admin")
+        patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(sample_mutation("POLICY-OR-OBJECT"),),
+            targets=("192.0.2.1",),
+            affected_device_groups=(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            session_id = store.create(patch, profile)
+            store.transition(session_id, SessionState.WRITING_CANDIDATE)
+            store.record_candidate_application(
+                session_id,
+                applied_mutation_ids=("mutation-00001",),
+                skipped_components=(),
+            )
+            store.transition(session_id, SessionState.CANDIDATE_APPLIED)
+            store.transition(session_id, SessionState.COMMITTING)
+            store.transition(session_id, SessionState.COMMITTED)
+            store.transition(session_id, SessionState.PUSHING)
+            store.transition(session_id, SessionState.PUSHED)
+
+            catalog = store.history_catalog()
+            self.assertEqual(catalog["storage"], str(Path(temporary).resolve()))
+            self.assertEqual(catalog["sessionCount"], 1)
+            self.assertEqual(catalog["mutationCount"], 1)
+            item = catalog["sessions"][0]["historyItems"][0]
+            self.assertIn("192.0.2.1/32", item["searchValues"])
+            self.assertIn("POLICY-OR-OBJECT", item["searchValues"])
+            self.assertEqual(item["executionStatus"], "pushed")
+            self.assertTrue(item["wasApplied"])
+            self.assertTrue(item["canQuickRestore"])
+            self.assertIsNotNone(item["appliedAt"])
+            self.assertIsNotNone(item["committedAt"])
+            self.assertIsNotNone(item["pushedAt"])
+            self.assertTrue(
+                any(event["state"] == "PUSHED" for event in catalog["sessions"][0]["timeline"])
+            )
+
+    def test_offline_history_reports_corrupt_session_without_hiding_valid_history(self):
+        profile = PanoramaProfile("pano", "admin")
+        patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(sample_mutation(),),
+            targets=("192.0.2.1",),
+            affected_device_groups=(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SessionStore(root, enforce_acl=False)
+            valid = store.create(patch, profile)
+            (root / "session-corrupt").mkdir()
+
+            catalog = store.history_catalog()
+            self.assertEqual([item["id"] for item in catalog["sessions"]], [valid])
+            self.assertEqual(catalog["issues"][0]["sessionId"], "session-corrupt")
+
+    def test_single_backup_preview_does_not_rehash_unrelated_snapshot(self):
+        profile = PanoramaProfile("pano", "admin")
+        patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(sample_mutation(),),
+            targets=("192.0.2.1",),
+            affected_device_groups=(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SessionStore(root, enforce_acl=False)
+            session_id = store.create(
+                patch,
+                profile,
+                planning_running=parse_xml("<config><shared /></config>"),
+            )
+            manifest = store.load_manifest(session_id)
+            snapshot = root / session_id / manifest["snapshots"]["plan_running"]["file"]
+            snapshot.write_text("tampered unrelated snapshot", encoding="utf-8")
+            backup = manifest["entity_backups"][0]["file"]
+
+            self.assertTrue(store.resolve_download(session_id, backup).is_file())
+            with self.assertRaises(IntegrityError):
+                store.verify(session_id)
+
     def test_restore_source_session_list_is_backward_compatible(self):
         patch = PatchSet.new(
             kind="restore",

@@ -13,6 +13,11 @@ Backupy, pelna historia sesji i zaszyfrowane profile sa trwale zapisywane w:
 Nie usuwaj tego folderu, jezeli chcesz korzystac z Emergency Restore po
 ponownym uruchomieniu narzedzia.
 
+Ekran "Backup i restore" dziala bez logowania do Panoramy. Pozwala wyszukac
+historie po IP, nazwie polityki, obiektu, grupy, DG, XPath albo session ID,
+sprawdzic dokladny czas wykonania, wyswietlic pojedynczy backup i przygotowac
+Restore. Polaczenie jest wymagane dopiero do porownania live i wykonania zmian.
+
 Paczka zawiera Flask, Werkzeug i pozostale biblioteki w backend\vendor.
 Nie uruchamiaj plikow bezposrednio z podgladu ZIP i nie wykonuj pip install.
 

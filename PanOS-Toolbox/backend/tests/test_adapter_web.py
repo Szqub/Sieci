@@ -340,6 +340,53 @@ class WebBoundaryTests(unittest.TestCase):
         self.assertEqual(effective.api_max_stage, ApiStage.PUSH)
         self.assertIsNone(warning)
 
+    def test_history_backups_and_artifact_preview_work_without_panorama_login(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            profile = PanoramaProfile("192.0.2.10", "admin", api_max_stage=ApiStage.PUSH)
+            patch = build_cleanup_patchset(
+                CleanerAdapterTests.fixture(),
+                (),
+                policy_names=("SEC-MIX",),
+                panorama_host=profile.host,
+                panorama_username=profile.username,
+            ).patchset
+            session_id = store.create(patch, profile)
+            backup = store.load_manifest(session_id)["entity_backups"][0]["file"]
+            app = create_app(
+                static_dir=Path(temporary) / "static",
+                store=store,
+                profile_ceiling=profile,
+            )
+            client = app.test_client()
+            offline_headers = {"Host": "localhost"}
+
+            history = client.get("/api/v1/history", headers=offline_headers)
+            self.assertEqual(history.status_code, 200, history.get_data(as_text=True))
+            self.assertEqual(history.json["sessionCount"], 1)
+            self.assertEqual(history.json["sessions"][0]["id"], session_id)
+            self.assertTrue(history.json["sessions"][0]["historyItems"])
+
+            listing = client.get("/api/v1/sessions", headers=offline_headers)
+            detail = client.get(f"/api/v1/sessions/{session_id}", headers=offline_headers)
+            preview = client.get(
+                f"/api/v1/sessions/{session_id}/artifacts/{backup}?disposition=inline",
+                headers=offline_headers,
+            )
+            self.assertEqual(listing.status_code, 200)
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(preview.status_code, 200)
+            self.assertIn("inline", preview.headers["Content-Disposition"])
+
+            live_only = client.post(
+                f"/api/v1/sessions/{session_id}/reconcile-external",
+                json={"source": "CLI"},
+                headers={"Host": "localhost", "Origin": "http://localhost"},
+            )
+            self.assertEqual(live_only.status_code, 400)
+            self.assertIn("X-Toolbox-Session", live_only.json["message"])
+            preview.close()
+
     def test_localhost_origin_csp_contract_and_no_cors(self):
         with tempfile.TemporaryDirectory() as temporary:
             app = create_app(
@@ -360,6 +407,7 @@ class WebBoundaryTests(unittest.TestCase):
             self.assertIn(
                 "POST /cleanup/plans/{id}/exclusions", response.json["paths"]
             )
+            self.assertIn("GET /history", response.json["paths"])
             self.assertNotIn("Access-Control-Allow-Origin", response.headers)
             self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
             self.assertNotIn("unsafe-inline", response.headers["Content-Security-Policy"])

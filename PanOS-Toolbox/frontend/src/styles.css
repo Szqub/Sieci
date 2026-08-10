@@ -677,6 +677,44 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .history-job > div > span:last-child { display: flex; flex-direction: column; gap: 2px; }
 .history-job strong { font-size: .66rem; }
 .history-job small { color: var(--text-muted); font-size: .6rem; }
+.history-storage-path { display: block; margin-top: 5px; color: inherit; overflow-wrap: anywhere; }
+.history-match-summary { display: flex; align-items: center; gap: 7px; padding: 8px 13px; color: var(--text-muted); background: var(--surface-soft); border-bottom: 1px solid var(--border); font-size: .59rem; }
+.history-match-summary svg { color: var(--blue); }
+.history-mutation-list { display: flex; max-height: 780px; flex-direction: column; gap: 8px; overflow: auto; padding-right: 3px; }
+.history-mutation-list > article { padding: 11px; background: var(--surface-soft); border: 1px solid var(--border); border-left: 2px solid var(--blue); border-radius: 9px; }
+.history-mutation-list > article.was-applied { border-left-color: var(--success); }
+.history-mutation-list > article > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.history-mutation-list > article > header > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.history-mutation-list > article > header strong { overflow: hidden; font: .68rem "Cascadia Code", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.history-mutation-list > article > header small { color: var(--text-muted); font-size: .56rem; }
+.history-proof-note { margin: 8px 0 0; padding: 7px 8px; color: var(--blue); background: var(--blue-soft); border-radius: 6px; font-size: .57rem; }
+.history-action-times { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 9px 0; }
+.history-action-times > div { min-width: 0; padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.history-action-times dt { margin-bottom: 3px; color: var(--text-muted); font-size: .51rem; text-transform: uppercase; }
+.history-action-times dd { overflow: hidden; margin: 0; color: var(--text-soft); font-size: .54rem; text-overflow: ellipsis; white-space: nowrap; }
+.history-xpath { display: block; max-height: 54px; overflow: auto; padding: 7px; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: .54rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-target-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.history-target-chips span { padding: 3px 6px; color: var(--blue); background: var(--blue-soft); border-radius: 999px; font: .52rem "Cascadia Code", monospace; }
+.history-mutation-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.history-mutation-list details { margin-top: 8px; }
+.history-mutation-list summary { color: var(--text-muted); font-size: .56rem; cursor: pointer; }
+.history-operation-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.history-operation-list > div { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; padding: 6px; background: var(--surface); border-radius: 6px; }
+.history-operation-list code { overflow: hidden; color: var(--text-muted); font-size: .52rem; text-overflow: ellipsis; white-space: nowrap; }
+.history-timeline { margin-top: 12px; padding: 10px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 8px; }
+.history-timeline > summary { color: var(--blue); font-size: .61rem; cursor: pointer; }
+.history-timeline > summary span { display: inline-flex; align-items: center; gap: 6px; }
+.history-timeline > div { display: flex; max-height: 310px; flex-direction: column; overflow: auto; margin-top: 8px; }
+.history-timeline > div > div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 9px; padding: 7px; border-top: 1px solid var(--border); }
+.history-timeline time { color: var(--text-muted); font-size: .53rem; }
+.history-timeline span { display: flex; flex-direction: column; gap: 2px; }
+.history-timeline strong { font-size: .59rem; }
+.history-timeline small { color: var(--text-muted); font-size: .53rem; }
+.history-artifact-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 7px; background: var(--surface); border-radius: 6px; }
+.history-artifact-list > div > span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.history-artifact-list strong { overflow: hidden; font-size: .58rem; text-overflow: ellipsis; white-space: nowrap; }
+.history-artifact-list small { color: var(--text-muted); font-size: .52rem; }
+.history-artifact-list > div > div { display: flex; gap: 3px; }
 .artifact-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
 .artifact-grid button { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 9px; color: var(--text-soft); background: var(--surface-soft); border: 1px solid var(--border); border-radius: 8px; text-align: left; cursor: pointer; }
 .artifact-grid button:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
@@ -1196,4 +1234,7 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
   .artifact-catalog article > div { grid-column: 2; flex-wrap: wrap; }
   .artifact-viewer-backdrop { padding: 6px; }
   .artifact-viewer { width: 100%; height: 97vh; }
+  .history-action-times { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .history-timeline > div > div { grid-template-columns: 1fr; }
+  .history-artifact-list > div { grid-template-columns: 1fr; }
 }
