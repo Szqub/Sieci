@@ -12,10 +12,13 @@ from panos_toolbox.cleaner_adapter import build_cleanup_patchset
 from panos_toolbox.policy_requests import build_policy_creation_plan, parse_policy_request
 from panos_toolbox.models import ApiStage
 from panos_toolbox.profile import PanoramaProfile
+from panos_toolbox.service import plan_cleanup_session
 from panos_toolbox.sessions import SessionStore
 from panos_toolbox.web import (
     _apply_profile_ceiling,
     _cleanup_exclusion_closure,
+    _create_cleanup_child_plan,
+    _wire_cleanup_plan,
     _wire_session,
     create_app,
 )
@@ -244,6 +247,71 @@ class CleanerAdapterTests(unittest.TestCase):
             {cause for mutation in after_second for cause in mutation.causes},
             {"192.0.2.1"},
         )
+
+    def test_policy_exclusion_child_is_local_and_keeps_other_policy_processable(self):
+        fixture = self.fixture()
+
+        class FakeReader:
+            profile = PanoramaProfile("pano", "admin")
+
+            def fetch_config(self, _config_type):
+                return copy.deepcopy(fixture)
+
+            def fetch_config_cached(self, config_type, **_kwargs):
+                return self.fetch_config(config_type)
+
+            def change_summary(self):
+                return parse_xml('<response status="success"><result /></response>')
+
+            def run_op_show(self, _command):
+                return parse_xml(
+                    '<response status="success"><result><rule-hit-count><rules>'
+                    '<entry name="result"><latest>yes</latest><hit-count>0</hit-count>'
+                    '<last-hit-timestamp>0</last-hit-timestamp></entry>'
+                    '</rules></rule-hit-count></result></response>'
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            reader = FakeReader()
+            parent_id = plan_cleanup_session(
+                store,
+                reader,
+                (),
+                policies=("SEC-MIX", "SEC-GROUP"),
+                no_ping=True,
+            )["session_id"]
+            parent_patch = store.load_patchset(parent_id)
+            remaining, removed_components, impacted = _cleanup_exclusion_closure(
+                parent_patch, ("policy:SEC-MIX",)
+            )
+
+            with mock.patch.object(
+                store,
+                "load_snapshot",
+                side_effect=AssertionError("local exclusion must not reload full config"),
+            ):
+                child_id = _create_cleanup_child_plan(
+                    store,
+                    parent_id,
+                    reader,
+                    remaining,
+                    note="regression test",
+                    chosen_targets=("policy:SEC-GROUP",),
+                    excluded_targets=("policy:SEC-MIX",),
+                    exclusion_impacted_targets=impacted,
+                    excluded_component_ids=removed_components,
+                )
+
+            wired = _wire_cleanup_plan(store, child_id, verify=False)
+            decisions = {item["ip"]: item["decision"] for item in wired["addresses"]}
+            self.assertEqual(decisions["policy:SEC-MIX"], "excluded")
+            self.assertEqual(decisions["policy:SEC-GROUP"], "process")
+            self.assertTrue(wired["operations"])
+            self.assertEqual(
+                store.load_manifest(child_id, verify=False)["derived_from_session_id"],
+                parent_id,
+            )
 
 
 class PolicyRequestTests(unittest.TestCase):

@@ -306,6 +306,66 @@ class ClientSerializationTests(unittest.TestCase):
 
 
 class SessionIntegrityTests(unittest.TestCase):
+    def test_derived_plan_inherits_backups_and_snapshots_without_xml_reload(self):
+        profile = PanoramaProfile("pano", "admin")
+        first = sample_mutation("A")
+        second = replace(
+            sample_mutation("B"),
+            mutation_id="mutation-00002",
+            component_id="component-b",
+            causes=("192.0.2.2",),
+        )
+        parent_patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(first, second),
+            targets=("192.0.2.1", "192.0.2.2"),
+            affected_device_groups=(),
+        )
+        child_patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(second,),
+            targets=("192.0.2.2",),
+            affected_device_groups=(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SessionStore(root, enforce_acl=False)
+            parent_id = store.create(
+                parent_patch,
+                profile,
+                planning_running=parse_xml("<config><shared><address /></shared></config>"),
+                planning_candidate=parse_xml("<config><shared><address /></shared></config>"),
+            )
+
+            with mock.patch.object(
+                store,
+                "load_snapshot",
+                side_effect=AssertionError("derived plan must not parse full snapshots"),
+            ):
+                child_id = store.create(
+                    child_patch,
+                    profile,
+                    inherit_from_session_id=parent_id,
+                    inherit_snapshot_labels=("plan_running", "plan_candidate"),
+                )
+
+            child = store.load_manifest(child_id)
+            self.assertEqual(child["derived_from_session_id"], parent_id)
+            self.assertEqual(
+                [item["mutation_id"] for item in child["entity_backups"]],
+                ["mutation-00002"],
+            )
+            self.assertEqual(
+                child["snapshots"]["plan_running"]["inherited_from_session_id"],
+                parent_id,
+            )
+            self.assertEqual(store.load_snapshot(child_id, "plan_running").tag, "config")
+            store.verify(child_id)
+
     def test_offline_history_catalog_indexes_values_and_exact_execution_timeline(self):
         profile = PanoramaProfile("pano", "admin")
         patch = PatchSet.new(

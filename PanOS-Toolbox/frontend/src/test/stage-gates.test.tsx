@@ -99,6 +99,34 @@ describe("staged execution gates", () => {
     expect(onUndoLastExclusion).toHaveBeenCalledTimes(1);
   });
 
+  it("po wykluczeniu jednego komponentu pozostawia pozostałe cele aktywne", () => {
+    const onExcludeTargets = vi.fn();
+    const excludedPlan = {
+      ...demoCleanupPlan,
+      parentSessionId: "parent-session",
+      excludedCount: 1,
+      excludedTargets: ["10.42.16.19"],
+      exclusionImpactedTargets: ["10.42.16.19"],
+      addresses: demoCleanupPlan.addresses.map((target) => target.ip === "10.42.16.19"
+        ? { ...target, decision: "excluded" as const, excludedByUser: true }
+        : target),
+    };
+    render(<PlanPage {...baseProps} plan={excludedPlan} onExcludeTargets={onExcludeTargets} executionSession={null} />);
+
+    const remaining = screen.getByRole("checkbox", { name: "Zaznacz 10.42.16.21" });
+    expect(remaining).toBeEnabled();
+    fireEvent.click(remaining);
+    fireEvent.click(screen.getByRole("button", { name: "Wyklucz zaznaczone" }));
+    expect(onExcludeTargets).toHaveBeenCalledWith([
+      expect.objectContaining({ ip: "10.42.16.21", decision: "process" }),
+    ]);
+  });
+
+  it("pokazuje że przebudowa wykluczenia jest lokalna", () => {
+    render(<PlanPage {...baseProps} singlePlanBusy="exclude:10.42.16.19" executionSession={null} />);
+    expect(screen.getByText(/bez ponownego pobierania konfiguracji z Panoramy/i)).toBeInTheDocument();
+  });
+
   it("nie pozwala ponowić candidate dla terminalnej sesji FAILED", () => {
     render(<PlanPage {...baseProps} executionSession={{ ...demoSessions[0], state: "FAILED" }} />);
     expect(screen.getByRole("button", { name: "Zapisz Candidate przez API" })).toBeDisabled();

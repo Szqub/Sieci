@@ -17,6 +17,17 @@ Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
 następnego automatycznie. Narzędzie nigdy automatycznie nie ładuje pełnego
 backupu konfiguracji.
 
+## Najważniejsze w v0.7.1
+
+- wykluczenie polityki, obiektu lub całego komponentu przebudowuje plan
+  wyłącznie lokalnie — bez ponownego pobierania running/candidate z Panoramy;
+- niezmienne backupy encji i pełne snapshoty są bezpiecznie dziedziczone przez
+  plan potomny zamiast ponownego parsowania oraz zapisywania dużego configu;
+- pełna kontrola integralności wszystkich odziedziczonych plików nadal działa
+  fail-closed bezpośrednio przed Candidate;
+- GUI pokazuje jednoznaczny status lokalnej przebudowy, a niezależne pozostałe
+  cele można od razu zaznaczać do kolejnych wykluczeń.
+
 ## Najważniejsze w v0.7.0
 
 - pełna historia i backupy dostępne bez logowania do Panoramy;

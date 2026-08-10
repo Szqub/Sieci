@@ -70,6 +70,46 @@ def _atomic_write(path: Path, payload: bytes, mode: int = 0o600) -> None:
         raise
 
 
+def _atomic_clone(source: Path, destination: Path, mode: int = 0o600) -> None:
+    """Clone an immutable session artifact without parsing or reserializing it.
+
+    Derived plans live in the same session store, so a hard link is normally
+    available and makes even very large Panorama snapshots effectively O(1).
+    The streaming fallback keeps the operation portable across filesystems.
+    A later write uses ``os.replace`` through ``_atomic_write`` and therefore
+    cannot modify the source through the hard link.
+    """
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise SessionError(f"Docelowy artefakt sesji już istnieje: {destination.name}.")
+    try:
+        os.link(source, destination)
+        return
+    except OSError:
+        pass
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=str(destination.parent)
+    )
+    try:
+        with source.open("rb") as reader, os.fdopen(descriptor, "wb") as writer:
+            shutil.copyfileobj(reader, writer, length=1024 * 1024)
+            writer.flush()
+            os.fsync(writer.fileno())
+        try:
+            os.chmod(temporary, mode)
+        except OSError:
+            pass
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def _envelope(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -374,6 +414,8 @@ class SessionStore:
         planning_running: Optional[ET.Element] = None,
         planning_candidate: Optional[ET.Element] = None,
         diff_summary: Optional[Mapping[str, Any]] = None,
+        inherit_from_session_id: Optional[str] = None,
+        inherit_snapshot_labels: Iterable[str] = (),
     ) -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         session_id = f"session-{stamp}-{secrets.token_hex(4)}"
@@ -384,10 +426,45 @@ class SessionStore:
 
         patch_payload = patchset.to_dict()
         _atomic_write(directory / "patchset.json", _encode_envelope(patch_payload))
+        inherited_manifest: Optional[dict[str, Any]] = None
+        inherited_directory: Optional[Path] = None
+        inherited_backups: dict[str, Mapping[str, Any]] = {}
+        if inherit_from_session_id is not None:
+            inherited_manifest = self.load_manifest(
+                inherit_from_session_id, verify=False
+            )
+            inherited_directory = self._directory(inherit_from_session_id)
+            inherited_backups = {
+                str(record.get("mutation_id")): record
+                for record in inherited_manifest.get("entity_backups") or ()
+            }
         backups: list[dict[str, Any]] = []
         backup_stamp = datetime.now(timezone.utc).strftime("%d%m%y_%H_%M")
         for mutation in patchset.mutations:
             if mutation.before_xml is None:
+                continue
+            inherited = inherited_backups.get(mutation.mutation_id)
+            if (
+                inherited is not None
+                and inherited_directory is not None
+                and inherited.get("entity_type") == mutation.entity_type
+                and inherited.get("entity_key") == mutation.entity_key
+                and inherited.get("xpath") == mutation.target_xpath
+                and inherited.get("sha256")
+                == raw_sha256(mutation.before_xml.encode("utf-8"))
+            ):
+                relative = str(inherited.get("file") or "")
+                source = (inherited_directory / PurePosixPath(relative)).resolve()
+                if (
+                    not relative.startswith("entities/")
+                    or inherited_directory not in source.parents
+                    or not source.is_file()
+                ):
+                    raise IntegrityError(
+                        f"Dziedziczony backup mutacji {mutation.mutation_id} jest niepoprawny."
+                    )
+                _atomic_clone(source, directory / PurePosixPath(relative))
+                backups.append(dict(inherited))
                 continue
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", mutation.entity_key).strip("._")
             safe_name = (safe_name or mutation.entity_type)[:80]
@@ -406,6 +483,36 @@ class SessionStore:
                     "sha256": raw_sha256(data),
                 }
             )
+        inherited_snapshots: dict[str, dict[str, Any]] = {}
+        labels = tuple(dict.fromkeys(str(item) for item in inherit_snapshot_labels))
+        if labels and (inherited_manifest is None or inherited_directory is None):
+            raise SessionError(
+                "Dziedziczenie snapshotów wymaga źródłowej sesji planu."
+            )
+        for label in labels:
+            if not label.replace("_", "").isalnum():
+                raise SessionError("Niepoprawna etykieta dziedziczonego snapshotu.")
+            record = (inherited_manifest.get("snapshots") or {}).get(label)
+            if not isinstance(record, Mapping):
+                raise SessionError(
+                    f"Sesja źródłowa nie zawiera snapshotu {label}."
+                )
+            relative = str(record.get("file") or "")
+            source = (inherited_directory / PurePosixPath(relative)).resolve()
+            if (
+                inherited_directory not in source.parents
+                or not source.is_file()
+                or not record.get("sha256")
+            ):
+                raise IntegrityError(
+                    f"Dziedziczony snapshot {label} jest niepoprawny."
+                )
+            _atomic_clone(source, directory / PurePosixPath(relative))
+            inherited_snapshots[label] = {
+                **dict(record),
+                "inherited_from_session_id": inherit_from_session_id,
+            }
+
         now = utc_now()
         manifest: dict[str, Any] = {
             "session_id": session_id,
@@ -428,7 +535,7 @@ class SessionStore:
             "affected_device_groups": list(patchset.affected_device_groups),
             "touched_xpaths": list(patchset.touched_xpaths),
             "entity_backups": backups,
-            "snapshots": {},
+            "snapshots": inherited_snapshots,
             "diff_summary": dict(diff_summary or {}),
             "journal_count": 0,
             "journal_head_sha256": None,
@@ -441,6 +548,8 @@ class SessionStore:
             "precommit_guard": None,
             "artifacts": [],
         }
+        if inherit_from_session_id is not None:
+            manifest["derived_from_session_id"] = inherit_from_session_id
         self._write_manifest(session_id, manifest)
         if planning_running is not None:
             self.write_snapshot(session_id, "plan_running", planning_running)

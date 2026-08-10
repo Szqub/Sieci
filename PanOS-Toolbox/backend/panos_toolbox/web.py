@@ -227,8 +227,10 @@ def _wire_session(
     }
 
 
-def _wire_cleanup_plan(store: SessionStore, session_id: str) -> dict[str, Any]:
-    manifest = store.load_manifest(session_id)
+def _wire_cleanup_plan(
+    store: SessionStore, session_id: str, *, verify: bool = True
+) -> dict[str, Any]:
+    manifest = store.load_manifest(session_id, verify=verify)
     patch = store.load_patchset(session_id)
     excluded_targets = {
         str(item) for item in manifest.get("excluded_targets") or ()
@@ -553,7 +555,10 @@ def _create_cleanup_child_plan(
     exclusion_impacted_targets: Iterable[str] = (),
     excluded_component_ids: Iterable[str] = (),
 ) -> str:
-    parent_manifest = store.load_manifest(parent_id)
+    # This is a local, read-only transformation.  The manifest envelope and
+    # PatchSet checksum are enough here; full snapshot/entity verification is
+    # deliberately deferred to the existing fail-closed Candidate preflight.
+    parent_manifest = store.load_manifest(parent_id, verify=False)
     if parent_manifest["state"] != SessionState.PLANNED.value:
         raise InputError("Podzbiór można wydzielić tylko z planu PLANNED.")
     parent_patch = store.load_patchset(parent_id)
@@ -597,9 +602,9 @@ def _create_cleanup_child_plan(
     child_id = store.create(
         child_patch,
         client.profile,
-        planning_running=store.load_snapshot(parent_id, "plan_running"),
-        planning_candidate=store.load_snapshot(parent_id, "plan_candidate"),
         diff_summary=parent_manifest.get("diff_summary") or {},
+        inherit_from_session_id=parent_id,
+        inherit_snapshot_labels=("plan_running", "plan_candidate"),
     )
     parent_inputs = parent_manifest.get("input_targets") or {}
     parent_inventory = parent_manifest.get("inventory") or {}
@@ -1300,7 +1305,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.7.0", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.7.1", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -1520,7 +1525,9 @@ def create_app(
     def cleanup_plan():
         value = body()
         result = plan_from_value(value, reader())
-        return jsonify(_wire_cleanup_plan(session_store, result["session_id"])), 201
+        return jsonify(
+            _wire_cleanup_plan(session_store, result["session_id"], verify=False)
+        ), 201
 
     @app.post("/api/v1/policy-requests/plans")
     def policy_request_plan():
@@ -1572,7 +1579,7 @@ def create_app(
             + "\n",
             kind="detailed-report",
         )
-        return jsonify(_wire_cleanup_plan(session_store, session_id)), 201
+        return jsonify(_wire_cleanup_plan(session_store, session_id, verify=False)), 201
 
     @app.post("/api/v1/cleanup/analysis-jobs")
     def cleanup_analysis_job_start():
@@ -1602,7 +1609,9 @@ def create_app(
         def worker() -> None:
             try:
                 result = plan_from_value(value, client, progress_callback=update)
-                plan = _wire_cleanup_plan(session_store, result["session_id"])
+                plan = _wire_cleanup_plan(
+                    session_store, result["session_id"], verify=False
+                )
                 with analysis_jobs_lock:
                     analysis_jobs[job_id].update(
                         state="success",
@@ -1680,7 +1689,7 @@ def create_app(
             note=f"Osobny plan wydzielony z {plan_id}; komponent {component_id}.",
             chosen_targets=(target,),
         )
-        return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
+        return jsonify(_wire_cleanup_plan(session_store, child_id, verify=False)), 201
 
     @app.post("/api/v1/cleanup/plans/<plan_id>/selection")
     def cleanup_selection_plan(plan_id: str):
@@ -1690,7 +1699,7 @@ def create_app(
         targets = list(dict.fromkeys(item.strip() for item in targets if item.strip()))
         if not targets:
             raise InputError("Zaznacz co najmniej jeden cel planu.")
-        parent_manifest = session_store.load_manifest(plan_id)
+        parent_manifest = session_store.load_manifest(plan_id, verify=False)
         known_targets = set(
             (parent_manifest.get("input_targets") or {}).get("ordered") or ()
         )
@@ -1719,7 +1728,7 @@ def create_app(
             ),
             chosen_targets=targets,
         )
-        return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
+        return jsonify(_wire_cleanup_plan(session_store, child_id, verify=False)), 201
 
     @app.post("/api/v1/cleanup/plans/<plan_id>/exclusions")
     def cleanup_exclusion_plan(plan_id: str):
@@ -1740,7 +1749,7 @@ def create_app(
                 "Zaznacz co najmniej jeden cel albo komponent do wykluczenia."
             )
 
-        parent_manifest = session_store.load_manifest(plan_id)
+        parent_manifest = session_store.load_manifest(plan_id, verify=False)
         if parent_manifest["state"] != SessionState.PLANNED.value:
             raise InputError("Cele można wykluczać tylko z planu PLANNED.")
         known_targets = set(
@@ -1818,7 +1827,7 @@ def create_app(
             exclusion_impacted_targets=impacted,
             excluded_component_ids=excluded_components,
         )
-        return jsonify(_wire_cleanup_plan(session_store, child_id)), 201
+        return jsonify(_wire_cleanup_plan(session_store, child_id, verify=False)), 201
 
     @app.get("/api/v1/sessions")
     def sessions_list():
