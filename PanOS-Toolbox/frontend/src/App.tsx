@@ -61,7 +61,10 @@ async function waitForExecutionJob(initial: ExecutionJob, onUpdate: (job: Execut
   let job = initial;
   onUpdate(job);
   while (job.state === "queued" || job.state === "running") {
-    await wait(350);
+    // The backend polls Panorama every two seconds.  Polling the local API
+    // several times inside that interval only wastes CPU and can make a large
+    // session UI feel busy without producing fresher information.
+    await wait(1000);
     job = await api.getExecutionJob(job.id);
     onUpdate(job);
   }

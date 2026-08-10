@@ -10,6 +10,7 @@ as the normal durable ``PatchSet`` used by Candidate/Commit/Push.
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import hashlib
 import ipaddress
 import json
@@ -383,36 +384,28 @@ def build_policy_creation_plan(
     targets: list[str] = []
     inventory: dict[str, Any] = {}
     created_keys: set[tuple[str, str, str]] = set()
-    mutation_index = 0
+    pending_creates: list[dict[str, str]] = []
     component_id = "create-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
     def add_create(target: str, entity_type: str, name: str, xpath: str, parent: str, xml: str, scope: str, flow_label: str) -> None:
-        nonlocal mutation_index
         identity = (scope, entity_type, name)
         if identity in created_keys:
             return
         created_keys.add(identity)
-        if _exists(reader, xpath):
-            warnings.append(f"{entity_type} {name} już istnieje w {scope}; pominięto tworzenie.")
-            return
-        mutation_index += 1
-        mutation_id = f"mutation-{mutation_index:05d}"
-        depends = (mutations[-1].mutation_id,) if mutations else ()
-        mutations.append(Mutation(
-            mutation_id=mutation_id,
-            component_id=component_id,
-            entity_type=entity_type,
-            entity_key=f"create/{scope}/{name}",
-            target_xpath=xpath,
-            before_xml=None,
-            after_xml=xml,
-            forward=(MutationOperation(MutationAction.SET, parent, element=xml),),
-            inverse=(MutationOperation(MutationAction.DELETE, xpath),),
-            causes=(flow_label,),
-            depends_on=depends,
-        ))
+        pending_creates.append(
+            {
+                "target": target,
+                "entity_type": entity_type,
+                "name": name,
+                "xpath": xpath,
+                "parent": parent,
+                "xml": xml,
+                "scope": scope,
+                "flow_label": flow_label,
+            }
+        )
 
-    progress(18, "Sprawdzanie istniejących obiektów punktowym XPath API")
+    progress(18, "Przygotowywanie encji z wklejki")
     for index, flow in enumerate(parsed.flows, 1):
         flow_label = f"create-flow:{index}"
         targets.append(flow_label)
@@ -474,7 +467,63 @@ def build_policy_creation_plan(
             "source_zone": flow.source_zone,
             "destination_zone": flow.destination_zone,
         }
-        progress(18 + int(index / max(1, len(parsed.flows)) * 70), f"Przygotowano przepływ {index}/{len(parsed.flows)}")
+        progress(18 + int(index / max(1, len(parsed.flows)) * 20), f"Przygotowano przepływ {index}/{len(parsed.flows)}")
+
+    progress(
+        40,
+        f"Równoległe sprawdzanie {len(pending_creates)} encji punktowym XPath API",
+    )
+    existing_by_xpath: dict[str, bool] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(8, max(1, len(pending_creates))),
+        thread_name_prefix="panos-create-lookup",
+    ) as pool:
+        futures = {
+            pool.submit(_exists, reader, record["xpath"]): record["xpath"]
+            for record in pending_creates
+        }
+        for completed, future in enumerate(
+            concurrent.futures.as_completed(futures), start=1
+        ):
+            xpath = futures[future]
+            existing_by_xpath[xpath] = future.result()
+            progress(
+                40 + int(completed / max(1, len(futures)) * 45),
+                f"Sprawdzono encję {completed}/{len(futures)}",
+            )
+
+    for record in pending_creates:
+        if existing_by_xpath.get(record["xpath"], False):
+            warnings.append(
+                f"{record['entity_type']} {record['name']} już istnieje w "
+                f"{record['scope']}; pominięto tworzenie."
+            )
+            continue
+        mutation_id = f"mutation-{len(mutations) + 1:05d}"
+        depends = (mutations[-1].mutation_id,) if mutations else ()
+        mutations.append(
+            Mutation(
+                mutation_id=mutation_id,
+                component_id=component_id,
+                entity_type=record["entity_type"],
+                entity_key=f"create/{record['scope']}/{record['name']}",
+                target_xpath=record["xpath"],
+                before_xml=None,
+                after_xml=record["xml"],
+                forward=(
+                    MutationOperation(
+                        MutationAction.SET,
+                        record["parent"],
+                        element=record["xml"],
+                    ),
+                ),
+                inverse=(
+                    MutationOperation(MutationAction.DELETE, record["xpath"]),
+                ),
+                causes=(record["flow_label"],),
+                depends_on=depends,
+            )
+        )
     if not mutations:
         warnings.append("Nie utworzono nowych encji: wszystkie obiekty/polityki już istnieją albo nie przeszły walidacji.")
     patch = PatchSet.new(

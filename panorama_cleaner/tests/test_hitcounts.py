@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import xml.etree.ElementTree as ET
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from panorama_cleanup.hitcounts import (
@@ -162,6 +164,40 @@ class HitCountTests(unittest.TestCase):
         self.assertEqual("ERROR", result.status)
         self.assertTrue(result.requires_review)
         self.assertIn("RuntimeError", result.detail)
+
+    def test_queries_many_rules_with_bounded_parallelism(self) -> None:
+        class ConcurrentClient:
+            def __init__(self) -> None:
+                self.lock = threading.Lock()
+                self.active = 0
+                self.maximum_active = 0
+
+            def run_op_show(self, _command: ET.Element) -> ET.Element:
+                with self.lock:
+                    self.active += 1
+                    self.maximum_active = max(self.maximum_active, self.active)
+                try:
+                    time.sleep(0.02)
+                    return _response(
+                        "<entry name='FW-1'><latest>yes</latest>"
+                        "<hit-count>0</hit-count>"
+                        "<last-hit-timestamp>0</last-hit-timestamp></entry>"
+                    )
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        client = ConcurrentClient()
+        rules = {
+            RuleKey("shared", "pre-rulebase", "security", f"RULE-{index}")
+            for index in range(12)
+        }
+
+        results = collect_rule_hit_counts(client, rules, workers=4)
+
+        self.assertEqual(len(results), 12)
+        self.assertGreater(client.maximum_active, 1)
+        self.assertLessEqual(client.maximum_active, 4)
 
 
 if __name__ == "__main__":

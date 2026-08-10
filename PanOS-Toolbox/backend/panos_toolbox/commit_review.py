@@ -849,6 +849,8 @@ def render_scope_guard_text(
         f"Ustalenia: {guard['findingCount']}",
         f"Pełna projekcja candidate: {guard['candidateProjectionMatches']}",
         f"Fingerprint blokady: {guard.get('findingDigest') or '-'}",
+        f"Tryb weryfikacji: {guard.get('verificationMode') or 'pełny przegląd'}",
+        f"Punktowe odczyty XPath: {guard.get('targetedXPathReads') or 0}",
         f"Override zażądany: {'TAK' if guard.get('overrideRequested') else 'NIE'}",
         f"Override zastosowany: {'TAK' if guard.get('overrideApplied') else 'NIE'}",
         "",
@@ -902,6 +904,18 @@ def build_commit_review(
     native = summarize_native_change_summary(native_summary)
     native["semanticSha256"] = (
         fingerprint_element(native_summary) if native_summary is not None else None
+    )
+    # ``semanticSha256`` intentionally ignores volatile PAN attributes and is
+    # useful for human-facing diffs.  Commit preflight also needs a strict
+    # proof that the lightweight change-summary is byte-for-byte equivalent to
+    # the one reviewed by the operator.  When this proof matches, Toolbox can
+    # verify only the touched XPath values instead of downloading /config
+    # again.  Older reviews without this field safely use the full-config
+    # fallback.
+    native["rawSha256"] = (
+        raw_sha256(ET.tostring(native_summary, encoding="utf-8"))
+        if native_summary is not None
+        else None
     )
     if native_error:
         native["error"] = native_error

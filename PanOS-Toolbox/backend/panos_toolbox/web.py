@@ -491,6 +491,7 @@ def _wire_cleanup_plan(
         "addresses": addresses,
         "operations": _wire_operations(patch),
         "commitReview": manifest.get("commit_review"),
+        "analysisPerformance": manifest.get("analysis_performance"),
         "artifacts": store.artifact_catalog(session_id, manifest=manifest),
     }
 
@@ -1337,7 +1338,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.7.2", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.7.3", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")

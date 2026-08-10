@@ -128,6 +128,18 @@ class PlanningReportTests(unittest.TestCase):
             manifest = store.load_manifest(result["session_id"])
             self.assertFalse(manifest["last_hit"]["blocking"])
             self.assertTrue(any("last-hit" in item for item in manifest["warnings"]))
+            self.assertEqual(
+                manifest["analysis_performance"]["fullConfigReads"], 2
+            )
+            self.assertFalse(
+                manifest["analysis_performance"]["configCacheReused"]
+            )
+            self.assertTrue(
+                any(
+                    event["event_type"] == "ANALYSIS_PERFORMANCE"
+                    for event in store.load_journal(result["session_id"])
+                )
+            )
 
     @mock.patch("panos_toolbox.service.ping_ips")
     def test_icmp_error_skips_only_ip_and_still_writes_reports(self, ping_mock):

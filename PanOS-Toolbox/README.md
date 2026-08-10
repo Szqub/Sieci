@@ -17,6 +17,26 @@ Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
 następnego automatycznie. Narzędzie nigdy automatycznie nie ładuje pełnego
 backupu konfiguracji.
 
+## Najważniejsze w v0.7.3
+
+- drugi i kolejne batche używają pełnych snapshotów z pamięci wyłącznie po
+  potwierdzeniu identycznego, natywnego `change-summary`; zmiana stanu wymusza
+  spójne odświeżenie running/candidate;
+- zwykły Candidate wykorzystuje zapisane snapshoty planu, równolegle sprawdza
+  tylko dotknięte XPath i wykonuje jeden pełny odczyt candidate dopiero po
+  zapisie; test regresyjny potwierdza spadek z pięciu pełnych odczytów do jednego;
+- Commit i Push w normalnej ścieżce nie pobierają pełnego configu: sprawdzają
+  dotknięte XPath odpowiednio w candidate i running, a pełny odczyt pozostaje
+  fail-closed fallbackiem dla nieobsługiwanej odpowiedzi API;
+- Last Hit oraz sprawdzanie encji dla generatora nowych polityk działają w
+  ograniczonej puli do ośmiu równoległych odczytów; inventory dużej rulebase
+  korzysta z jednorazowych indeksów zamiast skanować całość dla każdego wiersza;
+- trwały journal sesji jest append-only JSONL i nie przepisuje dużego manifestu
+  po każdej polityce; starsze sesje są migrowane bez usuwania ich plików;
+- ekran wykonania pokazuje żywą odpowiedź joba Panoramy, numer poll, czas,
+  pozycję w kolejce i ostrzeżenia, więc długi job nie wygląda już jak zawieszone
+  50%; końcowe `FIN/OK` domyka pasek do 100% przy kolejnym pollu.
+
 ## Najważniejsze w v0.7.2
 
 - każdy `BLOCK` pokazuje bezpośrednio w GUI dokładny kod, rodzaj różnicy,
@@ -131,17 +151,21 @@ Ekran ma dwa tryby:
   lokalizację, pola polityki, komentarz, Last Hit i zależności;
 - **Lista / batch** — buduje pełny graf zależności na snapshotach running i
   candidate. Pierwszy batch pobiera je z Panoramy, a kolejne plany w tym samym
-  połączeniu korzystają ze świeżego cache przez maksymalnie 30 minut.
+  połączeniu korzystają z cache przez maksymalnie 30 minut wyłącznie wtedy, gdy
+  dokładny natywny `change-summary` nadal jest identyczny.
 
 Analiza batch działa jako asynchroniczny job i pokazuje procentowy postęp dla
-ICMP, pobierania/cache running i candidate, grafu zależności, Last Hit oraz
-zapisu artefaktów. Przed realnym WRITE cache nie jest zaufany: Candidate
-ponownie sprawdza live running/candidate i graf. Po zastosowaniu operacji
-automatycznie tworzy pełny diff running → candidate oraz ścisły scope guard.
-Commit pobiera po locku jeden live candidate i lekki `change-summary`; pełny
-running jest pobierany tylko jako awaryjny fallback, gdy dana wersja PAN-OS nie
-udostępnia change-summary. Push pobiera jeden live running. Fingerprinty
-dotkniętych ścieżek pozostają sprawdzane przed wysłaniem joba.
+ICMP, pobierania/cache running i candidate, grafu zależności, równoległego Last
+Hit oraz zapisu artefaktów. Przed realnym WRITE cache nie jest zaufany:
+Candidate potwierdza dokładny proof planu i sprawdza live tylko dotknięte XPath;
+przy jakiejkolwiek zmianie przechodzi na pełny fail-closed fallback. Po
+zastosowaniu operacji pobiera jeden pełny candidate, sprawdza wszystkie
+postcondition i automatycznie tworzy pełny diff running → candidate oraz ścisły
+scope guard. Commit ponownie potwierdza `change-summary` i dotknięte XPath
+candidate, a Push dotknięte XPath running. Pełny config w tych dwóch etapach
+jest pobierany tylko jako awaryjny fallback. Jawne **Odśwież diff** celowo
+pobiera pełny running i candidate, bo operator żąda wtedy kompletnego nowego
+przeglądu całej konfiguracji.
 Po analizie przy każdym bezpiecznym celu jest przycisk **Tylko ten**. Można też
 zaznaczyć dowolne wiersze albo konkretne zależności i przygotować nowy batch.
 Wydzielany jest cały atomowy komponent zależności, dzięki czemu obiekt, grupa
@@ -200,8 +224,8 @@ Sekcja **Nowe polityki** przyjmuje bezpośrednio wklejkę zawierającą `Passes
 ToDo`, `Info Src` i `Info Dst` w JSON, Python repr albo mieszanym formacie.
 `Passes Done` jest ignorowane i trafia do ostrzeżeń. Toolbox nie pobiera
 pełnego configu: dla każdego obiektu, grupy, usługi i reguły wykonuje punktowe
-odczyty XML API w running oraz candidate, a następnie pokazuje plan do ręcznej
-akceptacji.
+odczyty XML API w running oraz candidate, do ośmiu encji równolegle, a następnie
+pokazuje plan do ręcznej akceptacji.
 
 Generator przygotowuje osobne mutacje z backupem i rollbackiem w podanym DG,
 rulebase oraz strefach. Konwencje nazw to `H-IP-32` dla hosta, `N-SIEC-PREFIX`

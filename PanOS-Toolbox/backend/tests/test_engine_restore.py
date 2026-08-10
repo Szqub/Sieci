@@ -8,6 +8,7 @@ from pathlib import Path
 
 from panos_toolbox.cleaner_adapter import build_cleanup_patchset
 from panos_toolbox.client import JobResult
+from panos_toolbox.diffing import compare_configs
 from panos_toolbox.engine import (
     _cleanup_candidate_replan_conflicts,
     _postcondition_failures,
@@ -70,6 +71,16 @@ class StatefulReader:
     def fetch_config(self, kind):
         self.events.append(f"fetch:{kind}")
         return copy.deepcopy(self.running if kind == "running" else self.candidate)
+
+    def fetch_xpath(self, xpath, *, config_type="running"):
+        self.events.append(f"fetch-xpath:{config_type}:{xpath}")
+        source = self.running if config_type == "running" else self.candidate
+        response = ET.Element("response", {"status": "success"})
+        result = ET.SubElement(response, "result")
+        element = find_xpath(source, xpath)
+        if element is not None:
+            result.append(copy.deepcopy(element))
+        return response
 
     def show_config_locks(self):
         self.events.append("show:config-locks")
@@ -293,6 +304,49 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(operation_updates[-1]["completedOperations"], 2)
             self.assertEqual(operation_updates[-1]["totalOperations"], 2)
 
+    def test_candidate_reuses_proven_plan_snapshots_and_reads_full_config_once(self):
+        profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary), enforce_acl=False)
+            reader = StatefulReader(profile, config("A", "B"))
+            patch = PatchSet.new(
+                kind="cleanup",
+                panorama_host=profile.host,
+                panorama_username=profile.username,
+                mutations=(mutation(1, "A"), mutation(2, "B")),
+                targets=("192.0.2.1", "192.0.2.2"),
+                affected_device_groups=("DG-A",),
+            )
+            native = reader.change_summary()
+            session_id = store.create(
+                patch,
+                profile,
+                planning_running=reader.running,
+                planning_candidate=reader.candidate,
+                diff_summary=compare_configs(
+                    reader.running, reader.candidate, native
+                ),
+            )
+            reader.events.clear()
+
+            result = apply_candidate(
+                store, session_id, reader, StatefulWriter(reader)
+            )
+
+            self.assertEqual(result.state, SessionState.CANDIDATE_APPLIED)
+            self.assertEqual(
+                [event for event in reader.events if event.startswith("fetch:")],
+                ["fetch:candidate"],
+            )
+            performance = next(
+                event
+                for event in reversed(store.load_journal(session_id))
+                if event["event_type"] == "CANDIDATE_PERFORMANCE"
+            )["details"]
+            self.assertEqual(performance["full_config_reads"], 1)
+            self.assertGreater(performance["targeted_xpath_reads"], 0)
+            self.assertTrue(performance["plan_snapshots_reused"])
+
     def test_external_cli_execution_requires_complete_live_postconditions(self):
         profile = PanoramaProfile("pano", "admin", api_max_stage=ApiStage.PUSH)
         with tempfile.TemporaryDirectory() as temporary:
@@ -305,10 +359,22 @@ class EngineTests(unittest.TestCase):
 
             reader.candidate = config()
             reader.running = config()
+            reader.events.clear()
             state = reconcile_external_execution(store, session_id, reader, source="CLI")
             self.assertEqual(state, SessionState.COMMITTED)
             manifest = store.load_manifest(session_id)
+            self.assertEqual(
+                [event for event in reader.events if event.startswith("fetch:")],
+                [],
+            )
+            self.assertTrue(
+                any(event.startswith("fetch-xpath:running:") for event in reader.events)
+            )
             self.assertEqual(manifest["external_execution"]["source"], "CLI")
+            self.assertEqual(
+                manifest["external_execution"]["evidence"]["fullConfigReads"],
+                0,
+            )
             self.assertEqual(
                 manifest["candidate_application"]["applied_mutation_ids"],
                 ["mutation-00001"],
@@ -322,6 +388,8 @@ class EngineTests(unittest.TestCase):
             session_id, _ = self.make_session(store, profile, (mutation(1, "A"),))
             writer = StatefulWriter(reader)
             apply_candidate(store, session_id, reader, writer)
+            review_native = store.load_manifest(session_id)["commit_review"]["native"]
+            self.assertEqual(len(review_native["rawSha256"]), 64)
             with self.assertRaises(CapabilityError):
                 commit_session(store, session_id, reader, writer)
             self.assertEqual(store.load_manifest(session_id)["state"], "CANDIDATE_APPLIED")
@@ -340,8 +408,17 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(store.load_manifest(session_id)["state"], "COMMITTED")
             self.assertEqual(
                 [event for event in reader.events if event.startswith("fetch:")],
-                ["fetch:candidate"],
+                [],
             )
+            self.assertTrue(
+                any(event.startswith("fetch-xpath:candidate:") for event in reader.events)
+            )
+            performance = next(
+                event
+                for event in reversed(store.load_journal(session_id))
+                if event["event_type"] == "COMMIT_PERFORMANCE"
+            )
+            self.assertEqual(performance["details"]["full_config_reads"], 0)
             self.assertEqual(commit_updates[-1][0], 100)
             self.assertIn("stage-finished", commit_result["phase_timeline_seconds"])
             self.assertTrue(
@@ -368,8 +445,17 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(store.load_manifest(session_id)["state"], "PUSHED")
             self.assertEqual(
                 [event for event in reader.events if event.startswith("fetch:")],
-                ["fetch:running"],
+                [],
             )
+            self.assertTrue(
+                any(event.startswith("fetch-xpath:running:") for event in reader.events)
+            )
+            push_performance = next(
+                event
+                for event in reversed(store.load_journal(session_id))
+                if event["event_type"] == "PUSH_PERFORMANCE"
+            )
+            self.assertEqual(push_performance["details"]["full_config_reads"], 0)
             self.assertEqual(push_updates[-1][0], 100)
             self.assertIn("stage-finished", push_result["phase_timeline_seconds"])
 

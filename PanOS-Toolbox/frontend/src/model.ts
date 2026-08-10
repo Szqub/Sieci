@@ -329,6 +329,14 @@ export interface CleanupPlan {
   addresses: AddressAnalysis[];
   operations: PatchOperation[];
   commitReview?: CommitReview;
+  analysisPerformance?: {
+    totalDurationSeconds: number;
+    fullConfigReads: number;
+    configCacheReused: boolean;
+    nativeChangeProof: boolean;
+    lastHitQueries: number;
+    lastHitWorkers: number;
+  };
   artifacts?: SessionArtifact[];
 }
 
@@ -362,6 +370,13 @@ export interface ExecutionProgressItem {
   details?: string;
   pollCount?: number;
   elapsedSeconds?: number;
+  jobType?: string;
+  queued?: string;
+  positionInQueue?: number;
+  stoppable?: string;
+  warnings?: string;
+  lastResponseAt?: string;
+  longRunning?: boolean;
   indeterminate?: boolean;
   jobDispatched?: boolean;
   commitReady?: boolean;

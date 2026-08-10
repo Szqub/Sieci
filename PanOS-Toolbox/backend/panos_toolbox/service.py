@@ -170,6 +170,7 @@ def _last_hit_summary(
     plan_result: CleanerPlanResult,
     *,
     recent_days: int,
+    progress_callback: Optional[Callable[[int, int, Any], None]] = None,
 ) -> dict[str, Any]:
     _legacy_root()
     from panorama_cleanup.hitcounts import collect_rule_hit_counts  # type: ignore[import-not-found]
@@ -194,7 +195,10 @@ def _last_hit_summary(
                 and key.name == found.get("name")
             )
     results = collect_rule_hit_counts(
-        reader, relevant_rules, recent_days=recent_days
+        reader,
+        relevant_rules,
+        recent_days=recent_days,
+        progress_callback=progress_callback,
     )
     records = []
     for key, value in sorted(results.items()):
@@ -233,6 +237,22 @@ def _cleanup_inventory(
         return inventory
     from panorama_cleanup.planner import dependency_inventories  # type: ignore[import-not-found]
 
+    # Named lookups used to scan every address/group/rule for every requested
+    # target.  Large Panorama configurations made a 50-policy batch quadratic.
+    # Build immutable identity indexes once and keep the inventory pass O(n).
+    address_keys = {
+        (key.location, key.name): key for key in result.model.addresses
+    }
+    static_group_keys = {
+        (key.location, key.name): key for key in result.model.static_groups
+    }
+    dynamic_group_keys = {
+        (key.location, key.name): key for key in result.model.dynamic_groups
+    }
+    rule_keys = {
+        (key.location, key.rulebase, key.policy_type, key.name): key
+        for key in result.model.rules
+    }
     keys = {
         key
         for match in result.matches.values()
@@ -245,9 +265,9 @@ def _cleanup_inventory(
         for found in discovered.get("matches") or ()
     }
     keys.update(
-        key
-        for key in result.model.addresses
-        if (key.location, key.name) in selected_object_identities
+        address_keys[identity]
+        for identity in selected_object_identities
+        if identity in address_keys
     )
     selected_group_identities = {
         (str(found.get("location")), str(found.get("name")))
@@ -257,9 +277,9 @@ def _cleanup_inventory(
         if found.get("entity_type") == "address-group"
     }
     keys.update(
-        key
-        for key in result.model.static_groups
-        if (key.location, key.name) in selected_group_identities
+        static_group_keys[identity]
+        for identity in selected_group_identities
+        if identity in static_group_keys
     )
     dependencies = dependency_inventories(result.model, keys)
 
@@ -311,10 +331,7 @@ def _cleanup_inventory(
             name = str(found.get("name") or "unknown")
             entity_type = str(found.get("entity_type") or "unknown")
             if entity_type == "address":
-                key = next(
-                    (key for key in result.model.addresses if key.location == location and key.name == name),
-                    None,
-                )
+                key = address_keys.get((location, name))
                 if key is None:
                     continue
                 address = result.model.addresses[key]
@@ -336,14 +353,8 @@ def _cleanup_inventory(
                 )
                 continue
             if entity_type in {"address-group", "dynamic-address-group"}:
-                static_key = next(
-                    (key for key in result.model.static_groups if key.location == location and key.name == name),
-                    None,
-                )
-                dynamic_key = next(
-                    (key for key in result.model.dynamic_groups if key.location == location and key.name == name),
-                    None,
-                )
+                static_key = static_group_keys.get((location, name))
+                dynamic_key = dynamic_group_keys.get((location, name))
                 if static_key is not None:
                     group = result.model.static_groups[static_key]
                     outbound = []
@@ -405,16 +416,13 @@ def _cleanup_inventory(
                     )
                 continue
             if entity_type == "policy":
-                key = next(
+                key = rule_keys.get(
                     (
-                        key
-                        for key in result.model.rules
-                        if key.location == location
-                        and key.rulebase == found.get("rulebase")
-                        and key.policy_type == found.get("policy_type")
-                        and key.name == name
-                    ),
-                    None,
+                        location,
+                        found.get("rulebase"),
+                        found.get("policy_type"),
+                        name,
+                    )
                 )
                 if key is None:
                     continue
@@ -525,14 +533,8 @@ def _cleanup_inventory(
                 )
         elif discovered.get("kind") == "address-object":
             for found in discovered.get("matches") or ():
-                key = next(
-                    (
-                        candidate
-                        for candidate in result.model.addresses
-                        if candidate.location == found.get("location")
-                        and candidate.name == found.get("name")
-                    ),
-                    None,
+                key = address_keys.get(
+                    (found.get("location"), found.get("name"))
                 )
                 if key is None:
                     continue
@@ -666,6 +668,8 @@ def plan_cleanup_session(
     allow_default_policy_override: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> dict[str, Any]:
+    started_at = time.monotonic()
+
     def progress(value: int, message: str) -> None:
         if progress_callback is not None:
             progress_callback(value, message)
@@ -690,33 +694,57 @@ def plan_cleanup_session(
     eligible = tuple(
         ip for ip, result in pings.items() if result.status in {"NO_REPLY", "BYPASSED"}
     )
-    # A complete snapshot is expensive on large Panoramas.  Reuse it for
-    # subsequent read-only plans in the same in-memory connection.  Candidate
-    # execution never trusts this cache: engine.apply_candidate refreshes live
-    # running/candidate, checks locks and revalidates every touched XPath.
-    if hasattr(reader, "fetch_config_cached"):
-        fetch_config = lambda kind: reader.fetch_config_cached(  # noqa: E731
-            kind, max_age_seconds=1800.0
-        )
-    else:
-        fetch_config = reader.fetch_config
-    progress(
-        15,
-        "Odczyt running config (świeży cache sesji lub Panorama)",
-    )
-    running = fetch_config("running")
-    progress(
-        45,
-        "Odczyt candidate (świeży cache sesji lub Panorama)",
-    )
-    candidate = fetch_config("candidate")
-    progress(65, "Pobrano candidate; porównywanie konfiguracji")
+    # Full snapshots are cached only behind an exact native change-summary
+    # proof.  Therefore a second batch on an unchanged Panorama reuses the
+    # already downloaded trees, while any drift forces one coherent refresh.
     native = None
     native_warning: Optional[str] = None
-    try:
-        native = reader.change_summary()
-    except ToolboxError as exc:
-        native_warning = f"Nie udało się pobrać change-summary: {exc}"
+    cache_reused = False
+    progress(12, "Lekki proof cache przez Panorama change-summary")
+    if hasattr(reader, "fetch_config_pair_coherent"):
+        def pair_progress(stage: str, attempt: int) -> None:
+            if stage == "cache":
+                progress(62, "Config bez zmian — używam cache poprzedniego batcha")
+            elif stage == "running":
+                progress(
+                    15,
+                    f"Odczyt running config z Panoramy"
+                    + (f" · próba {attempt}" if attempt > 1 else ""),
+                )
+            elif stage == "candidate":
+                progress(
+                    45,
+                    f"Odczyt candidate z Panoramy"
+                    + (f" · próba {attempt}" if attempt > 1 else ""),
+                )
+
+        running, candidate, native, cache_reused, native_error = (
+            reader.fetch_config_pair_coherent(
+                max_age_seconds=1800.0,
+                # The analysis pipeline treats both XML trees as immutable.
+                # Borrowing the proof-matched cache avoids two full deep copies
+                # on every subsequent batch of a large Panorama config.
+                copy_cached=False,
+                progress_callback=pair_progress,
+            )
+        )
+        if native_error:
+            native_warning = f"Nie udało się pobrać change-summary: {native_error}"
+    else:
+        progress(15, "Odczyt running config z Panoramy")
+        running = reader.fetch_config("running")
+        progress(45, "Odczyt candidate z Panoramy")
+        candidate = reader.fetch_config("candidate")
+        try:
+            native = reader.change_summary()
+        except ToolboxError as exc:
+            native_warning = f"Nie udało się pobrać change-summary: {exc}"
+    progress(
+        65,
+        "Cache configu potwierdzony; porównywanie"
+        if cache_reused
+        else "Pobrano spójny candidate; porównywanie konfiguracji",
+    )
     diff = compare_configs(running, candidate, native)
     if native_warning:
         diff["warnings"].append(native_warning)
@@ -743,7 +771,13 @@ def plan_cleanup_session(
         patch = result.patchset
         progress(84, "Sprawdzanie Last Hit znalezionych polityk")
         last_hit = _last_hit_summary(
-            reader, result, recent_days=recent_hit_days
+            reader,
+            result,
+            recent_days=recent_hit_days,
+            progress_callback=lambda done, total, _rule: progress(
+                84 + int(6 * done / max(1, total)),
+                f"Last Hit {done}/{total} (do 8 zapytań równolegle)",
+            ),
         )
     else:
         patch = PatchSet.new(
@@ -865,6 +899,20 @@ def plan_cleanup_session(
         + "\n",
         kind="report",
     )
+    analysis_performance = {
+        "totalDurationSeconds": round(time.monotonic() - started_at, 1),
+        "fullConfigReads": 0 if cache_reused else 2,
+        "configCacheReused": cache_reused,
+        "nativeChangeProof": native is not None,
+        "lastHitQueries": len(last_hit.get("records") or ()),
+        "lastHitWorkers": min(8, len(last_hit.get("records") or ())),
+    }
+
+    def enrich_performance(manifest: dict[str, Any]) -> None:
+        manifest["analysis_performance"] = analysis_performance
+
+    store.update(session_id, enrich_performance)
+    store.append_event(session_id, "ANALYSIS_PERFORMANCE", analysis_performance)
     progress(100, "Plan jest gotowy")
     return {
         "session_id": session_id,
@@ -875,6 +923,7 @@ def plan_cleanup_session(
         "diff": diff,
         "icmp": ping_records,
         "last_hit": last_hit,
+        "analysis_performance": analysis_performance,
     }
 
 

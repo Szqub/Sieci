@@ -17,7 +17,10 @@ function eventDetail(item: ExecutionProgressItem): string {
   if (item.jobId) {
     const panorama = typeof item.panoramaProgress === "number" ? ` · Panorama ${item.panoramaProgress}%` : "";
     const polls = item.pollCount ? ` · poll ${item.pollCount}` : "";
-    return `job ${item.jobId} · ${item.status || "status oczekiwany"}${panorama}${polls}`;
+    const queue = typeof item.positionInQueue === "number"
+      ? ` · kolejka ${item.positionInQueue}`
+      : item.queued === "YES" ? " · w kolejce" : "";
+    return `job ${item.jobId} · ${item.status || "status oczekiwany"}${panorama}${queue}${polls}`;
   }
   if (item.action) {
     const operations = item.totalOperations
@@ -34,6 +37,9 @@ export function ExecutionProgress({ job }: { job: ExecutionJob }) {
   const indeterminate = running && (waitingForPanorama || Boolean(job.current?.indeterminate) || ["preflight-candidate", "review-running", "review-candidate", "review-build"].includes(job.current?.event ?? ""));
   const commitNotDispatched = running && job.kind === "commit" && !job.current?.jobId;
   const elapsed = job.current?.elapsedSeconds;
+  const livePanoramaResponse = Boolean(job.current?.jobId && job.current?.lastResponseAt);
+  const longRunning = running && Boolean(job.current?.longRunning || (typeof elapsed === "number" && elapsed >= 120));
+  const queued = job.current?.queued === "YES" || (job.current?.positionInQueue ?? 0) > 0;
   const tone = job.state === "success" ? "success" : job.state === "failed" ? "danger" : "warning";
 
   return (
@@ -63,7 +69,28 @@ export function ExecutionProgress({ job }: { job: ExecutionJob }) {
         {job.current?.jobId && <span>Panorama job <code>{job.current.jobId}</code></span>}
         {commitNotDispatched && <span className="preflight-notice">Job nie jest jeszcze w Panoramie — trwa lokalny/live preflight</span>}
         {waitingForPanorama && <span>Panorama nie raportuje procentu — job jest aktywnie odpytywany</span>}
+        {livePanoramaResponse && <span className="panorama-live-proof">Panorama odpowiada · poll {job.current?.pollCount ?? 1}</span>}
       </div>
+
+      {longRunning && (
+        <div className="execution-progress-long-running" role="status">
+          <Clock3 size={16} />
+          <span>
+            <strong>{queued ? "Job czeka w kolejce Panoramy" : "Długi job jest nadal przetwarzany przez Panoramę"}</strong>
+            <small>
+              Toolbox otrzymuje odpowiedzi dla joba {job.current?.jobId}. Nie uruchamiaj drugiego commitu.
+              {typeof job.current?.positionInQueue === "number" ? ` Pozycja w kolejce: ${job.current.positionInQueue}.` : ""}
+            </small>
+          </span>
+        </div>
+      )}
+
+      {job.current?.warnings && (
+        <div className="execution-progress-panorama-warning">
+          <strong>Ostrzeżenie Panoramy</strong>
+          <span>{job.current.warnings}</span>
+        </div>
+      )}
 
       <div className="execution-operation-log" aria-label="Log etapów wykonania">
         {job.items.slice(-12).map((item, index) => {

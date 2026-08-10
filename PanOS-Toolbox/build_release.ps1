@@ -3,6 +3,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$requiredPathExt = @(".COM", ".EXE", ".BAT", ".CMD")
+$pathExt = @($env:PATHEXT -split ";" | Where-Object { $_ })
+foreach ($extension in $requiredPathExt) {
+    if ($pathExt -notcontains $extension) {
+        $pathExt += $extension
+    }
+}
+$env:PATHEXT = $pathExt -join ";"
+
 $toolboxRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $toolboxRoot "..")).Path
 $frontend = Join-Path $toolboxRoot "frontend"
@@ -30,19 +39,26 @@ if (-not (Test-Path -LiteralPath $adGroupHelper -PathType Leaf)) {
 function Invoke-BuildPython {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($launcher) {
-        & $launcher.Source -3 @Arguments
+        $executable = $launcher.Source
+        $processArguments = @("-3") + $Arguments
     }
     else {
-        $python = Get-Command python -ErrorAction SilentlyContinue
+        $python = Get-Command python.exe -ErrorAction SilentlyContinue
         if (-not $python) {
             throw "Python 3 was not found (neither py nor python)."
         }
-        & $python.Source @Arguments
+        $executable = $python.Source
+        $processArguments = $Arguments
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Python build step failed with exit code $LASTEXITCODE."
+
+    # Start-Process provides a reliable exit code both in an ordinary Windows
+    # terminal and when this script is started through WSL interoperability.
+    $process = Start-Process -FilePath $executable -ArgumentList $processArguments `
+        -WorkingDirectory (Get-Location).ProviderPath -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -ne 0) {
+        throw "Python build step failed with exit code $($process.ExitCode)."
     }
 }
 
@@ -56,9 +72,10 @@ function Invoke-BuildNpm {
     if (-not $npm) {
         throw "npm was not found."
     }
-    & $npm.Source @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "npm build step failed with exit code $LASTEXITCODE."
+    $process = Start-Process -FilePath $npm.Source -ArgumentList $Arguments `
+        -WorkingDirectory (Get-Location).ProviderPath -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -ne 0) {
+        throw "npm build step failed with exit code $($process.ExitCode)."
     }
 }
 
@@ -178,9 +195,17 @@ if (Test-Path -LiteralPath $doctorStore) {
 
 # Validate the exact double-click launcher shipped to the target machine.
 $cmdLauncher = Join-Path $packageRoot "start_toolbox.cmd"
-& $env:ComSpec /d /c ('"' + $cmdLauncher + '" doctor')
-if ($LASTEXITCODE -ne 0) {
-    throw "Packaged start_toolbox.cmd doctor failed with exit code $LASTEXITCODE."
+$launcherStdout = Join-Path $staging "launcher-doctor.stdout.log"
+$launcherStderr = Join-Path $staging "launcher-doctor.stderr.log"
+$launcherProcess = Start-Process -FilePath $cmdLauncher -ArgumentList "doctor" `
+    -WorkingDirectory $packageRoot -RedirectStandardOutput $launcherStdout `
+    -RedirectStandardError $launcherStderr -WindowStyle Hidden -Wait -PassThru
+if ($launcherProcess.ExitCode -ne 0) {
+    $launcherError = if (Test-Path -LiteralPath $launcherStderr) {
+        Get-Content -LiteralPath $launcherStderr -Raw -ErrorAction SilentlyContinue
+    }
+    else { "" }
+    throw "Packaged start_toolbox.cmd doctor failed with exit code $($launcherProcess.ExitCode). $launcherError"
 }
 
 # Start the unpacked package with only its vendored runtime and verify a real
@@ -197,7 +222,7 @@ $serverStdout = Join-Path $staging "portable-server.stdout.log"
 $serverStderr = Join-Path $staging "portable-server.stderr.log"
 $serverSessions = Join-Path $staging "portable-server-sessions"
 $serverEntrypoint = Join-Path $packageRoot "panos-toolbox.py"
-$pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+$pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
 if ($pyLauncher) {
     $serverExecutable = $pyLauncher.Source
     $serverArguments = @(
@@ -207,7 +232,7 @@ if ($pyLauncher) {
     )
 }
 else {
-    $python = Get-Command python -ErrorAction SilentlyContinue
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if (-not $python) {
         throw "Python 3 was not found for portable HTTP verification."
     }

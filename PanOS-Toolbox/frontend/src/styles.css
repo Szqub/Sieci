@@ -1118,6 +1118,13 @@ tbody tr:hover:not(.expanded-row) { background: color-mix(in srgb, var(--surface
 .execution-progress-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--text-muted); font-size: .59rem; }
 .execution-progress-meta > span { display: inline-flex; align-items: center; gap: 5px; }
 .execution-progress-meta code { color: var(--text); }
+.panorama-live-proof { color: var(--success); }
+.execution-progress-long-running { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 9px; padding: 10px 12px; color: var(--warning); background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 8px; }
+.execution-progress-long-running > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.execution-progress-long-running strong { color: var(--text); font-size: .68rem; }
+.execution-progress-long-running small { color: var(--text-soft); font-size: .59rem; line-height: 1.45; }
+.execution-progress-panorama-warning { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; color: var(--text-soft); background: var(--danger-soft); border-left: 2px solid var(--danger); border-radius: 6px; font-size: .6rem; line-height: 1.45; }
+.execution-progress-panorama-warning strong { color: var(--danger); }
 .execution-operation-log { display: flex; max-height: 230px; flex-direction: column; gap: 4px; overflow: auto; padding-right: 4px; }
 .execution-operation-log > div { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 7px 9px; background: var(--surface-soft); border-radius: 7px; }
 .execution-operation-log svg { color: var(--accent); }

@@ -156,6 +156,39 @@ class ClientSerializationTests(unittest.TestCase):
         self.assertEqual(first.get("version"), second.get("version"))
         self.assertEqual(len(transport.calls), 1)
 
+    def test_config_pair_cache_reuses_full_trees_only_with_matching_change_proof(self):
+        transport = RecordingTransport()
+        summary = (
+            '<response status="success"><result><change-summary dirtyId="7">'
+            '<change xpath="/config/shared/address" /></change-summary>'
+            '</result></response>'
+        )
+        config_response = (
+            '<response status="success"><result><config version="10.2">'
+            '<shared /></config></result></response>'
+        )
+        for response in (summary, config_response, config_response, summary, summary):
+            transport.queue(response)
+        reader = PanoramaReadClient(
+            PanoramaProfile("pano", "admin", verify_ssl=False), transport
+        )
+        reader._api_key = "memory-only-test-key"
+
+        running, candidate, _native, reused, error = (
+            reader.fetch_config_pair_coherent()
+        )
+        self.assertFalse(reused)
+        self.assertIsNone(error)
+        self.assertEqual(running.get("version"), "10.2")
+        self.assertEqual(candidate.get("version"), "10.2")
+
+        _running, _candidate, _native, reused, error = (
+            reader.fetch_config_pair_coherent()
+        )
+        self.assertTrue(reused)
+        self.assertIsNone(error)
+        self.assertEqual(len(transport.calls), 5)
+
     def test_candidate_mutation_invalidates_only_candidate_cache(self):
         profile = PanoramaProfile(
             "pano", "admin", verify_ssl=False, api_max_stage=ApiStage.CANDIDATE
@@ -268,7 +301,10 @@ class ClientSerializationTests(unittest.TestCase):
         )
         transport.queue(
             '<response status="success"><result><job><id>42</id><status>PEND</status>'
-            '<result>PEND</result><progress>37</progress></job></result></response>'
+            '<type>Commit</type><queued>YES</queued><positionInQ>2</positionInQ>'
+            '<stoppable>yes</stoppable><result>PEND</result><progress>37</progress>'
+            '<warnings><line>Waiting for another commit.</line></warnings>'
+            '</job></result></response>'
         )
         transport.queue(
             '<response status="success"><result><job><id>42</id><status>FIN</status>'
@@ -283,6 +319,12 @@ class ClientSerializationTests(unittest.TestCase):
         self.assertEqual(events[-1]["event"], "panorama-job-finished")
         self.assertEqual(events[-1]["pollCount"], 2)
         self.assertGreaterEqual(events[-1]["elapsedSeconds"], 0)
+        self.assertEqual(events[0]["jobType"], "Commit")
+        self.assertEqual(events[0]["queued"], "YES")
+        self.assertEqual(events[0]["positionInQueue"], 2)
+        self.assertEqual(events[0]["stoppable"], "yes")
+        self.assertEqual(events[0]["warnings"], "Waiting for another commit.")
+        self.assertTrue(events[0]["lastResponseAt"].endswith("Z"))
 
     def test_expired_lease_blocks_forward_but_allows_rollback_and_unlock(self):
         profile = PanoramaProfile(
@@ -505,6 +547,64 @@ class SessionIntegrityTests(unittest.TestCase):
             path.write_text("tampered", encoding="utf-8")
             with self.assertRaises(IntegrityError):
                 store.verify(session_id)
+
+    def test_jsonl_journal_reopens_migrates_legacy_and_detects_tamper(self):
+        profile = PanoramaProfile("pano", "admin")
+        patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(sample_mutation(),),
+            targets=("192.0.2.1",),
+            affected_device_groups=(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SessionStore(root, enforce_acl=False)
+            session_id = store.create(patch, profile)
+            store.append_event(session_id, "SECOND", {"ok": True})
+
+            reopened = SessionStore(root, enforce_acl=False)
+            self.assertEqual(reopened.load_manifest(session_id)["journal_count"], 2)
+            self.assertEqual(
+                [event["event_type"] for event in reopened.load_journal(session_id)],
+                ["SESSION_CREATED", "SECOND"],
+            )
+
+            # Recreate the v0.7.2 per-event layout, then prove that the next
+            # append migrates it to JSONL without deleting the legacy evidence.
+            directory = root / session_id
+            log_path = directory / "journal" / "events.jsonl"
+            envelopes = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            manifest_path = directory / "manifest.json"
+            manifest_envelope = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_envelope["payload"]["journal_count"] = 2
+            manifest_envelope["payload"]["journal_head_sha256"] = envelopes[-1]["sha256"]
+            from panos_toolbox.models import json_sha256
+
+            manifest_envelope["sha256"] = json_sha256(manifest_envelope["payload"])
+            manifest_path.write_text(
+                json.dumps(manifest_envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            for index, envelope in enumerate(envelopes, start=1):
+                (directory / "journal" / f"{index:06d}.json").write_text(
+                    json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            log_path.unlink()
+
+            migrated = SessionStore(root, enforce_acl=False)
+            migrated.append_event(session_id, "THIRD", {"ok": True})
+            self.assertTrue(log_path.is_file())
+            self.assertEqual(migrated.load_manifest(session_id)["journal_count"], 3)
+            self.assertTrue((directory / "journal" / "000001.json").is_file())
+
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            lines[-1] = lines[-1].replace("THIRD", "TAMPERED")
+            log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with self.assertRaises(IntegrityError):
+                SessionStore(root, enforce_acl=False).verify(session_id)
 
     def test_operation_lock_is_fail_fast(self):
         profile = PanoramaProfile("pano", "admin")

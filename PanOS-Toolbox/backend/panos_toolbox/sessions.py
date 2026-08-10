@@ -30,6 +30,7 @@ from .xmlutil import device_group_from_xpath, raw_sha256
 
 
 SCHEMA_VERSION = 1
+JOURNAL_LOG_FILE = "journal/events.jsonl"
 
 
 @dataclass(frozen=True)
@@ -276,6 +277,9 @@ class SessionStore:
         self._using_default_root = root is None
         self.root = (root or default_session_root()).expanduser().resolve()
         self.enforce_acl = enforce_acl
+        self._journal_state_cache: dict[
+            str, tuple[tuple[int, int], dict[str, Any]]
+        ] = {}
         _harden_directory(self.root, enforce=enforce_acl)
         if self._using_default_root:
             self._migrate_legacy_sessions()
@@ -567,11 +571,136 @@ class SessionStore:
             self._directory(session_id) / "manifest.json", _encode_envelope(manifest)
         )
 
+    def _read_journal_log(
+        self, session_id: str
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        path = self._directory(session_id) / JOURNAL_LOG_FILE
+        events: list[dict[str, Any]] = []
+        previous: Optional[str] = None
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise IntegrityError("Nie można odczytać dziennika JSONL sesji.") from exc
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                envelope = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise IntegrityError(
+                    f"Niepoprawny JSONL journalu w linii {line_number}."
+                ) from exc
+            payload = envelope.get("payload") if isinstance(envelope, dict) else None
+            if (
+                not isinstance(envelope, dict)
+                or envelope.get("schema_version") != SCHEMA_VERSION
+                or not isinstance(payload, dict)
+                or envelope.get("sha256") != json_sha256(payload)
+            ):
+                raise IntegrityError(
+                    f"Błędna integralność journalu w linii {line_number}."
+                )
+            expected_sequence = len(events) + 1
+            if (
+                payload.get("sequence") != expected_sequence
+                or payload.get("previous_sha256") != previous
+            ):
+                raise IntegrityError("Łańcuch journalu sesji jest przerwany.")
+            previous = json_sha256(payload)
+            events.append(payload)
+        return events, {
+            "journal_count": len(events),
+            "journal_head_sha256": previous,
+            "updated_utc": (
+                events[-1].get("timestamp_utc") if events else None
+            ),
+        }
+
+    def _journal_state(
+        self,
+        session_id: str,
+        *,
+        manifest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Read the append-only JSONL head, falling back to legacy manifest fields."""
+
+        path = self._directory(session_id) / JOURNAL_LOG_FILE
+        if not path.exists():
+            return {
+                "journal_count": int(manifest.get("journal_count", 0)),
+                "journal_head_sha256": manifest.get("journal_head_sha256"),
+                "updated_utc": manifest.get("updated_utc"),
+            }
+        stat_result = path.stat()
+        signature = (stat_result.st_size, stat_result.st_mtime_ns)
+        cached = self._journal_state_cache.get(session_id)
+        if cached is not None and cached[0] == signature:
+            state = dict(cached[1])
+        else:
+            _events, state = self._read_journal_log(session_id)
+            self._journal_state_cache[session_id] = (signature, dict(state))
+        count = int(state["journal_count"])
+        digest = state.get("journal_head_sha256")
+        manifest_count = int(manifest.get("journal_count", 0))
+        manifest_digest = manifest.get("journal_head_sha256")
+        if count < manifest_count or (
+            count == manifest_count
+            and manifest_count > 0
+            and manifest_digest
+            and digest != manifest_digest
+        ):
+            raise IntegrityError("Nagłówek journalu jest starszy lub inny niż manifest.")
+        return state
+
+    def _ensure_journal_log(self, session_id: str) -> Path:
+        """Create JSONL once, migrating legacy per-event files without deleting them."""
+
+        directory = self._directory(session_id)
+        path = directory / JOURNAL_LOG_FILE
+        if path.exists():
+            return path
+        manifest = _decode_envelope(directory / "manifest.json")
+        count = int(manifest.get("journal_count", 0))
+        previous: Optional[str] = None
+        lines: list[bytes] = []
+        for sequence in range(1, count + 1):
+            payload = _decode_envelope(
+                directory / "journal" / f"{sequence:06d}.json"
+            )
+            if (
+                payload.get("sequence") != sequence
+                or payload.get("previous_sha256") != previous
+            ):
+                raise IntegrityError("Nie można zmigrować przerwanego journalu sesji.")
+            previous = json_sha256(payload)
+            lines.append(
+                json.dumps(
+                    _envelope(payload),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
+        if previous != manifest.get("journal_head_sha256"):
+            raise IntegrityError("Head legacy journalu nie odpowiada manifestowi.")
+        _atomic_write(path, b"".join(lines))
+        self._journal_state_cache.pop(session_id, None)
+        return path
+
     def load_manifest(self, session_id: str, *, verify: bool = True) -> dict[str, Any]:
         directory = self._directory(session_id)
         manifest = _decode_envelope(directory / "manifest.json")
         if manifest.get("session_id") != session_id:
             raise IntegrityError("Manifest wskazuje inny session_id.")
+        journal_state = self._journal_state(session_id, manifest=manifest)
+        manifest["journal_count"] = journal_state["journal_count"]
+        manifest["journal_head_sha256"] = journal_state["journal_head_sha256"]
+        if journal_state.get("updated_utc"):
+            manifest["updated_utc"] = max(
+                str(manifest.get("updated_utc") or ""),
+                str(journal_state["updated_utc"]),
+            )
         if verify:
             self.verify(session_id, manifest=manifest)
         return manifest
@@ -700,22 +829,49 @@ class SessionStore:
     def append_event(
         self, session_id: str, event_type: str, details: Mapping[str, Any]
     ) -> dict[str, Any]:
-        manifest = self.load_manifest(session_id, verify=False)
-        sequence = int(manifest.get("journal_count", 0)) + 1
+        path = self._ensure_journal_log(session_id)
+        journal_state = self._journal_state(
+            session_id,
+            manifest={"journal_count": 0, "journal_head_sha256": None},
+        )
+        sequence = int(journal_state["journal_count"]) + 1
         payload = {
             "sequence": sequence,
             "timestamp_utc": utc_now(),
             "event_type": event_type,
             "details": dict(details),
-            "previous_sha256": manifest.get("journal_head_sha256"),
+            "previous_sha256": journal_state.get("journal_head_sha256"),
         }
         event_hash = json_sha256(payload)
-        relative = f"journal/{sequence:06d}.json"
-        _atomic_write(self._directory(session_id) / relative, _encode_envelope(payload))
-        manifest["journal_count"] = sequence
-        manifest["journal_head_sha256"] = event_hash
-        manifest["updated_utc"] = utc_now()
-        self._write_manifest(session_id, manifest)
+        line = (
+            json.dumps(
+                _envelope(payload),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND, 0o600)
+        try:
+            view = memoryview(line)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("Nie udało się dopisać journalu sesji.")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        stat_result = path.stat()
+        self._journal_state_cache[session_id] = (
+            (stat_result.st_size, stat_result.st_mtime_ns),
+            {
+                "journal_count": sequence,
+                "journal_head_sha256": event_hash,
+                "updated_utc": payload["timestamp_utc"],
+            },
+        )
         return payload
 
     def add_job(self, session_id: str, stage: str, job: Mapping[str, Any]) -> None:
@@ -801,6 +957,11 @@ class SessionStore:
                 "finding_digest": record.get("findingDigest"),
                 "override_requested": bool(record.get("overrideRequested")),
                 "override_applied": bool(record.get("overrideApplied")),
+                "verification_mode": record.get("verificationMode"),
+                "targeted_xpath_reads": record.get("targetedXPathReads"),
+                "native_change_summary_raw_sha256": record.get(
+                    "nativeChangeSummaryRawSha256"
+                ),
                 "artifact": record.get("artifact"),
             },
         )
@@ -859,16 +1020,33 @@ class SessionStore:
 
         current = dict(manifest or self.load_manifest(session_id, verify=False))
         directory = self._directory(session_id)
+        log_path = directory / JOURNAL_LOG_FILE
+        if log_path.exists():
+            events, journal_state = self._read_journal_log(session_id)
+            manifest_count = int(current.get("journal_count", 0))
+            if int(journal_state["journal_count"]) < manifest_count:
+                raise IntegrityError("Journal JSONL jest starszy niż manifest.")
+            if (
+                int(journal_state["journal_count"]) == manifest_count
+                and manifest_count > 0
+                and current.get("journal_head_sha256")
+                and journal_state.get("journal_head_sha256")
+                != current.get("journal_head_sha256")
+            ):
+                raise IntegrityError("Head journalu JSONL nie odpowiada manifestowi.")
+            return events
+
+        journal_state = self._journal_state(session_id, manifest=current)
         previous = None
         events: list[dict[str, Any]] = []
-        count = int(current.get("journal_count", 0))
+        count = int(journal_state["journal_count"])
         for sequence in range(1, count + 1):
             event = _decode_envelope(directory / "journal" / f"{sequence:06d}.json")
             if event.get("sequence") != sequence or event.get("previous_sha256") != previous:
                 raise IntegrityError("Łańcuch journalu sesji jest przerwany.")
             previous = json_sha256(event)
             events.append(event)
-        if previous != current.get("journal_head_sha256"):
+        if previous != journal_state.get("journal_head_sha256"):
             raise IntegrityError("Head journalu nie odpowiada manifestowi.")
         return events
 

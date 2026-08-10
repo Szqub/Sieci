@@ -35,4 +35,24 @@ describe("ExecutionProgress", () => {
     expect(screen.getByText("100%")).toBeInTheDocument();
     expect(screen.getByText("success")).toBeInTheDocument();
   });
+
+  it("distinguishes a long Panorama job from a frozen frontend", () => {
+    render(<ExecutionProgress job={{
+      ...runningCommit,
+      current: {
+        ...runningCommit.current!,
+        elapsedSeconds: 721,
+        pollCount: 361,
+        queued: "YES",
+        positionInQueue: 2,
+        lastResponseAt: "2026-08-10T10:00:00Z",
+        longRunning: true,
+        warnings: "Commit waits for another job.",
+      },
+    }} />);
+    expect(screen.getByText("Job czeka w kolejce Panoramy")).toBeInTheDocument();
+    expect(screen.getByText(/Panorama odpowiada · poll 361/)).toBeInTheDocument();
+    expect(screen.getByText(/Pozycja w kolejce: 2/)).toBeInTheDocument();
+    expect(screen.getByText("Commit waits for another job.")).toBeInTheDocument();
+  });
 });

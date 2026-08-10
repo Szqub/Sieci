@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import copy
 import json
 import hashlib
 import hmac
@@ -36,6 +38,7 @@ from .xmlutil import (
     fingerprint_element,
     fingerprint_xpath,
     parent_xpath,
+    raw_sha256,
     rule_order_context_sha256,
 )
 
@@ -94,10 +97,38 @@ def reconcile_external_execution(
             _assert_session_identity(patch, reader)
             if not patch.mutations:
                 raise ValidationError("Sesja nie zawiera operacji do uzgodnienia.")
-            running = reader.fetch_config("running")
-            candidate = reader.fetch_config("candidate")
-            running_failures = _postcondition_failures(patch.mutations, running)
-            candidate_failures = _postcondition_failures(patch.mutations, candidate)
+            full_config_reads = 0
+            targeted_xpath_reads = 0
+            running: Optional[ET.Element] = None
+            candidate: Optional[ET.Element] = None
+            try:
+                running_failures = _targeted_running_postcondition_failures(
+                    reader,
+                    patch.mutations,
+                    progress_callback=lambda done, _total, _xpath: None,
+                )
+                targeted_xpath_reads += _targeted_xpath_query_count(
+                    patch.mutations, expected_state="after"
+                )
+                if running_failures:
+                    candidate_failures = _targeted_candidate_postcondition_failures(
+                        reader, patch.mutations
+                    )
+                    targeted_xpath_reads += _targeted_xpath_query_count(
+                        patch.mutations, expected_state="after"
+                    )
+                else:
+                    candidate_failures = []
+            except Exception:
+                running = reader.fetch_config("running")
+                candidate = reader.fetch_config("candidate")
+                full_config_reads = 2
+                running_failures = _postcondition_failures(
+                    patch.mutations, running
+                )
+                candidate_failures = _postcondition_failures(
+                    patch.mutations, candidate
+                )
             if not running_failures:
                 state = SessionState.COMMITTED
                 matched = "running"
@@ -113,8 +144,36 @@ def reconcile_external_execution(
                     "Live Panorama nie odpowiada kompletnemu wynikowi wygenerowanego planu. "
                     "Brak potwierdzenia dla: " + ", ".join(sample)
                 )
-            store.write_snapshot(session_id, "external_verified_running", running)
-            store.write_snapshot(session_id, "external_verified_candidate", candidate)
+            # A candidate match still needs full trees for the mandatory
+            # commit review.  An already committed match is proven entirely by
+            # exact running XPath reads and avoids downloading either tree.
+            if state is SessionState.CANDIDATE_APPLIED and (
+                running is None or candidate is None
+            ):
+                running = reader.fetch_config("running")
+                candidate = reader.fetch_config("candidate")
+                full_config_reads += 2
+                running_failures = _postcondition_failures(
+                    patch.mutations, running
+                )
+                candidate_failures = _postcondition_failures(
+                    patch.mutations, candidate
+                )
+                if not running_failures:
+                    state = SessionState.COMMITTED
+                    matched = "running"
+                elif candidate_failures:
+                    raise ConflictError(
+                        "Live Panorama zmieniła się podczas uzgadniania wykonania zewnętrznego."
+                    )
+            if running is not None:
+                store.write_snapshot(
+                    session_id, "external_verified_running", running
+                )
+            if candidate is not None:
+                store.write_snapshot(
+                    session_id, "external_verified_candidate", candidate
+                )
             store.record_external_execution(
                 session_id,
                 state=state,
@@ -123,9 +182,12 @@ def reconcile_external_execution(
                 evidence={
                     "matchedTree": matched,
                     "mutationCount": len(patch.mutations),
+                    "targetedXPathReads": targeted_xpath_reads,
+                    "fullConfigReads": full_config_reads,
                 },
             )
             if state is SessionState.CANDIDATE_APPLIED:
+                assert running is not None and candidate is not None
                 try:
                     native_summary, native_error = _read_native_change_summary(reader)
                     baseline = _review_baseline_candidate(
@@ -832,6 +894,8 @@ def _apply_candidate_unlocked(
         Callable[[int, str, Optional[dict[str, Any]]], None]
     ] = None,
 ) -> ApplyResult:
+    started_at = time.monotonic()
+
     def progress(
         value: int, message: str, detail: Optional[dict[str, Any]] = None
     ) -> None:
@@ -840,7 +904,11 @@ def _apply_candidate_unlocked(
         # Progress is observational.  A broken browser/poller must never alter
         # the transactional outcome of a Panorama write.
         try:
-            progress_callback(max(0, min(100, value)), message, detail)
+            payload = dict(detail or {})
+            payload.setdefault(
+                "elapsedSeconds", round(time.monotonic() - started_at, 1)
+            )
+            progress_callback(max(0, min(100, value)), message, payload)
         except Exception:
             pass
 
@@ -854,17 +922,33 @@ def _apply_candidate_unlocked(
     if not patch.mutations:
         raise ValidationError("PatchSet nie zawiera żadnej bezpiecznej mutacji.")
 
-    # Full local snapshots precede even the config-lock request.  They are
-    # refreshed after locks, immediately before fingerprint checks and writes.
-    progress(4, "Pobieranie running do bezpiecznego snapshotu", None)
-    running = reader.fetch_config("running")
-    progress(11, "Pobieranie candidate przed zapisem", None)
-    candidate = reader.fetch_config("candidate")
+    # Planning already persisted integrity-checked full snapshots and entity
+    # backups.  Loading them locally avoids two redundant /config downloads
+    # before locks.  A strict live change-summary plus targeted XPath reads
+    # below decides whether they are still current; otherwise we fail over to
+    # fresh full snapshots before the first write.
+    progress(4, "Wczytywanie lokalnych snapshotów planu", None)
+    local_plan_snapshots = True
+    full_config_reads = 0
+    targeted_xpath_reads = 0
+    try:
+        running = store.load_snapshot(session_id, "plan_running")
+        candidate = store.load_snapshot(session_id, "plan_candidate")
+    except (SessionError, ValidationError):
+        local_plan_snapshots = False
+        progress(
+            6,
+            "Starszy plan nie ma snapshotów — jednorazowe pobieranie live config",
+            {"event": "candidate-snapshot-fallback", "indeterminate": True},
+        )
+        running = reader.fetch_config("running")
+        candidate = reader.fetch_config("candidate")
+        full_config_reads += 2
     store.write_snapshot(session_id, "pre_running", running)
     store.write_snapshot(session_id, "pre_candidate", candidate)
     progress(
         18,
-        "Backup każdej encji i pełne snapshoty są gotowe",
+        "Backup każdej encji i lokalne snapshoty są gotowe",
         {
             "event": "backups-ready",
             "backupCount": len(manifest.get("entity_backups") or ()),
@@ -891,12 +975,82 @@ def _apply_candidate_unlocked(
                 store.append_event(
                     session_id, "CONFIG_LOCK_ACQUIRED", {"scope": scope or "shared"}
                 )
-        progress(27, "Lock konfiguracji aktywny; ponowny odczyt candidate", None)
+        progress(27, "Lock aktywny; lekki proof i punktowe XPath", None)
 
-        # Re-fetch after lock acquisition.  Preconditions are per touched XPath;
-        # unrelated candidate changes are informational and never a blocker.
-        running = reader.fetch_config("running")
-        candidate = reader.fetch_config("candidate")
+        planned_native_raw_sha = (
+            ((manifest.get("diff_summary") or {}).get("native") or {}).get("sha256")
+        )
+        live_native, live_native_error = _read_native_change_summary(reader)
+        live_native_raw_sha = (
+            raw_sha256(ET.tostring(live_native, encoding="utf-8"))
+            if live_native is not None
+            else None
+        )
+        strict_plan_proof = bool(
+            local_plan_snapshots
+            and planned_native_raw_sha
+            and live_native_raw_sha
+            and hmac.compare_digest(
+                str(planned_native_raw_sha), str(live_native_raw_sha)
+            )
+        )
+        targeted_conflicted_components: set[str] = set()
+        targeted_conflicts: list[dict[str, Any]] = []
+        if strict_plan_proof:
+            def precondition_progress(done: int, total: int, xpath: str) -> None:
+                nonlocal targeted_xpath_reads
+                targeted_xpath_reads = done
+                progress(
+                    27 + int(8 * done / max(1, total)),
+                    f"Live precheck XPath {done}/{total}",
+                    {
+                        "event": "candidate-targeted-precheck",
+                        "completedOperations": done,
+                        "totalOperations": total,
+                        "xpath": xpath,
+                    },
+                )
+
+            targeted_failures = _targeted_candidate_precondition_failures(
+                reader,
+                patch.mutations,
+                progress_callback=precondition_progress,
+            )
+            mutation_by_id = {
+                mutation.mutation_id: mutation for mutation in patch.mutations
+            }
+            for failure in targeted_failures:
+                mutation = mutation_by_id[str(failure["mutation_id"])]
+                targeted_conflicted_components.add(mutation.component_id)
+                targeted_conflicts.append(
+                    {
+                        "stage": "candidate-targeted-precheck",
+                        "component_id": mutation.component_id,
+                        **failure,
+                    }
+                )
+            progress(
+                36,
+                "Snapshot planu potwierdzony bez pełnego pobrania /config",
+                {
+                    "event": "candidate-fast-path",
+                    "fullConfigReads": full_config_reads,
+                    "targetedXPathReads": targeted_xpath_reads,
+                },
+            )
+        else:
+            progress(
+                28,
+                "Proof planu zmienił się lub jest niedostępny — pełny live fallback",
+                {
+                    "event": "candidate-full-config-fallback",
+                    "indeterminate": True,
+                    "detail": live_native_error,
+                },
+            )
+            running = reader.fetch_config("running")
+            candidate = reader.fetch_config("candidate")
+            full_config_reads += 2
         store.write_snapshot(session_id, "pre_running", running)
         store.write_snapshot(session_id, "pre_candidate", candidate)
         history_conflicts = _restore_history_conflicts(store, manifest, patch)
@@ -919,6 +1073,8 @@ def _apply_candidate_unlocked(
                 tuple(records),
             )
         conflicted_components, conflicts = _precondition_conflicts(patch, candidate)
+        conflicted_components.update(targeted_conflicted_components)
+        conflicts.extend(targeted_conflicts)
         replanned_components, replan_conflicts = _cleanup_candidate_replan_conflicts(
             patch, candidate, manifest
         )
@@ -964,6 +1120,15 @@ def _apply_candidate_unlocked(
                 store.append_event(session_id, "SERVER_CANDIDATE_SNAPSHOT_SAVED", {})
             total_operations = sum(len(mutation.forward) for mutation in safe)
             completed_operations = 0
+            store.append_event(
+                session_id,
+                "CANDIDATE_BATCH_START",
+                {
+                    "mutation_ids": [mutation.mutation_id for mutation in safe],
+                    "mutation_count": len(safe),
+                    "operation_count": total_operations,
+                },
+            )
             for mutation in safe:
                 progress(
                     45 + int(38 * completed_operations / max(1, total_operations)),
@@ -977,23 +1142,12 @@ def _apply_candidate_unlocked(
                         "totalOperations": total_operations,
                     },
                 )
-                store.append_event(
-                    session_id, "MUTATION_START", {"mutation": mutation.to_dict()}
-                )
                 started = False
                 for operation in mutation.forward:
                     writer.apply_operation(operation)
                     if not started:
                         applied.append(mutation)
                         started = True
-                    store.append_event(
-                        session_id,
-                        "MUTATION_OPERATION_OK",
-                        {
-                            "mutation_id": mutation.mutation_id,
-                            "operation": operation.to_dict(),
-                        },
-                    )
                     completed_operations += 1
                     progress(
                         45
@@ -1020,7 +1174,23 @@ def _apply_candidate_unlocked(
             progress(86, "Walidacja candidate w Panorama", None)
             validation_job = writer.validate_candidate()
             if validation_job:
-                validation = writer.poll_job(validation_job)
+                def validation_progress(detail: dict[str, Any]) -> None:
+                    panorama_value = detail.get("panoramaProgress")
+                    mapped = (
+                        86 + int(4 * int(panorama_value) / 100)
+                        if isinstance(panorama_value, int)
+                        else 87
+                    )
+                    progress(
+                        mapped,
+                        f"Validate job {validation_job}: "
+                        f"{detail.get('status') or 'UNKNOWN'}",
+                        detail,
+                    )
+
+                validation = writer.poll_job(
+                    validation_job, progress_callback=validation_progress
+                )
                 store.add_job(session_id, "validation", validation.__dict__)
                 if not validation.succeeded:
                     raise ValidationError(
@@ -1028,6 +1198,7 @@ def _apply_candidate_unlocked(
                     )
             progress(90, "Kontrola wyniku każdej dotkniętej ścieżki", None)
             post_candidate = reader.fetch_config("candidate")
+            full_config_reads += 1
             post_failures = _postcondition_failures(safe, post_candidate)
             if post_failures:
                 raise ValidationError(
@@ -1050,6 +1221,16 @@ def _apply_candidate_unlocked(
                 session_id,
                 applied_mutation_ids=(mutation.mutation_id for mutation in safe),
                 skipped_components=skipped,
+            )
+            store.append_event(
+                session_id,
+                "CANDIDATE_BATCH_APPLIED",
+                {
+                    "mutation_ids": [mutation.mutation_id for mutation in safe],
+                    "mutation_count": len(safe),
+                    "operation_count": completed_operations,
+                    "postconditions_verified": True,
+                },
             )
             progress(
                 94,
@@ -1100,6 +1281,19 @@ def _apply_candidate_unlocked(
                     ),
                 )
             store.transition(session_id, state)
+            total_duration = round(time.monotonic() - started_at, 1)
+            store.append_event(
+                session_id,
+                "CANDIDATE_PERFORMANCE",
+                {
+                    "total_duration_seconds": total_duration,
+                    "full_config_reads": full_config_reads,
+                    "targeted_xpath_reads": targeted_xpath_reads,
+                    "plan_snapshots_reused": bool(local_plan_snapshots),
+                    "completed_operations": completed_operations,
+                    "validation_job_id": validation_job,
+                },
+            )
             progress(
                 100,
                 (
@@ -1111,6 +1305,9 @@ def _apply_candidate_unlocked(
                     "event": "complete",
                     "completedOperations": completed_operations,
                     "totalOperations": total_operations,
+                    "fullConfigReads": full_config_reads,
+                    "targetedXPathReads": targeted_xpath_reads,
+                    "elapsedSeconds": total_duration,
                 },
             )
         except OutcomeUnknownError:
@@ -1211,6 +1408,204 @@ def _check_expected_post_state(
             "Dotknięte ścieżki candidate zmieniły się po apply: "
             + ", ".join(item["mutation_id"] for item in failures)
         )
+
+
+def _target_element_from_response(
+    response: ET.Element, mutation: Mutation
+) -> Optional[ET.Element]:
+    """Extract one mutation target from a targeted PAN-OS ``action=get``.
+
+    PAN-OS returns the requested entry below ``response/result`` without its
+    complete /config ancestry.  Matching the identity from the immutable
+    before/after backup works for both present and deleted entries and avoids
+    reconstructing a fake configuration tree.
+    """
+
+    identity_xml = mutation.after_xml or mutation.before_xml
+    if not identity_xml:
+        return None
+    identity = ET.fromstring(identity_xml)
+    expected_name = identity.get("name")
+    for element in response.iter(identity.tag):
+        if expected_name is None or element.get("name") == expected_name:
+            return element
+    return None
+
+
+def _targeted_rule_order_problem(
+    mutation: Mutation, response: ET.Element
+) -> Optional[str]:
+    if mutation.entity_type != "policy" or mutation.after_xml is None:
+        return None
+    expected = ET.fromstring(mutation.after_xml)
+    name = expected.get("name")
+    if not name:
+        return "Nie można ustalić nazwy odtwarzanej polityki."
+    rules = next(response.iter("rules"), None)
+    result = response.find("./result")
+    entries = (
+        rules.findall("./entry")
+        if rules is not None
+        else result.findall("./entry") if result is not None else []
+    )
+    names = [entry.get("name") for entry in entries if entry.get("name")]
+    if name not in names:
+        return "Odtworzona polityka nie występuje w kolejności rulebase."
+    index = names.index(name)
+    if mutation.order_previous:
+        if mutation.order_previous not in names:
+            return f"Brakuje historycznego poprzednika {mutation.order_previous}."
+        if names.index(mutation.order_previous) + 1 != index:
+            return f"Polityka nie znajduje się bezpośrednio po {mutation.order_previous}."
+    elif index != 0:
+        return "Polityka bez poprzednika nie została odtworzona na pozycji top."
+    if mutation.order_next:
+        if mutation.order_next not in names:
+            return f"Brakuje historycznego następnika {mutation.order_next}."
+        if index + 1 != names.index(mutation.order_next):
+            return f"Polityka nie znajduje się bezpośrednio przed {mutation.order_next}."
+    elif index != len(names) - 1:
+        return "Polityka bez następnika nie została odtworzona na pozycji bottom."
+    return None
+
+
+def _targeted_candidate_state_failures(
+    reader: PanoramaReadClient,
+    mutations: Iterable[Mutation],
+    *,
+    expected_state: str,
+    config_type: str = "candidate",
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> list[dict[str, Any]]:
+    """Verify touched entries with small concurrent XPath reads."""
+
+    if expected_state not in {"before", "after"}:
+        raise ValueError("expected_state must be before or after")
+    if config_type not in {"running", "candidate"}:
+        raise ValueError("config_type must be running or candidate")
+
+    selected = tuple(mutations)
+    queries = {mutation.target_xpath for mutation in selected}
+    queries.update(
+        parent_xpath(mutation.target_xpath)
+        for mutation in selected
+        if expected_state == "after"
+        and mutation.entity_type == "policy"
+        and mutation.after_xml is not None
+    )
+    responses: dict[str, ET.Element] = {}
+
+    def fetch(xpath: str) -> tuple[str, ET.Element]:
+        return xpath, reader.fetch_xpath(xpath, config_type=config_type)
+
+    total = len(queries)
+    completed = 0
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(8, max(1, total))
+    ) as pool:
+        futures = [pool.submit(fetch, xpath) for xpath in sorted(queries)]
+        for future in concurrent.futures.as_completed(futures):
+            xpath, response = future.result()
+            responses[xpath] = response
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, total, xpath)
+
+    failures: list[dict[str, Any]] = []
+    for mutation in selected:
+        current = _target_element_from_response(
+            responses[mutation.target_xpath], mutation
+        )
+        current_sha = fingerprint_element(current)
+        expected_sha = (
+            mutation.after_sha256
+            if expected_state == "after"
+            else mutation.before_sha256
+        )
+        if current_sha != expected_sha:
+            failures.append(
+                {
+                    "mutation_id": mutation.mutation_id,
+                    "xpath": mutation.target_xpath,
+                    "expected_sha256": expected_sha,
+                    "current_sha256": current_sha,
+                }
+            )
+            continue
+        if (
+            expected_state == "after"
+            and mutation.entity_type == "policy"
+            and mutation.after_xml is not None
+        ):
+            order_problem = _targeted_rule_order_problem(
+                mutation, responses[parent_xpath(mutation.target_xpath)]
+            )
+            if order_problem:
+                failures.append(
+                    {
+                        "mutation_id": mutation.mutation_id,
+                        "xpath": mutation.target_xpath,
+                        "reason": order_problem,
+                    }
+                )
+    return failures
+
+
+def _targeted_xpath_query_count(
+    mutations: Iterable[Mutation], *, expected_state: str
+) -> int:
+    selected = tuple(mutations)
+    queries = {mutation.target_xpath for mutation in selected}
+    if expected_state == "after":
+        queries.update(
+            parent_xpath(mutation.target_xpath)
+            for mutation in selected
+            if mutation.entity_type == "policy" and mutation.after_xml is not None
+        )
+    return len(queries)
+
+
+def _targeted_candidate_precondition_failures(
+    reader: PanoramaReadClient,
+    mutations: Iterable[Mutation],
+    *,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> list[dict[str, Any]]:
+    return _targeted_candidate_state_failures(
+        reader,
+        mutations,
+        expected_state="before",
+        progress_callback=progress_callback,
+    )
+
+
+def _targeted_candidate_postcondition_failures(
+    reader: PanoramaReadClient,
+    mutations: Iterable[Mutation],
+    *,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> list[dict[str, Any]]:
+    return _targeted_candidate_state_failures(
+        reader,
+        mutations,
+        expected_state="after",
+        progress_callback=progress_callback,
+    )
+
+
+def _targeted_running_postcondition_failures(
+    reader: PanoramaReadClient,
+    mutations: Iterable[Mutation],
+    *,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> list[dict[str, Any]]:
+    return _targeted_candidate_state_failures(
+        reader,
+        mutations,
+        expected_state="after",
+        config_type="running",
+        progress_callback=progress_callback,
+    )
 
 
 def _scope_guard_override_matches(
@@ -1345,9 +1740,18 @@ def _commit_session_unlocked(
         allowed=allow_scope_guard_override,
         acknowledged_digest=acknowledged_scope_guard_digest,
     )
+    previous_guard = manifest.get("precommit_guard") or {}
+    previous_override_accepted = bool(
+        isinstance(previous_guard, dict)
+        and _scope_guard_override_matches(
+            previous_guard,
+            allowed=allow_scope_guard_override,
+            acknowledged_digest=acknowledged_scope_guard_digest,
+        )
+    )
     if (
         not review.get("commitReady") or not review_guard.get("passed")
-    ) and not review_override_accepted:
+    ) and not (review_override_accepted or previous_override_accepted):
         raise ConflictError(
             "Commit zablokowany przez scope guard z przeglądu. "
             + _scope_guard_block_detail(review_guard)
@@ -1356,9 +1760,9 @@ def _commit_session_unlocked(
         )
 
     # The expensive two-tree review was already generated immediately after
-    # Candidate.  Commit now reads only live candidate and a small native
-    # change-summary before dispatch.  A full running read is a compatibility
-    # fallback only when PAN-OS does not expose change-summary.
+    # Candidate.  Commit first proves the unchanged lightweight change-summary
+    # and rechecks only touched XPath values.  Full candidate/running downloads
+    # are compatibility fallbacks, never the normal path.
     progress(5, "Sprawdzanie locków konfiguracji i commit", {"event": "lock-check"})
     reader.show_config_locks()
     reader.show_commit_locks()
@@ -1373,64 +1777,255 @@ def _commit_session_unlocked(
             writer.acquire_config_lock(scope, f"PanOS Toolbox commit {session_id}")
             acquired.append(scope)
             store.append_event(session_id, "CONFIG_LOCK_ACQUIRED", {"scope": scope or "shared"})
+        proof_guard = previous_guard if previous_override_accepted else review_guard
+        review_native = review.get("native") or {}
+        reviewed_native_sha = (
+            proof_guard.get("nativeChangeSummarySemanticSha256")
+            if previous_override_accepted
+            else None
+        ) or review_native.get("semanticSha256")
+        reviewed_native_raw_sha = (
+            proof_guard.get("nativeChangeSummaryRawSha256")
+            if previous_override_accepted
+            else None
+        ) or review_native.get("rawSha256")
+        reviewed_candidate = review.get("candidate") or {}
+        reviewed_candidate_sha = (
+            proof_guard.get("candidateSemanticSha256")
+            if previous_override_accepted
+            else None
+        ) or reviewed_candidate.get("semanticSha256")
+        review_running = store.load_snapshot(session_id, "review_running")
+        current_native: Optional[ET.Element]
+        current_native_error: Optional[str]
+
         progress(
             15,
-            "Preflight: job commit NIE został jeszcze wysłany — pobieranie jedynego live candidate",
-            {"event": "preflight-candidate", "indeterminate": True, "jobDispatched": False},
+            "Preflight: lekki proof change-summary — pełny candidate nie jest jeszcze pobierany",
+            {
+                "event": "preflight-change-proof",
+                "jobDispatched": False,
+                "fullConfigReads": 0,
+            },
         )
-        candidate = reader.fetch_config("candidate")
-        full_config_reads += 1
-        store.write_snapshot(session_id, "pre_commit_candidate", candidate)
-        progress(
-            24,
-            "Preflight: sprawdzanie fingerprintów i zgodności z pokazanym diffem",
-            {"event": "fingerprint-check", "jobDispatched": False},
+        current_native, current_native_error = _read_native_change_summary(reader)
+        current_native_sha = (
+            fingerprint_element(current_native) if current_native is not None else None
         )
-        try:
-            _check_expected_post_state(patch, candidate, applied_ids)
-        except ConflictError as exc:
-            store.add_conflicts(session_id, [{"stage": "pre-commit", "detail": str(exc)}])
-            raise
-        reviewed_candidate = review.get("candidate") or {}
-        reviewed_candidate_sha = reviewed_candidate.get("semanticSha256")
-        live_candidate_sha = fingerprint_element(candidate)
-        if not reviewed_candidate_sha or live_candidate_sha != reviewed_candidate_sha:
+        current_native_raw_sha = (
+            raw_sha256(ET.tostring(current_native, encoding="utf-8"))
+            if current_native is not None
+            else None
+        )
+        if (
+            current_native_sha
+            and reviewed_native_sha
+            and current_native_sha != reviewed_native_sha
+        ):
             detail = (
-                "Candidate zmienił się po przygotowaniu przeglądu. Commit nie został "
-                "wysłany; odśwież pełny diff i scope guard."
+                "Panorama change-summary zmienił się od wygenerowania diffu. "
+                "Commit nie został wysłany; odśwież przegląd."
             )
             store.add_conflicts(
                 session_id,
                 [
                     {
                         "stage": "pre-commit",
-                        "reason": "REVIEWED_CANDIDATE_CHANGED",
+                        "reason": "RUNNING_OR_CHANGE_SUMMARY_CHANGED",
                         "detail": detail,
-                        "reviewed_sha256": reviewed_candidate_sha,
-                        "live_sha256": live_candidate_sha,
+                        "reviewed_sha256": reviewed_native_sha,
+                        "live_sha256": current_native_sha,
                     }
                 ],
             )
             raise ConflictError(detail)
 
-        progress(
-            28,
-            "Preflight: ponowny pełny scope guard zależności",
-            {"event": "preflight-scope-guard", "jobDispatched": False},
+        strict_change_proof = bool(
+            current_native_raw_sha
+            and reviewed_native_raw_sha
+            and hmac.compare_digest(
+                str(current_native_raw_sha), str(reviewed_native_raw_sha)
+            )
         )
-        review_running = store.load_snapshot(session_id, "review_running")
-        baseline_candidate = _review_baseline_candidate(
-            store, session_id, fallback=review_running
+        applied_set = set(applied_ids)
+        selected_mutations = tuple(
+            mutation
+            for mutation in patch.mutations
+            if mutation.mutation_id in applied_set
         )
-        live_guard = build_scope_guard(
-            running=review_running,
-            baseline_candidate=baseline_candidate,
-            candidate=candidate,
-            patch=patch,
-            applied_mutation_ids=applied_ids,
-        )
+        targeted_reads = 0
+        if strict_change_proof:
+            progress(
+                17,
+                "Change-summary bez zmian — punktowa kontrola dotkniętych XPath",
+                {
+                    "event": "preflight-targeted-xpaths",
+                    "jobDispatched": False,
+                    "totalOperations": len(selected_mutations),
+                },
+            )
+
+            def targeted_progress(done: int, total: int, xpath: str) -> None:
+                nonlocal targeted_reads
+                targeted_reads = done
+                mapped = 17 + int(7 * done / max(1, total))
+                progress(
+                    mapped,
+                    f"Punktowa kontrola candidate {done}/{total}",
+                    {
+                        "event": "preflight-targeted-xpaths",
+                        "jobDispatched": False,
+                        "completedOperations": done,
+                        "totalOperations": total,
+                        "xpath": xpath,
+                    },
+                )
+
+            targeted_failures = _targeted_candidate_postcondition_failures(
+                reader,
+                selected_mutations,
+                progress_callback=targeted_progress,
+            )
+            if targeted_failures:
+                detail = (
+                    "Dotknięte ścieżki candidate zmieniły się po przeglądzie: "
+                    + ", ".join(
+                        str(item["mutation_id"])
+                        for item in targeted_failures[:10]
+                    )
+                )
+                store.add_conflicts(
+                    session_id,
+                    [
+                        {"stage": "pre-commit-targeted-xpath", **item}
+                        for item in targeted_failures
+                    ],
+                )
+                raise ConflictError(detail)
+
+            # Close the gap between the first change proof and concurrent XPath
+            # reads.  Any edit during that window switches to the authoritative
+            # full-config fallback instead of being trusted.
+            final_native, final_native_error = _read_native_change_summary(reader)
+            final_native_raw_sha = (
+                raw_sha256(ET.tostring(final_native, encoding="utf-8"))
+                if final_native is not None
+                else None
+            )
+            strict_change_proof = bool(
+                final_native_raw_sha
+                and reviewed_native_raw_sha
+                and hmac.compare_digest(
+                    str(final_native_raw_sha), str(reviewed_native_raw_sha)
+                )
+            )
+            current_native = final_native
+            current_native_error = final_native_error
+
+        if strict_change_proof:
+            candidate = store.load_snapshot(
+                session_id,
+                "pre_commit_candidate" if previous_override_accepted else "review_candidate",
+            )
+            live_candidate_sha = fingerprint_element(candidate)
+            if not reviewed_candidate_sha or live_candidate_sha != reviewed_candidate_sha:
+                raise ValidationError(
+                    "Lokalny snapshot review_candidate nie zgadza się z manifestem sesji."
+                )
+            store.write_snapshot(session_id, "pre_commit_candidate", candidate)
+            live_guard = copy.deepcopy(proof_guard)
+            live_guard["verificationMode"] = (
+                "strict-change-summary+targeted-candidate-xpaths"
+            )
+            live_guard["targetedXPathReads"] = targeted_reads
+            progress(
+                28,
+                "Szybki preflight PASS — bez ponownego pobierania pełnego candidate",
+                {
+                    "event": "preflight-fast-path",
+                    "jobDispatched": False,
+                    "fullConfigReads": 0,
+                    "targetedXPathReads": targeted_reads,
+                },
+            )
+        else:
+            progress(
+                18,
+                "Brak stabilnego proof change-summary — awaryjne pobieranie pełnego live candidate",
+                {
+                    "event": "preflight-candidate-fallback",
+                    "indeterminate": True,
+                    "jobDispatched": False,
+                    "detail": current_native_error,
+                },
+            )
+            candidate = reader.fetch_config("candidate")
+            full_config_reads += 1
+            store.write_snapshot(session_id, "pre_commit_candidate", candidate)
+            progress(
+                24,
+                "Preflight fallback: fingerprinty i zgodność z pokazanym diffem",
+                {"event": "fingerprint-check", "jobDispatched": False},
+            )
+            try:
+                _check_expected_post_state(patch, candidate, applied_ids)
+            except ConflictError as exc:
+                store.add_conflicts(
+                    session_id, [{"stage": "pre-commit", "detail": str(exc)}]
+                )
+                raise
+            live_candidate_sha = fingerprint_element(candidate)
+            if not reviewed_candidate_sha or live_candidate_sha != reviewed_candidate_sha:
+                detail = (
+                    "Candidate zmienił się po przygotowaniu przeglądu. Commit nie został "
+                    "wysłany; odśwież pełny diff i scope guard."
+                )
+                store.add_conflicts(
+                    session_id,
+                    [
+                        {
+                            "stage": "pre-commit",
+                            "reason": "REVIEWED_CANDIDATE_CHANGED",
+                            "detail": detail,
+                            "reviewed_sha256": reviewed_candidate_sha,
+                            "live_sha256": live_candidate_sha,
+                        }
+                    ],
+                )
+                raise ConflictError(detail)
+
+            progress(
+                28,
+                "Preflight fallback: ponowny pełny scope guard zależności",
+                {"event": "preflight-scope-guard", "jobDispatched": False},
+            )
+            baseline_candidate = _review_baseline_candidate(
+                store, session_id, fallback=review_running
+            )
+            live_guard = build_scope_guard(
+                running=review_running,
+                baseline_candidate=baseline_candidate,
+                candidate=candidate,
+                patch=patch,
+                applied_mutation_ids=applied_ids,
+            )
+            live_guard["verificationMode"] = "full-candidate-fallback"
+            # Use a fresh proof after the fallback snapshot so edits during the
+            # download cannot slip between review and dispatch.
+            current_native, current_native_error = _read_native_change_summary(reader)
+
         live_guard["candidateSemanticSha256"] = live_candidate_sha
         live_guard["reviewGeneratedAt"] = review.get("generatedAt")
+        live_guard["nativeChangeSummarySemanticSha256"] = (
+            fingerprint_element(current_native)
+            if current_native is not None
+            else None
+        )
+        live_guard["nativeChangeSummaryRawSha256"] = (
+            raw_sha256(ET.tostring(current_native, encoding="utf-8"))
+            if current_native is not None
+            else None
+        )
         live_override_accepted = _scope_guard_override_matches(
             live_guard,
             allowed=allow_scope_guard_override,
@@ -1509,9 +2104,6 @@ def _commit_session_unlocked(
             "Preflight: potwierdzanie, że running nie zmienił się od przeglądu",
             {"event": "preflight-running-proof", "jobDispatched": False},
         )
-        review_native = review.get("native") or {}
-        reviewed_native_sha = review_native.get("semanticSha256")
-        current_native, current_native_error = _read_native_change_summary(reader)
         if current_native is not None and reviewed_native_sha:
             current_native_sha = fingerprint_element(current_native)
             if current_native_sha != reviewed_native_sha:
@@ -1773,10 +2365,17 @@ def _push_session_unlocked(
         )
     application = manifest.get("candidate_application") or {}
     applied_ids = application.get("applied_mutation_ids") or []
-    # Push sends committed running state.  Candidate is not part of commit-all,
-    # so downloading it twice added latency without strengthening the gate.
-    # One live running snapshot after config locks is sufficient for the
-    # postcondition check and durable pre-push evidence.
+    applied_set = set(applied_ids)
+    selected_mutations = tuple(
+        mutation
+        for mutation in patch.mutations
+        if mutation.mutation_id in applied_set
+    )
+    if not selected_mutations:
+        raise SessionError("Manifest nie zawiera mutacji potwierdzonych po commit.")
+    # Push sends committed running state.  Candidate is not part of commit-all.
+    # Normal preflight therefore checks only the touched running XPath values;
+    # a full /config read is retained solely as a compatibility fallback.
     progress(5, "Sprawdzanie locków konfiguracji i commit", {"event": "lock-check"})
     reader.show_config_locks()
     reader.show_commit_locks()
@@ -1784,22 +2383,89 @@ def _push_session_unlocked(
     dispatched = False
     terminal_job_result = False
     job_succeeded = False
+    full_config_reads = 0
+    targeted_xpath_reads = 0
     try:
         progress(10, "Zakładanie locków dla zakresu push", {"event": "lock-acquire"})
         for scope in _direct_lock_scopes(patch):
             writer.acquire_config_lock(scope, f"PanOS Toolbox push {session_id}")
             acquired.append(scope)
             store.append_event(session_id, "CONFIG_LOCK_ACQUIRED", {"scope": scope or "shared"})
-        progress(18, "Pobieranie jednego live running przed push", {"event": "snapshot-running"})
-        pre_push_running = reader.fetch_config("running")
-        store.write_snapshot(session_id, "pre_push_running", pre_push_running)
-        progress(30, "Sprawdzanie fingerprintów committed state", {"event": "fingerprint-check"})
+        progress(
+            18,
+            "Punktowa kontrola committed running przed push",
+            {
+                "event": "pre-push-targeted-xpaths",
+                "totalOperations": len(selected_mutations),
+                "fullConfigReads": 0,
+            },
+        )
+
+        def targeted_progress(done: int, total: int, xpath: str) -> None:
+            nonlocal targeted_xpath_reads
+            targeted_xpath_reads = done
+            mapped = 18 + int(12 * done / max(1, total))
+            progress(
+                mapped,
+                f"Kontrola running {done}/{total}",
+                {
+                    "event": "pre-push-targeted-xpaths",
+                    "completedOperations": done,
+                    "totalOperations": total,
+                    "xpath": xpath,
+                    "fullConfigReads": 0,
+                },
+            )
+
+        targeted_failures: list[dict[str, Any]]
         try:
-            _check_expected_post_state(patch, pre_push_running, applied_ids)
-        except ConflictError as exc:
-            store.add_conflicts(session_id, [{"stage": "pre-push", "detail": str(exc)}])
+            targeted_failures = _targeted_running_postcondition_failures(
+                reader,
+                selected_mutations,
+                progress_callback=targeted_progress,
+            )
+        except Exception as targeted_error:
+            progress(
+                22,
+                "Punktowa kontrola niedostępna — awaryjny pełny odczyt running",
+                {
+                    "event": "pre-push-running-fallback",
+                    "indeterminate": True,
+                    "detail": f"{type(targeted_error).__name__}: {targeted_error}",
+                },
+            )
+            pre_push_running = reader.fetch_config("running")
+            full_config_reads += 1
+            store.write_snapshot(session_id, "pre_push_running", pre_push_running)
+            targeted_failures = _postcondition_failures(
+                selected_mutations, pre_push_running
+            )
+        if targeted_failures:
+            detail = (
+                "Dotknięty committed running zmienił się przed push: "
+                + ", ".join(
+                    str(item["mutation_id"])
+                    for item in targeted_failures[:10]
+                )
+            )
+            store.add_conflicts(
+                session_id,
+                [
+                    {"stage": "pre-push", **item}
+                    for item in targeted_failures
+                ],
+            )
             store.transition(session_id, SessionState.CONFLICT)
-            raise
+            raise ConflictError(detail)
+        progress(
+            30,
+            "Committed running zgodny z planem",
+            {
+                "event": "pre-push-fingerprint-pass",
+                "fullConfigReads": full_config_reads,
+                "targetedXPathReads": targeted_xpath_reads,
+            },
+        )
         store.add_risk(
             session_id,
             "PUSH_NOT_ADMIN_ISOLATED",
@@ -1861,7 +2527,8 @@ def _push_session_unlocked(
                 "total_duration_seconds": total_duration,
                 "panorama_job_duration_seconds": job_record["duration_seconds"],
                 "phase_timeline_seconds": dict(phase_timeline),
-                "full_config_reads": 1,
+                "full_config_reads": full_config_reads,
+                "targeted_xpath_reads": targeted_xpath_reads,
             },
         )
         return {**job_record, "phase_timeline_seconds": dict(phase_timeline), "total_duration_seconds": total_duration}

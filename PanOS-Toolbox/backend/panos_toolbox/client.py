@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Protocol
 
 from .errors import (
@@ -22,7 +23,7 @@ from .errors import (
 )
 from .models import ApiStage, MutationAction, MutationOperation
 from .profile import PanoramaProfile, WriteLease
-from .xmlutil import parse_api_response
+from .xmlutil import parse_api_response, raw_sha256
 
 
 class XMLTransport(Protocol):
@@ -79,7 +80,7 @@ class UrllibXMLTransport:
             self.profile.base_url,
             data=urllib.parse.urlencode(params).encode("utf-8"),
             headers={
-                "User-Agent": "ByteTech-PanOS-Toolbox/0.7.2",
+                "User-Agent": "ByteTech-PanOS-Toolbox/0.7.3",
                 "Content-Type": "application/x-www-form-urlencoded",
                 **headers,
             },
@@ -146,6 +147,7 @@ class PanoramaReadClient:
         self.transport: XMLTransport = transport or UrllibXMLTransport(profile)
         self._api_key: Optional[str] = None
         self._config_cache: dict[str, tuple[float, ET.Element]] = {}
+        self._config_cache_proof_sha256: Optional[str] = None
         self._device_group_cache: Optional[tuple[str, ...]] = None
 
     def _post(self, params: Mapping[str, str], *, mutating: bool = False) -> ET.Element:
@@ -186,12 +188,93 @@ class PanoramaReadClient:
             return copy.deepcopy(cached[1])
         return self.fetch_config(config_type)
 
+    def fetch_config_pair_coherent(
+        self,
+        *,
+        max_age_seconds: float = 1800.0,
+        copy_cached: bool = True,
+        progress_callback: Optional[Callable[[str, int], None]] = None,
+    ) -> tuple[ET.Element, ET.Element, Optional[ET.Element], bool, Optional[str]]:
+        """Return one coherent running/candidate pair with proof-based reuse.
+
+        A TTL alone is not evidence that a huge cached Panorama configuration
+        is still current.  The lightweight native change-summary is used as a
+        strict cache key.  A first read downloads both trees; later analyses on
+        an unchanged candidate reuse them without another /config transfer.
+        """
+
+        callback = progress_callback or (lambda _stage, _attempt: None)
+        try:
+            before_summary = self.change_summary()
+        except Exception as exc:
+            # Older PAN-OS variants may not expose change-summary.  Read-only
+            # analysis may still use the bounded cache; Candidate execution
+            # independently performs its fail-closed live preflight.
+            cached_before = all(
+                kind in self._config_cache
+                and time.monotonic() - self._config_cache[kind][0] <= max_age_seconds
+                for kind in ("running", "candidate")
+            )
+            callback("running", 1)
+            running = self.fetch_config_cached(
+                "running", max_age_seconds=max_age_seconds
+            )
+            callback("candidate", 1)
+            candidate = self.fetch_config_cached(
+                "candidate", max_age_seconds=max_age_seconds
+            )
+            return (
+                running,
+                candidate,
+                None,
+                cached_before,
+                f"{type(exc).__name__}: {exc}",
+            )
+
+        before_proof = raw_sha256(ET.tostring(before_summary, encoding="utf-8"))
+        cache_is_fresh = all(
+            kind in self._config_cache
+            and time.monotonic() - self._config_cache[kind][0] <= max_age_seconds
+            for kind in ("running", "candidate")
+        )
+        if cache_is_fresh and self._config_cache_proof_sha256 == before_proof:
+            callback("cache", 0)
+            running_cached = self._config_cache["running"][1]
+            candidate_cached = self._config_cache["candidate"][1]
+            return (
+                copy.deepcopy(running_cached) if copy_cached else running_cached,
+                copy.deepcopy(candidate_cached) if copy_cached else candidate_cached,
+                before_summary,
+                True,
+                None,
+            )
+
+        for attempt in (1, 2):
+            callback("running", attempt)
+            running = self.fetch_config("running")
+            callback("candidate", attempt)
+            candidate = self.fetch_config("candidate")
+            after_summary = self.change_summary()
+            after_proof = raw_sha256(
+                ET.tostring(after_summary, encoding="utf-8")
+            )
+            if before_proof == after_proof:
+                self._config_cache_proof_sha256 = after_proof
+                return running, candidate, after_summary, False, None
+            before_summary = after_summary
+            before_proof = after_proof
+        self.invalidate_config_cache("running", "candidate")
+        raise TransportError(
+            "Candidate zmieniał się podczas pobierania snapshotu; spróbuj ponownie po zakończeniu innych zmian."
+        )
+
     def invalidate_config_cache(self, *config_types: str) -> None:
         """Forget cached trees after a local mutation or commit attempt."""
 
         targets = config_types or tuple(self._config_cache)
         for config_type in targets:
             self._config_cache.pop(config_type, None)
+        self._config_cache_proof_sha256 = None
 
     def fetch_xpath(self, xpath: str, *, config_type: str = "running") -> ET.Element:
         """Read one exact configuration XPath without downloading ``/config``.
@@ -270,6 +353,7 @@ class PanoramaReadClient:
     def close(self) -> None:
         self._api_key = None
         self._config_cache.clear()
+        self._config_cache_proof_sha256 = None
         self._device_group_cache = None
 
 
@@ -488,6 +572,18 @@ class PanoramaWriteClient:
                 panorama_progress = max(0, min(100, int(float(raw_progress))))
             except (TypeError, ValueError):
                 panorama_progress = None
+            queued = (job.findtext("./queued") or "").strip().upper() or None
+            position_text = (job.findtext("./positionInQ") or "").strip()
+            try:
+                position_in_queue: Optional[int] = int(position_text)
+            except (TypeError, ValueError):
+                position_in_queue = None
+            elapsed_seconds = round(time.monotonic() - started, 1)
+            warnings = " ".join(
+                (line.text or "").strip()
+                for line in job.findall("./warnings/line")
+                if (line.text or "").strip()
+            )[:1000]
             progress_event = {
                 "event": "panorama-job-finished" if status == "FIN" else "panorama-job-poll",
                 "jobId": job_id,
@@ -496,7 +592,16 @@ class PanoramaWriteClient:
                 "panoramaProgress": panorama_progress,
                 "details": details,
                 "pollCount": poll_count,
-                "elapsedSeconds": round(time.monotonic() - started, 1),
+                "elapsedSeconds": elapsed_seconds,
+                "jobType": (job.findtext("./type") or "").strip() or None,
+                "queued": queued,
+                "positionInQueue": position_in_queue,
+                "stoppable": (job.findtext("./stoppable") or "").strip() or None,
+                "warnings": warnings or None,
+                "lastResponseAt": datetime.now(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "longRunning": elapsed_seconds >= 120,
             }
             if progress_callback is not None:
                 # UI telemetry must never influence the outcome of a Panorama job.

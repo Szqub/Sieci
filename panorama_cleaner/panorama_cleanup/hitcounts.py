@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 import io
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Mapping, Optional
+from typing import Callable, Dict, Iterable, List, Mapping, Optional
 
 from .models import RuleHitCount, RuleKey, SnapshotError, TransportError
 
@@ -20,18 +21,21 @@ def collect_rule_hit_counts(
     *,
     now: Optional[datetime] = None,
     recent_days: int = DEFAULT_RECENT_DAYS,
+    workers: int = 8,
+    progress_callback: Optional[Callable[[int, int, RuleKey], None]] = None,
 ) -> Dict[RuleKey, RuleHitCount]:
-    """Query only rulebase buckets that contain policies planned for deletion."""
+    """Query relevant policies concurrently with a bounded Panorama load."""
 
     if recent_days < 1 or recent_days > 3650:
         raise ValueError("recent_days musi być w zakresie 1..3650")
+    if workers < 1 or workers > 16:
+        raise ValueError("workers musi być w zakresie 1..16")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    results: Dict[RuleKey, RuleHitCount] = {}
-    transport_failure: Optional[str] = None
-    for rule in sorted(set(rules)):
-        if transport_failure is not None:
-            results[rule] = _error_result(rule, transport_failure)
-            continue
+    selected = tuple(sorted(set(rules)))
+    if not selected:
+        return {}
+
+    def read_one(rule: RuleKey) -> tuple[RuleKey, RuleHitCount]:
         command = build_hit_count_command(
             rule.location,
             rule.rulebase,
@@ -40,24 +44,40 @@ def collect_rule_hit_counts(
         )
         try:
             response = client.run_op_show(command)
-            results[rule] = _parse_rule_response(
+            return rule, _parse_rule_response(
                 response, rule, current, recent_days
             )
         except TransportError as exc:
-            transport_failure = (
-                "Transport XML API podczas odczytu last-hit: " + str(exc)
+            return rule, _error_result(
+                rule, "Transport XML API podczas odczytu last-hit: " + str(exc)
             )
-            results[rule] = _error_result(rule, transport_failure)
         except SnapshotError as exc:
             detail = "Odpowiedź last-hit odrzucona: " + str(exc)
-            results[rule] = _error_result(rule, detail)
+            return rule, _error_result(rule, detail)
         except Exception as exc:  # hit-count must never block command publication
             detail = (
                 "Nieoczekiwany błąd pomocniczego odczytu last-hit "
                 f"({type(exc).__name__}): {exc}"
             )
-            results[rule] = _error_result(rule, detail)
-    return results
+            return rule, _error_result(rule, detail)
+
+    results: Dict[RuleKey, RuleHitCount] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(workers, len(selected)),
+        thread_name_prefix="panos-last-hit",
+    ) as pool:
+        futures = [pool.submit(read_one, rule) for rule in selected]
+        for completed, future in enumerate(
+            concurrent.futures.as_completed(futures), start=1
+        ):
+            rule, result = future.result()
+            results[rule] = result
+            if progress_callback is not None:
+                try:
+                    progress_callback(completed, len(selected), rule)
+                except Exception:
+                    pass
+    return {rule: results[rule] for rule in selected}
 
 
 def build_hit_count_command(
