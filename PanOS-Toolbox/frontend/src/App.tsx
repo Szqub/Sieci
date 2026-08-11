@@ -91,6 +91,37 @@ function saveBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+function demoHandModeArtifact(artifact: string, workflow: "cleanup" | "restore"): string | null {
+  const cleanupCommands = [
+    'delete device-group "DG-PROD-EU" pre-rulebase security rules "Allow-Legacy-API"',
+    'delete device-group "DG-PROD-EU" address-group "GRP-Legacy-Servers" static "srv-legacy-01"',
+    'delete device-group "DG-PROD-EU" address "srv-legacy-01"',
+  ];
+  const restoreCommands = [
+    'set device-group "DG-PROD-EU" address "payments-node-01" ip-netmask "10.42.8.17/32"',
+    'set device-group "DG-PROD-EU" address-group "GRP-Payments-Nodes" static "payments-node-01"',
+  ];
+  const commands = workflow === "cleanup" ? cleanupCommands : restoreCommands;
+  if (artifact === "commands" || artifact === "commands.txt") return `${commands.join("\n")}\n`;
+  if (artifact === "handmode_rollback.txt") {
+    const rollback = workflow === "cleanup"
+      ? [
+          'set device-group "DG-PROD-EU" address "srv-legacy-01" ip-netmask "10.42.16.19/32"',
+          'set device-group "DG-PROD-EU" address-group "GRP-Legacy-Servers" static "srv-legacy-01"',
+          'set device-group "DG-PROD-EU" pre-rulebase security rules "Allow-Legacy-API" action "allow"',
+        ]
+      : [
+          'delete device-group "DG-PROD-EU" address-group "GRP-Payments-Nodes" static "payments-node-01"',
+          'delete device-group "DG-PROD-EU" address "payments-node-01"',
+        ];
+    return `${rollback.join("\n")}\n`;
+  }
+  if (artifact === "handmode_conflict_restore_commands.txt") return 'set device-group "DG-PROD-EU" pre-rulebase security rules "Allow-Payments" action "allow"\n';
+  if (artifact === "handmode_conflict_restore_rollback.txt") return 'delete device-group "DG-PROD-EU" pre-rulebase security rules "Allow-Payments"\n';
+  if (artifact.includes("handmode") && artifact.includes("instructions")) return "STATUS: READY\nKomendy są przeznaczone do trybu configure (#). Commit i push wykonaj osobno po show | compare.\n";
+  return null;
+}
+
 export default function App() {
   const [view, setView] = useState<ViewId>("connection");
   const [theme, setTheme] = useState<"light" | "dark">(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
@@ -581,8 +612,9 @@ export default function App() {
     if (!cleanupPlan) return;
     setStageBusy("download"); setError(null);
     try {
+      const demoContent = demoMode && demoApi ? demoHandModeArtifact(artifact, "cleanup") : null;
       const blob = demoMode && demoApi
-        ? new Blob([artifact === "commands" ? demoApi.demoCleanupPlan.operations.map((operation) => `${operation.action} ${operation.xpath}`).join("\n") : JSON.stringify(demoApi.demoCleanupPlan, null, 2)], { type: "text/plain" })
+        ? new Blob([demoContent ?? JSON.stringify(demoApi.demoCleanupPlan, null, 2)], { type: "text/plain" })
         : await api.downloadSessionArtifact(cleanupPlan.sessionId, artifact);
       const aliasName = artifact === "commands" ? "commands.txt" : artifact === "report" ? "raport.txt" : artifact === "manifest" ? "manifest.json" : artifact;
       saveBlob(blob, aliasName === "bundle" ? `PanOS-Toolbox-${cleanupPlan.sessionId}.zip` : aliasName.split("/").pop() || "artifact.txt");
@@ -592,9 +624,7 @@ export default function App() {
   const viewCleanupArtifact = async (artifact: string): Promise<string> => {
     if (!cleanupPlan) throw new Error("Brak aktywnej sesji.");
     if (demoMode && demoApi) {
-      return artifact === "commands"
-        ? demoApi.demoCleanupPlan.operations.map((operation) => `${operation.action} ${operation.xpath}`).join("\n")
-        : JSON.stringify(demoApi.demoCleanupPlan, null, 2);
+      return demoHandModeArtifact(artifact, "cleanup") ?? JSON.stringify(demoApi.demoCleanupPlan, null, 2);
     }
     return api.viewSessionArtifact(cleanupPlan.sessionId, artifact);
   };
@@ -678,6 +708,18 @@ export default function App() {
     } catch (reconcileError) { setError(getErrorMessage(reconcileError)); } finally { setMainBusy(null); }
   };
 
+  const materializeSessionHandMode = async (session: ToolboxSession) => {
+    setMainBusy("history"); setError(null);
+    try {
+      const refreshed = demoMode
+        ? { ...session, artifacts: (session.kind === "restore" ? demoApi?.demoRestorePlan.artifacts : demoApi?.demoCleanupPlan.artifacts) ?? session.artifacts }
+        : (await api.materializeSessionHandMode(session.id)).session;
+      setSelectedSession(refreshed);
+      setSessions((current) => current.map((item) => item.id === refreshed.id ? refreshed : item));
+      setHistoryCatalog((current) => current ? { ...current, sessions: current.sessions.map((item) => item.id === refreshed.id ? refreshed : item) } : current);
+    } catch (handModeError) { setError(getErrorMessage(handModeError)); } finally { setMainBusy(null); }
+  };
+
   const createRestorePlan = async (mode: "target" | "session") => {
     if (!connection) return;
     setRestoreBusy("plan"); setError(null);
@@ -743,6 +785,24 @@ export default function App() {
     } catch (downloadError) { setError(getErrorMessage(downloadError)); } finally { setRestoreBusy(null); }
   };
 
+  const viewRestoreArtifact = async (artifact: string): Promise<string> => {
+    if (!restorePlan) throw new Error("Brak aktywnego planu Restore.");
+    if (demoMode && demoApi) return demoHandModeArtifact(artifact, "restore") ?? JSON.stringify(demoApi.demoRestorePlan, null, 2);
+    return api.viewSessionArtifact(restorePlan.sessionId, artifact);
+  };
+
+  const downloadRestoreArtifact = async (artifact: string) => {
+    if (!restorePlan) return;
+    setRestoreBusy("download"); setError(null);
+    try {
+      const demoContent = demoMode && demoApi ? demoHandModeArtifact(artifact, "restore") : null;
+      const blob = demoMode && demoApi
+        ? new Blob([demoContent ?? JSON.stringify(demoApi.demoRestorePlan, null, 2)], { type: "text/plain" })
+        : await api.downloadSessionArtifact(restorePlan.sessionId, artifact);
+      saveBlob(blob, artifact.split("/").pop() || "restore-artifact.txt");
+    } catch (downloadError) { setError(getErrorMessage(downloadError)); } finally { setRestoreBusy(null); }
+  };
+
   let page;
   if (view === "connection") page = <ConnectionPage draft={draft} onDraftChange={setDraft} savedProfiles={savedProfiles} profileStorage={profileStorage} connection={connection} doctor={doctor} busy={mainBusy === "connect" || mainBusy === "doctor" ? mainBusy : null} error={error} onConnect={() => void connect()} onDoctor={() => void runDoctor()} onSelectProfile={selectSavedProfile} onDeleteProfile={(profileId) => void deleteSavedProfile(profileId)} onDemo={enableDemo} demoAvailable={import.meta.env.DEV} />;
   else if (view === "cleanup") page = <CleanupPage connection={connection} targetTexts={{ ip: addressText, object: objectText, group: groupText, policy: policyText }} onTargetTextChange={(kind, value) => ({ ip: setAddressText, object: setObjectText, group: setGroupText, policy: setPolicyText })[kind](value)} runIcmp={runIcmp} onRunIcmpChange={setRunIcmp} recentHitDays={recentHitDays} onRecentHitDaysChange={setRecentHitDays} allowDefaultPolicyOverride={allowDefaultPolicyOverride} onDefaultPolicyOverrideChange={setAllowDefaultPolicyOverride} busy={mainBusy === "analyze"} progress={analysisJob} lookupResult={lookupResult} lookupBusy={lookupBusy} error={error} onLookup={(kind, names, deviceGroup) => void runLookup(kind, names, deviceGroup)} onAddLookupEntities={addLookupEntitiesToBatch} onAnalyze={() => void analyze()} onOpenConnection={() => navigate("connection")} onOpenWarnings={() => navigate("warnings")} />;
@@ -751,8 +811,8 @@ export default function App() {
   else if (view === "policy-requests") page = <PolicyRequestsPage connection={Boolean(connection)} busy={mainBusy === "policy-request"} error={error} plan={policyRequestPlan} onCreatePlan={(text) => void createPolicyRequestPlan(text)} onOpenConnection={() => navigate("connection")} onOpenPlan={() => navigate("plan")} />;
   else if (view === "plan" || view === "execute") page = <PlanPage focus={view} plan={cleanupPlan} executionSession={executionSession} executionJob={executionJob} writeEnabled={writeEnabled} busy={stageBusy} singlePlanBusy={singlePlanBusy} error={error} onOpenCleanup={() => navigate("cleanup")} onCreateSinglePlan={(target) => void createSinglePlan(target)} onCreateSelectionPlan={(targets) => void createSelectionPlan(targets)} onExcludeTargets={(targets) => void excludeTargets(targets)} onExcludeComponents={(componentIds) => void excludeComponents(componentIds)} onUndoLastExclusion={() => void undoLastExclusion()} onPlanDependencies={planDependencies} onRestoreTarget={openRestoreForTarget} onApplyCandidate={() => void applyCandidate()} onPrepareCommitReview={() => void prepareCommitReview()} onCommit={(scopeGuardOverrideDigest) => void commitCleanup(true, false, scopeGuardOverrideDigest)} onPush={() => void pushCleanup()} onViewArtifact={viewCleanupArtifact} onDownload={(artifact) => void downloadCleanup(artifact)} />;
   else if (view === "audit") page = <AuditPage connection={connection} query={auditQuery} onQueryChange={setAuditQuery} result={auditResult} busy={mainBusy === "audit"} error={error} onAudit={() => void runAudit()} onOpenConnection={() => navigate("connection")} />;
-  else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} storage={historyCatalog?.storage ?? ""} issues={historyCatalog?.issues ?? []} connected={Boolean(connection)} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onViewArtifact={viewHistoryArtifact} onDownloadArtifact={(sessionId, artifact) => void downloadHistoryArtifact(sessionId, artifact)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
-  else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} executionJob={restoreExecutionJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onOpenConnection={() => { setReturnAfterConnect("restore"); navigate("connection"); }} onOpenWarnings={() => navigate("warnings")} />;
+  else if (view === "history") page = <HistoryPage sessions={sessions} selected={selectedSession} storage={historyCatalog?.storage ?? ""} issues={historyCatalog?.issues ?? []} connected={Boolean(connection)} busy={mainBusy === "history"} error={error} onRefresh={() => void refreshHistory()} onSelect={setSelectedSession} onRestore={openRestoreForSession} onRestoreTargets={openRestoreForTargets} onDownloadBundle={(session) => void downloadSessionBundle(session)} onViewArtifact={viewHistoryArtifact} onDownloadArtifact={(sessionId, artifact) => void downloadHistoryArtifact(sessionId, artifact)} onMaterializeHandMode={(session) => void materializeSessionHandMode(session)} onReconcileExternal={(session) => void reconcileExternalSession(session)} />;
+  else page = <RestorePage query={restoreQuery} onQueryChange={setRestoreQuery} plan={restorePlan} executionSession={restoreSession} executionJob={restoreExecutionJob} writeEnabled={writeEnabled} connected={Boolean(connection)} busy={restoreBusy} error={error} onCreatePlan={(mode) => void createRestorePlan(mode)} onApplyCandidate={() => void applyRestoreCandidate()} onCommit={() => void commitRestore(true, false)} onPush={() => void pushRestore()} onDownloadConflicts={() => void downloadConflicts()} onViewArtifact={viewRestoreArtifact} onDownloadArtifact={(artifact) => void downloadRestoreArtifact(artifact)} onOpenConnection={() => { setReturnAfterConnect("restore"); navigate("connection"); }} onOpenWarnings={() => navigate("warnings")} />;
 
   return (
     <Shell activeView={view} onViewChange={navigate} connection={connection} writeEnabled={writeEnabled} onWriteEnabledChange={setWriteEnabled} theme={theme} onThemeChange={() => setTheme((current) => current === "dark" ? "light" : "dark")} onDisconnect={() => void disconnect()} demoMode={demoMode} warningCount={notices.length}>

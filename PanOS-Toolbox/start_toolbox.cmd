@@ -1,55 +1,73 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
-
-set "TOOLBOX_PORT=8765"
-if not "%~1"=="" if /I not "%~1"=="doctor" if /I not "%~1"=="--doctor" set "TOOLBOX_PORT=%~1"
 
 if not exist "backend\vendor\flask\__init__.py" goto :missing_vendor
 if not exist "backend\vendor\werkzeug\__init__.py" goto :missing_vendor
 if not exist "backend\panos_toolbox\static\index.html" goto :missing_vendor
 
-where py >nul 2>nul
-if not errorlevel 1 goto :use_py
-where python >nul 2>nul
-if not errorlevel 1 goto :use_python
+set "TOOLBOX_MODE=serve"
+if "%~1"=="" goto :arguments_ok
+if /I "%~1"=="doctor" if "%~2"=="" goto :doctor_mode
+goto :invalid_arguments
 
-echo BLAD: Nie znaleziono Python 3.10 lub nowszego w PATH.
-echo Zainstaluj zatwierdzony firmowy Python, bez instalowania Flask przez pip.
+:doctor_mode
+set "TOOLBOX_MODE=doctor"
+
+:arguments_ok
+
+set "TOOLBOX_PYTHON="
+set "TOOLBOX_PYTHON_ARGS="
+
+if defined PANOS_TOOLBOX_PYTHON goto :configured_python
+if exist "%SystemRoot%\py.exe" goto :system_launcher
+if exist "%LocalAppData%\Programs\Python\Launcher\py.exe" goto :user_launcher
+for /d %%D in ("%LocalAppData%\Programs\Python\Python*") do if exist "%%~fD\python.exe" set "TOOLBOX_PYTHON=%%~fD\python.exe"
+if defined TOOLBOX_PYTHON goto :run
+for /d %%D in ("%ProgramFiles%\Python*") do if exist "%%~fD\python.exe" set "TOOLBOX_PYTHON=%%~fD\python.exe"
+if defined TOOLBOX_PYTHON goto :run
+goto :missing_python
+
+:configured_python
+for %%I in ("%PANOS_TOOLBOX_PYTHON%") do set "TOOLBOX_PYTHON=%%~fI"
+if not exist "%TOOLBOX_PYTHON%" goto :missing_python
+goto :run
+
+:system_launcher
+set "TOOLBOX_PYTHON=%SystemRoot%\py.exe"
+set "TOOLBOX_PYTHON_ARGS=-3"
+goto :run
+
+:user_launcher
+set "TOOLBOX_PYTHON=%LocalAppData%\Programs\Python\Launcher\py.exe"
+set "TOOLBOX_PYTHON_ARGS=-3"
+
+:run
+if /I "%TOOLBOX_MODE%"=="doctor" goto :run_doctor
+echo PanOS Toolbox uruchamia lokalny serwer 127.0.0.1.
+echo Bezpieczny link sesji zostanie otwarty automatycznie i wyswietlony ponizej.
+echo Trwale dane lokalne: %LOCALAPPDATA%\PanOS Toolbox\sessions oraz profiles.json
+echo Zatrzymanie: Ctrl+C albo zamkniecie tego okna.
+"%TOOLBOX_PYTHON%" %TOOLBOX_PYTHON_ARGS% -I -B -S "%~dp0panos-toolbox.py" serve
+exit /b %errorlevel%
+
+:run_doctor
+echo Sprawdzanie kompletnosci paczki PanOS Toolbox...
+"%TOOLBOX_PYTHON%" %TOOLBOX_PYTHON_ARGS% -I -B -S "%~dp0panos-toolbox.py" doctor
+exit /b %errorlevel%
+
+:invalid_arguments
+echo BLAD: Dozwolone wywolania: start_toolbox.cmd albo start_toolbox.cmd doctor
+exit /b 4
+
+:missing_python
+echo BLAD: Nie znaleziono zatwierdzonego Python 3.
+echo Ustaw PANOS_TOOLBOX_PYTHON na pelna sciezke python.exe albo zainstaluj firmowy Python Launcher.
 pause
 exit /b 2
-
-:use_py
-if /I "%~1"=="doctor" goto :doctor_py
-if /I "%~1"=="--doctor" goto :doctor_py
-echo PanOS Toolbox: http://127.0.0.1:%TOOLBOX_PORT%/
-echo Trwale dane: Dokumenty\PanOS Toolbox\sessions oraz profiles.json
-echo Zatrzymanie: Ctrl+C albo zamkniecie tego okna.
-py -3 -I -S "%~dp0panos-toolbox.py" serve --port %TOOLBOX_PORT%
-exit /b %errorlevel%
-
-:doctor_py
-py -3 -I -S "%~dp0panos-toolbox.py" doctor
-exit /b %errorlevel%
-
-:use_python
-if /I "%~1"=="doctor" goto :doctor_python
-if /I "%~1"=="--doctor" goto :doctor_python
-echo PanOS Toolbox: http://127.0.0.1:%TOOLBOX_PORT%/
-echo Trwale dane: Dokumenty\PanOS Toolbox\sessions oraz profiles.json
-echo Zatrzymanie: Ctrl+C albo zamkniecie tego okna.
-python -I -S "%~dp0panos-toolbox.py" serve --port %TOOLBOX_PORT%
-exit /b %errorlevel%
-
-:doctor_python
-python -I -S "%~dp0panos-toolbox.py" doctor
-exit /b %errorlevel%
 
 :missing_vendor
-echo BLAD: To nie jest kompletna paczka portable PanOS Toolbox.
-echo Brakuje backend\vendor albo gotowego GUI.
-echo Pobierz ZIP z: https://github.com/Szqub/Sieci/releases/latest
-echo Uzyj opcji "Wyodrebnij wszystkie" i uruchom start_toolbox.cmd z rozpakowanego katalogu.
-echo Nie instaluj Flask ani Werkzeug przez pip.
+echo BLAD: Paczka jest niekompletna albo zostala uruchomiona wewnatrz ZIP.
+echo Uzyj opcji Wyodrebnij wszystkie i uruchom ponownie start_toolbox.cmd.
 pause
-exit /b 2
+exit /b 3

@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, clearApiSessionForTests } from "../api/client";
+import { api, clearApiSessionForTests, setAppTokenForTests } from "../api/client";
 
 describe("typed API client", () => {
-  beforeEach(() => clearApiSessionForTests());
+  beforeEach(() => {
+    clearApiSessionForTests();
+    setAppTokenForTests("test-app-token");
+  });
   afterEach(() => vi.restoreAllMocks());
 
   it("czyta lokalny indeks historii bez tokenu Panorama", async () => {
@@ -18,6 +21,7 @@ describe("typed API client", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/history");
     const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers);
     expect(headers.get("X-Toolbox-Session")).toBeNull();
+    expect(headers.get("X-Toolbox-App-Token")).toBe("test-app-token");
   });
 
   it("trzyma token sesji wyłącznie w pamięci modułu", async () => {

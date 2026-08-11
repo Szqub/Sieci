@@ -86,7 +86,7 @@ python3 Panorama_Rule_Finder
 Identyfikacja nieużywanych reguł (tzw. "shadow rules" lub reguł martwych) poprzez sprawdzenie licznika trafień (Hit Count).
 
 ### Jak to działa?
-1.  Łączy się przez **SSH** (biblioteka `netmiko`).
+1.  Łączy się przez **SSH** (biblioteka `paramiko` 5, z obowiązkową weryfikacją klucza hosta z `known_hosts`).
 2.  Pobiera listę `Device Groups` i prosi o wybór jednej.
 3.  Prosi o wybór bazy reguł (`pre-rulebase` lub `post-rulebase`).
 4.  Wczytuje listę nazw reguł z pliku tekstowego.
@@ -177,8 +177,12 @@ Szybki "health check" i pobranie statystyk ze środowiska Illumio PCE (Policy Co
 
 ### Użycie
 ```bash
-# Edytuj plik i wpisz KEY/TOKEN lub podaj je przy uruchomieniu:
-KEY="api_key_id" TOKEN="api_key_secret" ./illumio_probe.sh
+# Podaj sekret bez umieszczania go w historii poleceń:
+read -r -p "API Key ID: " KEY
+read -r -s -p "API Key Secret: " TOKEN; echo
+export KEY TOKEN
+./illumio_probe.sh
+unset KEY TOKEN
 ```
 
 ---

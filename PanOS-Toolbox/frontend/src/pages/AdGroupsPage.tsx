@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { CheckCircle2, Clipboard, Copy, FileUp, FolderTree, ShieldCheck, UsersRound, XCircle } from "lucide-react";
+import { CheckCircle2, Clipboard, Copy, Download, FileUp, FolderTree, ShieldCheck, Terminal, UsersRound, XCircle } from "lucide-react";
 import type { AdGroupGenerationResult, AdGroupStatus } from "../model";
 import { parseNameInput, pluralize } from "../utils";
 import { Button, Callout, Card, CardHeader, PageHeader, StatCard, StatusPill } from "../components/Primitives";
@@ -47,6 +47,15 @@ export function AdGroupsPage({ draft, onDraftChange, result, busy, error, onGene
     window.setTimeout(() => setCopied((current) => current === key ? null : current), 1600);
   };
 
+  const downloadText = (filename: string, value: string) => {
+    const url = URL.createObjectURL(new Blob([value], { type: "text/plain;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="page-stack">
       <PageHeader
@@ -56,7 +65,7 @@ export function AdGroupsPage({ draft, onDraftChange, result, busy, error, onGene
       />
 
       <Callout severity="info" title="Generator nie zmienia AD ani Panoramy">
-        <p>Walidacja jest wykonywana lokalnie przez PowerShell i moduł ActiveDirectory (RSAT). Wynik to bezpieczny blok do ręcznego wklejenia; żadne API write nie jest uruchamiane.</p>
+        <p>Walidacja działa lokalnie przez zatwierdzone narzędzia RSAT. Wynik zawiera filtry oraz prawdziwe komendy Hand Mode do ręcznego wklejenia; żadne API write, commit ani push nie uruchamiają się tutaj.</p>
       </Callout>
       {error && <Callout severity="danger" title="Nie udało się wygenerować grupy"><p>{error}</p></Callout>}
 
@@ -112,8 +121,8 @@ export function AdGroupsPage({ draft, onDraftChange, result, busy, error, onGene
                 <label className="field"><span>Group Mapping</span><div className="input-with-icon"><FolderTree size={16} /><input value={draft.mappingName} onChange={(event) => update("mappingName", event.target.value)} placeholder="LDAP_GM1" spellCheck={false} /></div></label>
                 <label className="field"><span>VSYS</span><div className="input-with-icon"><ShieldCheck size={16} /><input value={draft.vsys} onChange={(event) => update("vsys", event.target.value)} placeholder="vsys1" spellCheck={false} /></div></label>
               </div>
-              <label className="field"><span>Device Template <small>opcjonalnie, informacyjnie</small></span><div className="input-with-icon"><FolderTree size={16} /><input value={draft.templateName} onChange={(event) => update("templateName", event.target.value)} placeholder="np. TEMPLATE-NET" spellCheck={false} /></div></label>
-              <Button variant="primary" onClick={onGenerate} loading={busy} disabled={parsed.names.length === 0 || !draft.outputName.trim() || !draft.mappingName.trim() || !draft.vsys.trim()} icon={<UsersRound size={18} />}>Sprawdź AD i wygeneruj</Button>
+              <label className="field"><span>Device Template <small>wymagany dla poprawnego CLI</small></span><div className="input-with-icon"><FolderTree size={16} /><input value={draft.templateName} onChange={(event) => update("templateName", event.target.value)} placeholder="np. TEMPLATE-NET" spellCheck={false} /></div></label>
+              <Button variant="primary" onClick={onGenerate} loading={busy} disabled={parsed.names.length === 0 || !draft.outputName.trim() || !draft.mappingName.trim() || !draft.vsys.trim() || !draft.templateName.trim()} icon={<UsersRound size={18} />}>Sprawdź AD i wygeneruj</Button>
             </div>
           </Card>
           <Callout severity="warning" title="Wymagane RSAT"><p>Jeśli moduł ActiveDirectory nie jest dostępny, Toolbox pokaże błąd zależności. Nie próbuje samodzielnie niczego instalować.</p></Callout>
@@ -140,6 +149,26 @@ export function AdGroupsPage({ draft, onDraftChange, result, busy, error, onGene
               ))}
             </div>
           </Card>
+
+          {result.handModeReady ? (
+            <Card className="ad-filter-card handmode-card">
+              <CardHeader
+                title="Hand Mode — Custom LDAP Group CLI"
+                description={`${result.cliGroups.length} ${result.cliGroups.length === 1 ? "wpis" : "wpisów"} w ${result.templateName} / ${result.vsys} / ${result.mappingName}. Plik nie zawiera commit ani push.`}
+                action={<div className="ad-result-actions"><Button onClick={() => void copy("cli-all", result.cliText)} icon={<Clipboard size={16} />}>{copied === "cli-all" ? "Skopiowano" : "Kopiuj komendy"}</Button><Button onClick={() => downloadText("panos-handmode-custom-ad-group.txt", result.cliText)} icon={<Download size={16} />}>Pobierz TXT</Button></div>}
+              />
+              <Callout severity="warning" title="Wklej wyłącznie w trybie configure (#)"><p>Po wklejeniu sprawdź <code>show | compare</code>. Commit template i push wykonujesz ręcznie zgodnie z procedurą.</p></Callout>
+              <div className="ad-filter-list">
+                {result.cliGroups.map((block) => (
+                  <div className="ad-filter-block" key={`cli-${block.index}`}>
+                    <div><strong><Terminal size={15} /> {block.panoramaGroupName}</strong><span>{block.sourceGroups.join(" · ")}</span><button type="button" onClick={() => void copy(`cli-${block.index}`, block.cliCommand)}><Copy size={15} />{copied === `cli-${block.index}` ? "Skopiowano" : "Kopiuj"}</button></div>
+                    <pre>{block.cliCommand}</pre>
+                  </div>
+                ))}
+              </div>
+              <div className="analysis-downloads"><Button variant="ghost" onClick={() => void copy("cli-rollback", result.rollbackCliText)} icon={<Copy size={15} />}>{copied === "cli-rollback" ? "Skopiowano rollback" : "Kopiuj rollback"}</Button><Button variant="ghost" onClick={() => downloadText("panos-handmode-custom-ad-group-rollback.txt", result.rollbackCliText)} icon={<Download size={15} />}>Pobierz rollback</Button></div>
+            </Card>
+          ) : <Callout severity="danger" title="Hand Mode CLI zablokowany"><p>Podaj dokładny Device Template. Toolbox nie używa placeholderów w komendach przeznaczonych do wklejenia.</p></Callout>}
 
           {result.blocks.length > 0 ? (
             <Card className="ad-filter-card">

@@ -308,6 +308,14 @@ class CleanerAdapterTests(unittest.TestCase):
             self.assertEqual(decisions["policy:SEC-MIX"], "excluded")
             self.assertEqual(decisions["policy:SEC-GROUP"], "process")
             self.assertTrue(wired["operations"])
+            active_cli = (store._directory(child_id) / "commands.txt").read_text(encoding="utf-8")
+            excluded_cli = (
+                store._directory(child_id) / "handmode_excluded_commands.txt"
+            ).read_text(encoding="utf-8")
+            self.assertIn('delete shared pre-rulebase security rules "SEC-GROUP"', active_cli)
+            self.assertNotIn('"SEC-MIX"', active_cli)
+            self.assertIn('delete shared pre-rulebase security rules "SEC-MIX"', excluded_cli)
+            self.assertFalse(any(line.lstrip().startswith("{") for line in excluded_cli.splitlines()))
             self.assertEqual(
                 store.load_manifest(child_id, verify=False)["derived_from_session_id"],
                 parent_id,
@@ -363,6 +371,67 @@ Info Dst
         self.assertTrue(any(m.entity_type == "service" and "SVC__8443-tcp" in m.entity_key for m in result.patchset.mutations))
         policy = next(m for m in result.patchset.mutations if m.entity_type == "policy" and "N-10.10.10.0-24__H-10.20.30.40-32" in m.entity_key)
         self.assertIn("<action>allow</action>", policy.after_xml or "")
+
+    def test_policy_request_endpoint_writes_paste_ready_cli_not_json(self):
+        class FakeReadClient:
+            def __init__(self, profile):
+                self.profile = profile
+
+            def authenticate(self, _password):
+                return None
+
+            def system_info(self):
+                return parse_xml(
+                    '<response status="success"><result><system>'
+                    '<sw-version>10.2.16-h4</sw-version>'
+                    '</system></result></response>'
+                )
+
+            def fetch_xpath(self, _xpath, *, config_type="running"):
+                return parse_xml('<response status="success"><result /></response>')
+
+            def change_summary(self):
+                return parse_xml('<response status="success"><result /></response>')
+
+            def close(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            app = create_app(test_client_auto_auth=True, static_dir=Path(temporary) / "static", store=store)
+            headers = {"Host": "localhost", "Origin": "http://localhost"}
+            with mock.patch("panos_toolbox.web.PanoramaReadClient", FakeReadClient):
+                client = app.test_client()
+                connected = client.post(
+                    "/api/v1/connections",
+                    json={
+                        "host": "pano",
+                        "username": "admin",
+                        "password": "memory-only",
+                        "ssl": True,
+                        "verify_ssl": False,
+                        "api_max_stage": "push",
+                    },
+                    headers=headers,
+                )
+                response = client.post(
+                    "/api/v1/policy-requests/plans",
+                    json={"text": self.SAMPLE},
+                    headers={
+                        **headers,
+                        "X-Toolbox-Session": connected.json["session_token"],
+                    },
+                )
+            self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+            session_id = response.json["sessionId"]
+            commands = (store._directory(session_id) / "commands.txt").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn('set device-group "DG-APP" address ', commands)
+            self.assertIn('set device-group "DG-APP" pre-rulebase security rules ', commands)
+            self.assertFalse(any(line.lstrip().startswith("{") for line in commands.splitlines()))
+            self.assertNotIn("commit", commands.casefold())
+            self.assertNotIn("push", commands.casefold())
 
 
 class WebBoundaryTests(unittest.TestCase):
@@ -422,6 +491,7 @@ class WebBoundaryTests(unittest.TestCase):
             session_id = store.create(patch, profile)
             backup = store.load_manifest(session_id)["entity_backups"][0]["file"]
             app = create_app(
+                test_client_auto_auth=True,
                 static_dir=Path(temporary) / "static",
                 store=store,
                 profile_ceiling=profile,
@@ -458,14 +528,32 @@ class WebBoundaryTests(unittest.TestCase):
     def test_localhost_origin_csp_contract_and_no_cors(self):
         with tempfile.TemporaryDirectory() as temporary:
             app = create_app(
+                test_client_auto_auth=True,
                 static_dir=Path(temporary) / "static",
                 store=SessionStore(Path(temporary) / "sessions", enforce_acl=False),
             )
             client = app.test_client()
             response = client.get("/api/v1/health", headers={"Host": "evil.example"})
             self.assertEqual(response.status_code, 400)
+            missing_app_token = client.get(
+                "/api/v1/health",
+                headers={"Host": "localhost", "X-Toolbox-App-Token": ""},
+            )
+            self.assertEqual(missing_app_token.status_code, 401)
+            self.assertEqual(
+                missing_app_token.json["code"], "AppAuthenticationRequired"
+            )
+            wrong_app_token = client.get(
+                "/api/v1/history",
+                headers={"Host": "localhost", "X-Toolbox-App-Token": "wrong"},
+            )
+            self.assertEqual(wrong_app_token.status_code, 401)
             response = client.get("/api/v1/meta", headers={"Host": "localhost"})
             self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json["authentication"]["appTokenHeader"],
+                "X-Toolbox-App-Token",
+            )
             self.assertEqual(
                 response.json["authentication"]["connectionTokenHeader"],
                 "X-Toolbox-Session",
@@ -534,6 +622,7 @@ class WebBoundaryTests(unittest.TestCase):
                 api_max_stage=ApiStage.CANDIDATE,
             )
             app = create_app(
+                test_client_auto_auth=True,
                 static_dir=Path(temporary) / "static",
                 store=SessionStore(Path(temporary) / "sessions", enforce_acl=False),
                 profile_ceiling=ceiling,
@@ -611,6 +700,7 @@ class WebBoundaryTests(unittest.TestCase):
             ).patchset
             session_id = store.create(patchset, profile)
             app = create_app(
+                test_client_auto_auth=True,
                 static_dir=Path(temporary) / "static",
                 store=store,
                 profile_ceiling=profile,
@@ -716,6 +806,7 @@ class WebBoundaryTests(unittest.TestCase):
                 kind="api-operation-preview",
             )
             app = create_app(
+                test_client_auto_auth=True,
                 static_dir=Path(temporary) / "static",
                 store=store,
                 profile_ceiling=profile,
@@ -767,6 +858,65 @@ class WebBoundaryTests(unittest.TestCase):
                 nested.close()
                 attached.close()
 
+    def test_legacy_session_can_materialize_real_handmode_entirely_offline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
+            profile = PanoramaProfile("192.0.2.10", "admin")
+            patch = build_cleanup_patchset(
+                CleanerAdapterTests.fixture(),
+                (),
+                policy_names=("SEC-MIX",),
+                panorama_host=profile.host,
+                panorama_username=profile.username,
+            ).patchset
+            session_id = store.create(patch, profile)
+            legacy = '{"action":"delete","xpath":"/config/example"}\n'
+            store.write_artifact(
+                session_id,
+                "commands.txt",
+                legacy,
+                kind="api-operation-preview",
+            )
+            app = create_app(
+                test_client_auto_auth=True,
+                static_dir=Path(temporary) / "static",
+                store=store,
+                profile_ceiling=profile,
+            )
+            client = app.test_client()
+            response = client.post(
+                f"/api/v1/sessions/{session_id}/handmode",
+                headers={"Host": "localhost", "Origin": "http://localhost"},
+            )
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            artifact = next(
+                item
+                for item in response.json["session"]["artifacts"]
+                if item["kind"] == "handmode-cli-active"
+            )
+            self.assertEqual(artifact["file"], "handmode_commands.txt")
+            rendered_response = client.get(
+                f"/api/v1/sessions/{session_id}/artifacts/{artifact['file']}?disposition=inline",
+                headers={"Host": "localhost"},
+            )
+            content = rendered_response.get_data(as_text=True)
+            self.assertIn('delete shared pre-rulebase security rules "SEC-MIX"', content)
+            self.assertNotIn("xpath", content)
+            self.assertNotIn("commit", content.casefold())
+            self.assertNotIn("push", content.casefold())
+            self.assertEqual(
+                (Path(temporary) / "sessions" / session_id / "commands.txt").read_text(encoding="utf-8"),
+                legacy,
+            )
+            before_count = len(store.load_manifest(session_id)["artifacts"])
+            repeated = client.post(
+                f"/api/v1/sessions/{session_id}/handmode",
+                headers={"Host": "localhost", "Origin": "http://localhost"},
+            )
+            self.assertEqual(repeated.status_code, 200)
+            self.assertEqual(before_count, len(store.load_manifest(session_id)["artifacts"]))
+            rendered_response.close()
+
     def test_async_analysis_reports_progress_and_can_split_single_component(self):
         fixture = CleanerAdapterTests.fixture()
 
@@ -814,6 +964,7 @@ class WebBoundaryTests(unittest.TestCase):
             )
             store = SessionStore(Path(temporary) / "sessions", enforce_acl=False)
             app = create_app(
+                test_client_auto_auth=True,
                 static_dir=Path(temporary) / "static",
                 store=store,
                 profile_ceiling=profile,
@@ -848,7 +999,7 @@ class WebBoundaryTests(unittest.TestCase):
                 )
                 self.assertEqual(started.status_code, 202)
                 job = started.json
-                for _ in range(200):
+                for _ in range(1500):
                     if job["state"] in {"success", "failed"}:
                         break
                     time.sleep(0.01)

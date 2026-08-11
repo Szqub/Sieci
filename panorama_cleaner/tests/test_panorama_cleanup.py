@@ -1578,6 +1578,10 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
                 b"<response status='error'><msg>denied</msg></response>",
                 expect_config=True,
             )
+        with self.assertRaises(SnapshotError):
+            parse_api_response(
+                b"<!DOCTYPE x [<!ENTITY secret SYSTEM 'file:///etc/passwd'>]><x>&secret;</x>"
+            )
 
     def test_ip_rows_preserve_lp_duplicates_and_invalid_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1769,10 +1773,14 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         key_response.status_code = 200
         key_response.content = b"<response status='success'><result><key>secret-key</key></result></response>"
         key_response.raise_for_status.return_value = None
+        key_response.headers = {}
+        key_response.iter_content.return_value = [key_response.content]
         config_response = mock.Mock()
         config_response.status_code = 200
         config_response.content = b"<response status='success'><result><config><shared/></config></result></response>"
         config_response.raise_for_status.return_value = None
+        config_response.headers = {}
+        config_response.iter_content.return_value = [config_response.content]
         client = PanoramaXMLAPI("192.0.2.10", "admin")
         with mock.patch.object(
             client.session, "post", side_effect=[key_response, config_response, config_response]
@@ -1787,6 +1795,7 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         self.assertTrue(
             all(call.kwargs["allow_redirects"] is False for call in post.call_args_list)
         )
+        self.assertTrue(all(call.kwargs["stream"] is True for call in post.call_args_list))
         client.close()
 
     def test_xml_api_rejects_redirect_without_following_it(self) -> None:
@@ -1794,12 +1803,28 @@ class SnapshotAndRuntimeTests(unittest.TestCase):
         redirect.status_code = 307
         redirect.content = b""
         redirect.raise_for_status.return_value = None
+        redirect.headers = {}
+        redirect.iter_content.return_value = [b""]
         client = PanoramaXMLAPI("192.0.2.10", "admin")
         with mock.patch.object(client.session, "post", return_value=redirect) as post:
             with self.assertRaises(TransportError):
                 client.authenticate("password")
         self.assertIs(post.call_args.kwargs["allow_redirects"], False)
         self.assertNotIn("X-PAN-KEY", client.session.headers)
+        client.close()
+
+
+    def test_xml_api_rejects_oversized_response_before_buffering(self) -> None:
+        oversized = mock.Mock()
+        oversized.status_code = 200
+        oversized.headers = {"Content-Length": str(512 * 1024 * 1024 + 1)}
+        oversized.raise_for_status.return_value = None
+        client = PanoramaXMLAPI("192.0.2.10", "admin")
+        with mock.patch.object(client.session, "post", return_value=oversized):
+            with self.assertRaises(TransportError):
+                client.authenticate("password")
+        oversized.iter_content.assert_not_called()
+        oversized.close.assert_called_once()
         client.close()
 
 

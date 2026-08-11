@@ -1,30 +1,69 @@
 PANOS TOOLBOX PORTABLE - WINDOWS
 ================================
 
-1. Uzyj opcji "Wyodrebnij wszystkie" dla calego ZIP-a.
-2. Wejdz do rozpakowanego katalogu PanOS-Toolbox.
-3. Uruchom dwuklikiem start_toolbox.cmd.
-4. Otworz http://127.0.0.1:8765/ jezeli przegladarka nie otworzy sie automatycznie.
+1. Zapisz i rozpakuj ZIP w zatwierdzonym katalogu lokalnym, nie w Pobrane ani
+   Dokumenty przekierowanych na SMB. Przyklad: %LOCALAPPDATA%\PanOS Toolbox\app.
+2. Wejdz do lokalnego rozpakowanego katalogu PanOS-Toolbox.
+3. Uruchom dwuklikiem start_toolbox.cmd. Alternatywnie uzyj zgodnego z Windows
+   PowerShell 5.1: powershell.exe -NoLogo -NoProfile -File .\start_toolbox.ps1
+4. Backend otworzy bezpieczny link z tokenem. Jezeli przegladarka nie otworzy sie,
+   skopiuj dokladny link wyswietlony w konsoli; sam adres bez tokenu nie obsluzy API.
 
 Backupy, pelna historia sesji i zaszyfrowane profile sa trwale zapisywane w:
-    %USERPROFILE%\Documents\PanOS Toolbox\
+    %LOCALAPPDATA%\PanOS Toolbox\
     sessions\session-...
     profiles.json
 Nie usuwaj tego folderu, jezeli chcesz korzystac z Emergency Restore po
 ponownym uruchomieniu narzedzia.
+
+Aktywny magazyn nie moze wskazywac UNC ani mapowanego dysku SMB. Przy pierwszym
+uruchomieniu Toolbox kopiuje starsza historie z Documents\PanOS Toolbox do
+lokalnego LocalAppData, nie usuwa zrodla i nie wykonuje rename/move na SMB.
 
 Ekran "Backup i restore" dziala bez logowania do Panoramy. Pozwala wyszukac
 historie po IP, nazwie polityki, obiektu, grupy, DG, XPath albo session ID,
 sprawdzic dokladny czas wykonania, wyswietlic pojedynczy backup i przygotowac
 Restore. Polaczenie jest wymagane dopiero do porownania live i wykonania zmian.
 
+HAND MODE / RECZNE CLI
+----------------------
+W Planie, Restore i Historii mozna wyswietlic, skopiowac albo pobrac prawdziwe
+komendy PAN-OS CLI. Aktywny plan jest w commands.txt (dla starej sesji moze to
+byc handmode_commands.txt), a cofniecie w handmode_rollback.txt. Elementy
+wykluczone i konfliktowy Restore sa zawsze w osobnych, czerwono oznaczonych
+plikach i wymagaja dodatkowego potwierdzenia.
+
+Starsza sesja: Backup i restore -> wybierz sesje -> Wygeneruj Hand Mode offline.
+Nie wymaga to hosta, loginu, hasla ani ponownego pobierania configu.
+
+W CLI Panoramy:
+    > set cli scripting-mode on
+    > configure
+    # [wklej zawartosc aktywnego pliku]
+    # show | compare
+Commit i push wykonaj recznie dopiero po kontroli diffu. Pliki Hand Mode nie
+zawieraja configure, commit ani push.
+
 Paczka zawiera Flask, Werkzeug i pozostale biblioteki w backend\vendor.
 Nie uruchamiaj plikow bezposrednio z podgladu ZIP i nie wykonuj pip install.
 
+Nie zmieniaj rozszerzenia ZIP-a i nie pakuj go ponownie z haslem. Paczka nie
+zawiera wlasnych EXE/DLL/PYD. Zawiera tylko dwa audytowane startery:
+start_toolbox.cmd i start_toolbox.ps1; PS1 nie zmienia Execution Policy.
+Integralnosc sprawdzisz
+w RELEASE-MANIFEST.json i SHA256SUMS.txt. Jezeli NDR/EDR nadal blokuje plik,
+przekaz zespolowi bezpieczenstwa URL wydania oraz SHA-256 z pliku
+PanOS-Toolbox-....zip.sha256 do jawnej allowlisty.
+
 Diagnostyka bez uruchamiania serwera:
     start_toolbox.cmd doctor
+    powershell.exe -NoLogo -NoProfile -File .\start_toolbox.ps1 -Doctor
 
-Inny port, na przyklad 9000:
-    start_toolbox.cmd 9000
+Inny port, na przyklad 9000 (PowerShell):
+    powershell.exe -NoLogo -NoProfile -File .\start_toolbox.ps1 -Port 9000
 
-Wymagany jest zatwierdzony firmowy Python 3.10+ (polecenie py albo python w PATH).
+Wymagany jest zatwierdzony firmowy Python 3.10+. Starter szuka systemowego lub
+uzytkowego Python Launchera i znanych katalogow instalacji, nie wykonuje programu
+python znalezionego przypadkowo przez PATH.
+Generator grup AD wymaga zatwierdzonych narzedzi dsquery.exe i dsget.exe z RSAT;
+nie uruchamia PowerShella ani nie zmienia Execution Policy.

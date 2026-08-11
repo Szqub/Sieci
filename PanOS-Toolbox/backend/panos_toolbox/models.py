@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from defusedxml import ElementTree as SafeET
+from defusedxml.common import DefusedXmlException
+
 from .errors import InputError, ValidationError
 
 
@@ -102,8 +105,13 @@ class MutationOperation:
             # ElementTree rejects the forbidden C0 controls while the wrapper
             # permits the multi-node fragment accepted by PAN-OS ``element``.
             try:
-                ET.fromstring(f"<panos-toolbox-fragment>{self.element}</panos-toolbox-fragment>")
-            except ET.ParseError as exc:
+                SafeET.fromstring(
+                    f"<panos-toolbox-fragment>{self.element}</panos-toolbox-fragment>",
+                    forbid_dtd=True,
+                    forbid_entities=True,
+                    forbid_external=True,
+                )
+            except (ET.ParseError, DefusedXmlException) as exc:
                 raise ValidationError(f"Niepoprawny fragment element XML: {exc}.") from exc
         elif self.element is not None:
             raise ValidationError(f"Operacja {self.action.value} nie przyjmuje element XML.")

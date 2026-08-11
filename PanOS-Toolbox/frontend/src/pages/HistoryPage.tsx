@@ -1,9 +1,11 @@
 import {
   Activity,
+  AlertOctagon,
   AlertTriangle,
   ChevronRight,
   Clock3,
   CloudUpload,
+  ClipboardCopy,
   Database,
   Download,
   FileArchive,
@@ -36,6 +38,7 @@ interface HistoryPageProps {
   onDownloadBundle: (session: ToolboxSession) => void;
   onViewArtifact: (sessionId: string, artifact: string) => Promise<string>;
   onDownloadArtifact: (sessionId: string, artifact: string) => void;
+  onMaterializeHandMode: (session: ToolboxSession) => void;
   onReconcileExternal: (session: ToolboxSession) => void;
 }
 
@@ -136,6 +139,7 @@ export function HistoryPage({
   onDownloadBundle,
   onViewArtifact,
   onDownloadArtifact,
+  onMaterializeHandMode,
   onReconcileExternal,
 }: HistoryPageProps) {
   const [query, setQuery] = useState("");
@@ -143,6 +147,9 @@ export function HistoryPage({
   const [selectedTargets, setSelectedTargets] = useState<Set<string>>(new Set());
   const [confirmReconcile, setConfirmReconcile] = useState(false);
   const [artifactViewer, setArtifactViewer] = useState<ArtifactViewer | null>(null);
+  const [copiedArtifact, setCopiedArtifact] = useState<string | null>(null);
+  const [confirmRiskyCopy, setConfirmRiskyCopy] = useState<{ sessionId: string; file: string } | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const tokens = useMemo(() => queryTokens(query), [query]);
   const filtered = useMemo(() => sessions.filter((session) => {
     if (kind !== "all" && session.kind !== kind) return false;
@@ -160,10 +167,17 @@ export function HistoryPage({
     return count + (session.historyItems ?? []).filter((item) => itemMatches(item, tokens)).length;
   }, 0), [filtered, tokens]);
   const latestRestorable = sessions.find((session) => session.kind === "cleanup" && session.canRestore)?.id;
+  const activeArtifacts = active?.artifacts ?? [];
+  const activeHandMode = activeArtifacts.find((artifact) => artifact.kind === "handmode-cli-active");
+  const activeRollback = activeArtifacts.find((artifact) => artifact.kind === "handmode-cli-rollback");
+  const activeInstructions = activeArtifacts.find((artifact) => artifact.kind === "handmode-instructions");
+  const riskyHandMode = activeArtifacts.filter((artifact) => artifact.kind === "handmode-cli-excluded-manual-review" || artifact.kind === "handmode-cli-conflict-restore-manual-review");
 
   useEffect(() => {
     setSelectedTargets(new Set());
     setConfirmReconcile(false);
+    setConfirmRiskyCopy(null);
+    setCopyError(null);
   }, [active?.id]);
 
   const toggleTarget = (target: string) => setSelectedTargets((current) => {
@@ -179,6 +193,21 @@ export function HistoryPage({
       setArtifactViewer({ sessionId, file, loading: false, content });
     } catch (viewError) {
       setArtifactViewer({ sessionId, file, loading: false, error: viewError instanceof Error ? viewError.message : "Nie można odczytać pliku." });
+    }
+  };
+
+  const copyArtifact = async (sessionId: string, file: string) => {
+    setCopyError(null);
+    try {
+      const content = artifactViewer?.sessionId === sessionId && artifactViewer.file === file && !artifactViewer.loading && !artifactViewer.error
+        ? artifactViewer.content ?? ""
+        : await onViewArtifact(sessionId, file);
+      if (!navigator.clipboard?.writeText) throw new Error("Schowek jest niedostępny. Użyj Wyświetl i skopiuj z podglądu albo Pobierz TXT.");
+      await navigator.clipboard.writeText(content);
+      setCopiedArtifact(`${sessionId}:${file}`);
+      window.setTimeout(() => setCopiedArtifact((current) => current === `${sessionId}:${file}` ? null : current), 1800);
+    } catch (clipboardError) {
+      setCopyError(clipboardError instanceof Error ? clipboardError.message : "Nie udało się skopiować pliku.");
     }
   };
 
@@ -221,6 +250,19 @@ export function HistoryPage({
           <div className="session-actions"><Button variant="primary" icon={<FileArchive size={16} />} loading={busy} onClick={() => onDownloadBundle(active)}>Pobierz pełny backup ZIP</Button>{active.canReconcileExternal && <Button icon={<SquareTerminal size={16} />} disabled={busy || !connected} onClick={() => setConfirmReconcile(true)}>{connected ? "Zweryfikuj wykonanie CLI/API" : "Połącz, aby zweryfikować CLI/API"}</Button>}</div>
           <div className="persistent-backup-note"><ShieldCheck size={17} /><span><strong>Historia i backup nie znikają po zamknięciu.</strong><small>{storage ? `${storage}\\${active.id}` : active.id}</small></span></div>
 
+          <div className="history-handmode-panel">
+            <header><SquareTerminal size={18} /><span><strong>Hand Mode z tej sesji</strong><small>Prawdziwe PAN-OS CLI z zapisanego PatchSetu · działa offline</small></span>{activeHandMode ? <StatusPill tone={activeHandMode.sizeBytes === 0 && (active.mutationCount ?? 0) > 0 ? "danger" : "success"}>{activeHandMode.sizeBytes === 0 && (active.mutationCount ?? 0) > 0 ? "BLOCK" : "READY"}</StatusPill> : <StatusPill tone="warning">STARA SESJA</StatusPill>}</header>
+            {copyError && <Callout severity="danger" title="Nie udało się skopiować"><p>{copyError}</p></Callout>}
+            {!activeHandMode ? <div className="history-handmode-missing"><p>Ta sesja powstała przed dodaniem nowego renderera. Toolbox może dopisać nowe pliki CLI lokalnie, nie ruszając starego <code>commands.txt</code>, backupów ani Panoramy.</p><Button variant="primary" icon={<SquareTerminal size={15} />} loading={busy} onClick={() => onMaterializeHandMode(active)}>Wygeneruj Hand Mode offline</Button></div> : <div className="history-handmode-actions">
+              <Button icon={<FileText size={14} />} onClick={() => void openArtifact(active.id, activeHandMode.file)}>Wyświetl komendy</Button>
+              <Button variant="primary" icon={<ClipboardCopy size={14} />} disabled={activeHandMode.sizeBytes === 0 && (active.mutationCount ?? 0) > 0} onClick={() => void copyArtifact(active.id, activeHandMode.file)}>{copiedArtifact === `${active.id}:${activeHandMode.file}` ? "Skopiowano" : "Kopiuj wszystkie"}</Button>
+              <Button icon={<Download size={14} />} onClick={() => onDownloadArtifact(active.id, activeHandMode.file)}>Pobierz TXT</Button>
+              {activeRollback && <Button variant="ghost" icon={<RotateCcw size={14} />} onClick={() => void openArtifact(active.id, activeRollback.file)}>Rollback</Button>}
+              {activeInstructions && <Button variant="ghost" onClick={() => void openArtifact(active.id, activeInstructions.file)}>Instrukcja</Button>}
+            </div>}
+            {riskyHandMode.map((artifact) => <div className="history-handmode-risky" key={artifact.file}><AlertOctagon size={18} /><span><strong>{artifact.kind.includes("conflict") ? "Konfliktowy Restore" : "Elementy wykluczone z planu"}</strong><small>Osobny zestaw poza aktywnym PatchSetem. Wymaga jawnego review; nie łącz go automatycznie z bezpiecznymi komendami.</small></span><div><Button variant="danger" onClick={() => void openArtifact(active.id, artifact.file)}>Wyświetl</Button><Button variant="danger" disabled={artifact.sizeBytes === 0} onClick={() => setConfirmRiskyCopy({ sessionId: active.id, file: artifact.file })}>Kopiuj…</Button><Button onClick={() => onDownloadArtifact(active.id, artifact.file)}>Pobierz</Button></div></div>)}
+          </div>
+
           {active.kind === "cleanup" && <div className="detail-section"><h3><RotateCcw size={17} /> Przywracanie według celu wejściowego</h3>{(active.targets ?? []).length ? <div className="restore-target-list">{(active.targets ?? []).map((target) => <label key={target}><input type="checkbox" checked={selectedTargets.has(target)} onChange={() => toggleTarget(target)} disabled={!active.canRestore} /><span><strong>{target.replace(/^(object|group|policy):/, "")}</strong><small>{target.includes(":") ? target.split(":", 1)[0] : "IP"}</small></span><b>{(active.backupItems ?? []).filter((item) => item.targets.includes(target)).length} plików</b></label>)}</div> : <p className="muted-value">Sesja nie zawiera celów wejściowych.</p>}<div className="restore-actions"><Button disabled={!active.canRestore || selectedTargets.size === 0} onClick={() => onRestoreTargets([...selectedTargets])}>Restore zaznaczonych ({selectedTargets.size})</Button><Button variant="primary" disabled={!active.canRestore} onClick={() => onRestore(active)}>Restore całej sesji</Button></div>{!active.canRestore && active.canReconcileExternal && <Callout severity="info" title="Brak dowodu wykonania"><p>Plan lub komendy nie oznaczają zmiany w Panoramie. Dopiero live reconciliation może oznaczyć tę sesję jako wykonaną i odblokować Restore.</p></Callout>}</div>}
 
           <div className="detail-section history-mutations"><h3><Search size={17} /> {tokens.length ? `Trafienia dla „${query.trim()}”` : "Operacje zapisane w sesji"} ({activeItems.length})</h3>{activeItems.length ? <div className="history-mutation-list">{activeItems.map((item) => <article key={item.id} className={item.wasApplied ? "was-applied" : "was-planned"}>
@@ -243,6 +285,7 @@ export function HistoryPage({
     </div>
 
     {confirmReconcile && active && <div className="write-confirm-backdrop"><div className="write-confirm" role="dialog" aria-modal="true"><div><AlertTriangle size={22} /><strong>Zweryfikować wykonanie komend poza Toolboxem?</strong></div><p>To nie wykona żadnej zmiany. Toolbox pobierze live running i Candidate, sprawdzi wynik każdej planowanej operacji oraz kolejność polityk. Tylko pełna zgodność odblokuje Restore.</p><div><Button onClick={() => setConfirmReconcile(false)}>Anuluj</Button><Button variant="primary" onClick={() => { setConfirmReconcile(false); onReconcileExternal(active); }}>Sprawdź i zarejestruj</Button></div></div></div>}
-    {artifactViewer && <div className="artifact-viewer-backdrop"><div className="artifact-viewer" role="dialog" aria-modal="true" aria-label={`Podgląd ${artifactViewer.file}`}><header><div><FileText size={19} /><span><strong>{artifactViewer.file}</strong><small>Odczyt lokalny · integralność wskazanego pliku sprawdzana przed wyświetleniem</small></span></div><div><Button variant="ghost" icon={<Download size={14} />} onClick={() => onDownloadArtifact(artifactViewer.sessionId, artifactViewer.file)}>Pobierz</Button><button onClick={() => setArtifactViewer(null)} aria-label="Zamknij podgląd"><X size={19} /></button></div></header>{artifactViewer.loading ? <div className="artifact-viewer-loading"><RefreshCw className="spin" size={22} /><span>Sprawdzanie i odczyt backupu…</span></div> : artifactViewer.error ? <Callout severity="danger" title="Nie można wyświetlić pliku"><p>{artifactViewer.error}</p></Callout> : <pre>{artifactViewer.content}</pre>}</div></div>}
+    {confirmRiskyCopy && <div className="write-confirm-backdrop"><div className="write-confirm write-confirm--critical" role="dialog" aria-modal="true" aria-labelledby="history-risky-handmode-title"><div><AlertOctagon size={22} /><strong id="history-risky-handmode-title">Kopiujesz komendy poza bezpiecznym planem</strong></div><p>Ten zestaw zawiera elementy wykluczone albo konfliktowy Restore. Jego wykonanie może naruszyć DEFAULT, świeżą politykę lub późniejszą zmianę operatora. Przejrzyj pełny plik i aktualny config.</p><div><Button onClick={() => setConfirmRiskyCopy(null)}>Anuluj</Button><Button variant="danger" onClick={() => { const value = confirmRiskyCopy; setConfirmRiskyCopy(null); void copyArtifact(value.sessionId, value.file); }}>Rozumiem — kopiuj</Button></div></div></div>}
+    {artifactViewer && <div className="artifact-viewer-backdrop"><div className="artifact-viewer" role="dialog" aria-modal="true" aria-label={`Podgląd ${artifactViewer.file}`}><header><div><FileText size={19} /><span><strong>{artifactViewer.file}</strong><small>Odczyt lokalny · integralność wskazanego pliku sprawdzana przed wyświetleniem</small></span></div><div>{!artifactViewer.loading && !artifactViewer.error && <Button variant="ghost" icon={<ClipboardCopy size={14} />} onClick={() => riskyHandMode.some((artifact) => artifact.file === artifactViewer.file) ? setConfirmRiskyCopy({ sessionId: artifactViewer.sessionId, file: artifactViewer.file }) : void copyArtifact(artifactViewer.sessionId, artifactViewer.file)}>{copiedArtifact === `${artifactViewer.sessionId}:${artifactViewer.file}` ? "Skopiowano" : "Kopiuj"}</Button>}<Button variant="ghost" icon={<Download size={14} />} onClick={() => onDownloadArtifact(artifactViewer.sessionId, artifactViewer.file)}>Pobierz</Button><button onClick={() => setArtifactViewer(null)} aria-label="Zamknij podgląd"><X size={19} /></button></div></header>{artifactViewer.loading ? <div className="artifact-viewer-loading"><RefreshCw className="spin" size={22} /><span>Sprawdzanie i odczyt backupu…</span></div> : artifactViewer.error ? <Callout severity="danger" title="Nie można wyświetlić pliku"><p>{artifactViewer.error}</p></Callout> : <pre>{artifactViewer.content}</pre>}</div></div>}
   </div>;
 }

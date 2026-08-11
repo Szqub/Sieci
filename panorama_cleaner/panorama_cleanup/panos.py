@@ -10,6 +10,9 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from defusedxml import ElementTree as SafeET
+from defusedxml.common import DefusedXmlException
+
 from .models import (
     AddressObject,
     CandidateComparison,
@@ -92,13 +95,27 @@ def _find_config_element(root: ET.Element) -> ET.Element:
     return config
 
 
+def safe_xml_fromstring(payload: bytes | str) -> ET.Element:
+    """Parse XML with DTD, entities and external references disabled."""
+
+    try:
+        return SafeET.fromstring(
+            payload,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except DefusedXmlException as exc:
+        raise ET.ParseError(str(exc)) from exc
+
+
 def parse_api_response(payload: bytes, *, expect_config: bool = False) -> ET.Element:
     """Parse and validate a complete PAN-OS XML API response."""
 
     if not payload or not payload.rstrip().endswith(b">"):
         raise SnapshotError("Odpowiedź Panoramy jest pusta lub ucięta.")
     try:
-        root = ET.fromstring(payload)
+        root = safe_xml_fromstring(payload)
     except ET.ParseError as exc:
         raise SnapshotError(f"Niepoprawna lub ucięta odpowiedź XML: {exc}") from exc
     if root.tag == "response":
@@ -437,7 +454,7 @@ def normalize_host_literal(value: str) -> Optional[str]:
         return None
     if "/" in stripped:
         base_text, mask_text = stripped.split("/", 1)
-        if mask_text.strip() == "0.0.0.0":
+        if mask_text.strip() == "0.0.0.0":  # nosec B104 - wildcard mask, not bind
             try:
                 return str(ipaddress.IPv4Address(base_text.strip()))
             except ValueError:

@@ -38,6 +38,7 @@ from .xmlutil import (
     fingerprint_element,
     fingerprint_xpath,
     parent_xpath,
+    parse_xml,
     raw_sha256,
     rule_order_context_sha256,
 )
@@ -1424,7 +1425,7 @@ def _target_element_from_response(
     identity_xml = mutation.after_xml or mutation.before_xml
     if not identity_xml:
         return None
-    identity = ET.fromstring(identity_xml)
+    identity = parse_xml(identity_xml)
     expected_name = identity.get("name")
     for element in response.iter(identity.tag):
         if expected_name is None or element.get("name") == expected_name:
@@ -1437,7 +1438,7 @@ def _targeted_rule_order_problem(
 ) -> Optional[str]:
     if mutation.entity_type != "policy" or mutation.after_xml is None:
         return None
-    expected = ET.fromstring(mutation.after_xml)
+    expected = parse_xml(mutation.after_xml)
     name = expected.get("name")
     if not name:
         return "Nie można ustalić nazwy odtwarzanej polityki."

@@ -1,21 +1,43 @@
 import paramiko
+import ipaddress
 import re
 import sys
 import getpass
 import time
 
-PANORAMA_IP = "IP PANORAMY"
+PANORAMA_IP = input("Podaj hostname lub adres IP Panoramy: ").strip()
+if not PANORAMA_IP or any(character.isspace() or ord(character) < 32 for character in PANORAMA_IP):
+    print("Niepoprawny hostname lub adres IP Panoramy.")
+    sys.exit(2)
 USER = input("Podaj username do Panoramy: ").strip()
 PASS = getpass.getpass("Podaj hasło: ")
+
+MAX_CLI_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def cli_quote(value):
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("Nazwa CLI zawiera niedozwolony znak sterujący.")
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 def debug(msg):
     print(f"[DEBUG] {msg}")
 
 def connect_panorama():
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
     debug("Łączę się z Panoramą...")  # Startujemy jak rakieta!
-    client.connect(PANORAMA_IP, username=USER, password=PASS)
+    client.connect(
+        PANORAMA_IP,
+        username=USER,
+        password=PASS,
+        allow_agent=False,
+        look_for_keys=False,
+        timeout=10,
+        auth_timeout=15,
+        banner_timeout=15,
+    )
     shell = client.invoke_shell()
 
     # Czekamy na prompt operacyjny ">"
@@ -65,11 +87,15 @@ def connect_panorama():
     return client, shell
 
 def send_command(shell, cmd):
+    if "\r" in cmd or "\n" in cmd:
+        raise ValueError("Komenda SSH zawiera niedozwolony znak nowej linii.")
     shell.send(cmd + "\n")
     debug(f"Wysłano komendę: {cmd}")
     time.sleep(2)
-    output = shell.recv(100000).decode()
-    debug(f"Otrzymano output: {output.strip()}")
+    output = shell.recv(100000).decode("utf-8", errors="replace")
+    if len(output.encode("utf-8")) > MAX_CLI_RESPONSE_BYTES:
+        raise RuntimeError("Odpowiedź CLI przekroczyła bezpieczny limit 16 MiB.")
+    debug(f"Otrzymano odpowiedź CLI ({len(output.encode('utf-8'))} bajtów).")
     return output
 
 def parse_rule_details(output):
@@ -90,7 +116,7 @@ def parse_rule_details(output):
 def find_rules(shell, ip, direction):
     result = send_command(shell, f"show | match {ip}")
     rules_found = []  # Zmienione z set() na listę, by zebrać wszystkie trafienia!
-    pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{ip}"
+    pattern = rf"set device-group (\S+) (\S+) security rules (\S+) {direction}.*{re.escape(ip)}"
     for line in result.splitlines():
         if match := re.search(pattern, line):
             rule = (match.group(1), match.group(2), match.group(3))
@@ -101,7 +127,11 @@ def find_rules(shell, ip, direction):
 def main():
     client, shell = connect_panorama()
     try:
-        ip = input("Podaj adres IP: ").strip()
+        try:
+            ip = str(ipaddress.ip_address(input("Podaj adres IP: ").strip()))
+        except ValueError:
+            print("Niepoprawny adres IP.")
+            return
         direction_choice = input("Wybierz opcję wyszukiwania (1 - destination, 2 - source): ").strip()
 
         if direction_choice == "1":
@@ -124,7 +154,13 @@ def main():
         print(f"\nZnaleziono {len(rules_found)} reguł(e) zawierających IP {ip} jako {direction}.\n")
         # Iterujemy przez znalezione reguły
         for idx, (dg, rulebase, rule_name) in enumerate(rules_found, start=1):
-            details = send_command(shell, f"show device-group {dg} {rulebase} security rules {rule_name}")
+            if rulebase not in {"pre-rulebase", "post-rulebase"}:
+                print(f"Pomijam regułę z nieobsługiwanym rulebase: {rulebase}")
+                continue
+            details = send_command(
+                shell,
+                f"show device-group {cli_quote(dg)} {rulebase} security rules {cli_quote(rule_name)}",
+            )
             print(f"\nReguła {idx}: {rule_name} (Device Group: {dg}, Rulebase: {rulebase})")
             attributes = parse_rule_details(details)
             if attributes:

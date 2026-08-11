@@ -6,6 +6,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 BACKEND = Path(__file__).resolve().parent / "backend"
 backend_text = str(BACKEND)
 sys.path[:] = [entry for entry in sys.path if entry != backend_text]

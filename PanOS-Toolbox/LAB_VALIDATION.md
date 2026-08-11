@@ -4,6 +4,25 @@ Wykonaj na nieprodukcyjnej device group i testowym firewallu. Zachowaj pełny
 eksport konfiguracji poza Toolboxem. Nie przechodź do następnego etapu, jeśli
 bieżący nie ma jednoznacznego wyniku.
 
+## 0. Magazyn lokalny i telemetryka SMB
+
+1. Na stacji z przekierowanym folderem Dokumenty uruchom `start_toolbox.cmd doctor` i potwierdź `Session Storage Local: PASS` oraz ścieżkę pod
+   `%LOCALAPPDATA%\PanOS Toolbox`.
+2. Potwierdź w **Backup i restore**, że wcześniejsze sesje z
+   `Dokumenty\PanOS Toolbox` zostały skopiowane i są wyszukiwalne, a katalog
+   źródłowy nie został zmodyfikowany ani usunięty.
+3. Wykonaj lokalny plan bez WRITE. W nowej sesji journal ma być pojedynczym
+   `journal\events.jsonl`; nie mogą powstawać kolejne `000001.json`,
+   `000002.json` ani tymczasowe odpowiedniki tych nazw.
+4. Jeżeli paczka leży na SMB, potwierdź brak nowych `__pycache__` i `.pyc` obok
+   kodu. Telemetria udziału może zawierać odczyty/import starych sesji, ale nie
+   może zawierać `SMB MOVE/RENAME` wykonanych przez Toolbox.
+5. Powtórz pobranie do lokalnego katalogu. Jeżeli **Pobrane** jest na SMB,
+   oddziel ewentualny rename przeglądarki z procesu pobierania od operacji
+   wykonywanych po starcie Toolboxa.
+6. Nie wyłączaj NDR/EDR i nie zmieniaj rozszerzeń. Każdy kolejny alert zachowaj
+   z pełną ścieżką, nazwą detekcji, czasem, użytkownikiem i operacją SMB.
+
 ## 1. Read-only i plan
 
 1. Ustaw `api_max_stage=read-only`.
@@ -15,6 +34,39 @@ bieżący nie ma jednoznacznego wyniku.
    informacją.
 5. Wprowadź zmianę na dotkniętej encji i potwierdź konflikt wyłącznie jej
    komponentu.
+
+## 1A. Hand Mode na Panorama 10.2
+
+1. Dla testowego batcha 300 polityk potwierdź, że aktywny plik ma dokładnie
+   wszystkie unikalne linie `delete device-group ... rules ...`, bez JSON,
+   `xpath=`, XML API, `configure`, `commit` i `push`.
+2. Wybierz trzy nieprodukcyjne reguły. W CLI wykonaj `set cli scripting-mode
+   on`, przejdź do `configure`, wklej aktywny plik i sprawdź `show | compare`.
+   Diff musi odpowiadać 1:1 operacjom aktywnego PatchSetu. Nie commituj w tej
+   próbie, jeżeli zakres nie jest dokładnie zgodny.
+3. Powtórz dla tworzenia: address host/network, address-group z kilkoma
+   memberami, service TCP/UDP, security policy z from/to/source/destination,
+   application/service/tag/description oraz `move before/after/top/bottom`.
+4. Użyj nazw zawierających spacje, apostrof i cudzysłów. Potwierdź poprawne
+   quoting w CLI. Wstrzyknij znak nowej linii do opisu w kontrolowanym teście:
+   status musi być `BLOCK`, a aktywny plik pusty — bez częściowych komend.
+5. Wyklucz jedną regułę, komponent zależności oraz cel chroniony przez
+   `DEFAULT`. `commands.txt` nie może ich zawierać; mają wystąpić wyłącznie w
+   `handmode_excluded_commands.txt` z dodatkowym ostrzeżeniem GUI.
+6. Otwórz sesję utworzoną starszą wersją i użyj **Wygeneruj Hand Mode
+   offline**. Potwierdź brak połączeń do Panoramy, zachowanie starego
+   `commands.txt` bez zmiany SHA oraz utworzenie `handmode_commands.txt`.
+   Drugie kliknięcie nie może tworzyć kolejnej kopii plików.
+7. Dla Restore potwierdź kolejność inverse operations: encja przed memberem,
+   odtworzenie polityki i jej pozycji. Konfliktowy komponent ma być wyłącznie
+   w `handmode_conflict_restore_commands.txt`, nigdy w bezpiecznym pliku.
+8. Dla Custom LDAP Group zweryfikuj na PAN-OS 10.2 składnię `set template
+   ... config vsys ... group-mapping ... custom-group ... ldap-filter ...` i
+   odpowiadający rollback `delete`. Dwa bloki filtra muszą utworzyć dwie
+   osobne nazwy `AD__NAZWA__01` i `AD__NAZWA__02`.
+9. Po każdej próbie rollback wklej osobno, wykonaj `show | compare` i
+   potwierdź powrót candidate do stanu początkowego. Commit/push pozostają
+   osobnymi testami z kolejnych sekcji.
 
 ## 2. Candidate apply i rollback
 

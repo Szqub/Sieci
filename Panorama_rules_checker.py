@@ -22,9 +22,20 @@ rules_hit - zawiera reguły z hit count > 0
 """
 
 import getpass
-import sys
-from netmiko import ConnectHandler
 import re
+import sys
+import time
+
+import paramiko
+
+
+MAX_CLI_RESPONSE_BYTES = 16 * 1024 * 1024
+
+def cli_quote(value):
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("Nazwa CLI zawiera niedozwolony znak sterujący.")
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
 
 class PanoramaSSH:
     """
@@ -35,53 +46,79 @@ class PanoramaSSH:
         self.panorama_ip = panorama_ip
         self.username = username
         self.password = password
-        self.device = {
-            'device_type': 'paloalto_panos',
-            'ip': panorama_ip,
-            'username': username,
-            'password': password,
-            'port': 22,
-            'verbose': True,
-            'global_delay_factor': 2
-        }
-        self.connection = None
+        self.client = None
+        self.channel = None
 
     def connect(self):
         try:
             print(f"DEBUG: Próba połączenia SSH z {self.panorama_ip}")
-            self.connection = ConnectHandler(**self.device)
+            self.client = paramiko.SSHClient()
+            self.client.load_system_host_keys()
+            self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            self.client.connect(
+                self.panorama_ip,
+                username=self.username,
+                password=self.password,
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=10,
+                auth_timeout=15,
+                banner_timeout=15,
+            )
+            self.channel = self.client.invoke_shell()
+            self._read_until_prompt()
+            self.send_command("set cli pager off")
+            self.password = None
             print("DEBUG: Pomyślnie nawiązano połączenie SSH")
-            
-            # Wyłącz pager
-            print("DEBUG: Wyłączanie pagera...")
-            self.connection.send_command('set cli pager off')
-            
-            # Poczekaj na znak zachęty
-            print("DEBUG: Oczekiwanie na znak zachęty...")
-            self.connection.send_command('', expect_string='>')
-            
             return True
-        except Exception as e:
-            print(f"BŁĄD: Podczas łączenia z Panoramą: {e}")
+        except Exception as exc:
+            print(f"BŁĄD: Podczas łączenia z Panoramą: {type(exc).__name__}")
+            self.disconnect()
             return False
 
+    def _read_until_prompt(self, timeout=30):
+        if self.channel is None:
+            raise RuntimeError("Kanał SSH nie jest otwarty.")
+        deadline = time.monotonic() + timeout
+        output = ""
+        while time.monotonic() < deadline:
+            if self.channel.recv_ready():
+                output += self.channel.recv(65535).decode("utf-8", errors="replace")
+                if len(output.encode("utf-8")) > MAX_CLI_RESPONSE_BYTES:
+                    raise RuntimeError("Odpowiedź CLI przekroczyła bezpieczny limit 16 MiB.")
+                if output.rstrip().endswith((">", "#")):
+                    return output
+            elif self.channel.closed:
+                raise RuntimeError("Kanał SSH został zamknięty.")
+            time.sleep(0.1)
+        raise TimeoutError("Timeout oczekiwania na prompt Panoramy.")
+
+    def send_command(self, command):
+        if "\r" in command or "\n" in command:
+            raise ValueError("Komenda SSH zawiera niedozwolony znak nowej linii.")
+        if self.channel is None:
+            raise RuntimeError("Kanał SSH nie jest otwarty.")
+        self.channel.send(command + "\n")
+        return self._read_until_prompt()
+
     def disconnect(self):
-        if self.connection:
-            try:
-                self.connection.disconnect()
-                print("DEBUG: Pomyślnie zamknięto połączenie SSH")
-            except Exception as e:
-                print(f"BŁĄD: Podczas zamykania połączenia: {e}")
+        try:
+            if self.channel is not None:
+                self.channel.close()
+            if self.client is not None:
+                self.client.close()
+            print("DEBUG: Pomyślnie zamknięto połączenie SSH")
+        except Exception as exc:
+            print(f"BŁĄD: Podczas zamykania połączenia: {type(exc).__name__}")
+        finally:
+            self.channel = None
+            self.client = None
+            self.password = None
 
     def get_device_groups(self):
         try:
             print("DEBUG: Pobieranie listy device groups...")
-            output = self.connection.send_command('show devicegroups')
-            
-            # Zapisz odpowiedź do pliku dla debugowania
-            with open('debug_device_groups.txt', 'w') as f:
-                f.write(output)
-            print("DEBUG: Zapisano odpowiedź do pliku debug_device_groups.txt")
+            output = self.send_command('show devicegroups')
             
             # Parsowanie outputu CLI - szukamy tylko linii z "Group:"
             device_groups = []
@@ -104,15 +141,12 @@ class PanoramaSSH:
     def get_rule_hit_count(self, device_group, rulebase, rule_name):
         try:
             print(f"DEBUG: Pobieranie hit count dla reguły {rule_name}...")
-            command = f'show rule-hit-count device-group {device_group} {rulebase} security rules rule-name {rule_name}'
-            output = self.connection.send_command(command)
-            
-            # Zapisz odpowiedź do pliku dla debugowania
-            with open('debug_hit_count_response.txt', 'w') as f:
-                f.write(output)
-            print("DEBUG: Zapisano odpowiedź do pliku debug_hit_count_response.txt")
-            print("DEBUG: Pełna odpowiedź:")
-            print(output)
+            command = (
+                'show rule-hit-count device-group {} {} security rules rule-name {}'.format(
+                    cli_quote(device_group), rulebase, cli_quote(rule_name)
+                )
+            )
+            output = self.send_command(command)
             
             # Szukaj hit count dla każdego urządzenia
             total_hit_count = 0
@@ -138,7 +172,10 @@ def main():
     print("==========================================================")
     
     # Pobierz dane logowania
-    panorama_ip = "IP PANORAMY"
+    panorama_ip = input("Podaj hostname lub adres IP Panoramy: ").strip()
+    if not panorama_ip or any(character.isspace() or ord(character) < 32 for character in panorama_ip):
+        print("Niepoprawny hostname lub adres IP Panoramy.")
+        sys.exit(2)
     username = input("Podaj nazwę użytkownika: ")
     password = getpass.getpass("Podaj hasło: ")
     
@@ -200,7 +237,7 @@ def main():
         # Wczytaj nazwy reguł z pliku
         input_file = input("\nPodaj ścieżkę do pliku z nazwami reguł: ")
         try:
-            with open(input_file, 'r') as file:
+            with open(input_file, 'r', encoding='utf-8') as file:
                 rules = [line.strip() for line in file if line.strip()]
         except Exception as e:
             print(f"Błąd podczas wczytywania pliku: {e}")
@@ -233,18 +270,18 @@ def main():
         
         # Zapisz wyniki do plików
         try:
-            with open('rules_0hit', 'w') as f:
+            with open('rules_0hit', 'w', encoding='utf-8') as f:
                 for rule in rules_0hit:
                     f.write(f"{rule}\n")
             print(f"\nZapisano {len(rules_0hit)} reguł z hit count = 0 do pliku rules_0hit")
             
-            with open('rules_hit', 'w') as f:
+            with open('rules_hit', 'w', encoding='utf-8') as f:
                 for rule in rules_hit:
                     f.write(f"{rule}\n")
             print(f"Zapisano {len(rules_hit)} reguł z hit count > 0 do pliku rules_hit")
             
             if rules_not_found:
-                with open('rules_not_found', 'w') as f:
+                with open('rules_not_found', 'w', encoding='utf-8') as f:
                     for rule in rules_not_found:
                         f.write(f"{rule}\n")
                 print(f"Zapisano {len(rules_not_found)} reguł, których nie znaleziono w rulebase do pliku rules_not_found")

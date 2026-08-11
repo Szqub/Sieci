@@ -25,8 +25,13 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from .errors import IntegrityError, SessionError, ToolboxError
 from .models import Mutation, PatchSet, SessionState, canonical_json, json_sha256, utc_now
 from .profile import PanoramaProfile
-from .profile_store import default_toolbox_root
-from .xmlutil import device_group_from_xpath, raw_sha256
+from .platform_tools import windows_system_tool
+from .profile_store import (
+    default_toolbox_root,
+    is_remote_data_root,
+    legacy_toolbox_roots,
+)
+from .xmlutil import device_group_from_xpath, parse_xml, raw_sha256
 
 
 SCHEMA_VERSION = 1
@@ -152,9 +157,12 @@ def _harden_directory(path: Path, *, enforce: bool) -> None:
     principal = f"{domain}\\{username}" if domain else username
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    icacls = windows_system_tool("icacls.exe")
+    if not icacls:
+        raise SessionError("Nie znaleziono zaufanego System32\\icacls.exe.")
     completed = subprocess.run(
         [
-            "icacls",
+            icacls,
             str(path),
             "/inheritance:r",
             "/grant:r",
@@ -192,8 +200,8 @@ def _history_xml_values(*fragments: Optional[str]) -> list[str]:
         if not fragment or not fragment.strip():
             continue
         try:
-            root = ET.fromstring(f"<panos-toolbox-history>{fragment}</panos-toolbox-history>")
-        except ET.ParseError:
+            root = parse_xml(f"<panos-toolbox-history>{fragment}</panos-toolbox-history>")
+        except ToolboxError:
             # The PatchSet parser already validates operation XML.  A legacy
             # before/after fragment may still be incomplete; retain useful IP,
             # object and XPath-like tokens without exposing the entire blob.
@@ -275,7 +283,16 @@ _TRANSITIONS: dict[SessionState, set[SessionState]] = {
 class SessionStore:
     def __init__(self, root: Optional[Path] = None, *, enforce_acl: bool = True):
         self._using_default_root = root is None
-        self.root = (root or default_session_root()).expanduser().resolve()
+        candidate = (root or default_session_root()).expanduser()
+        if is_remote_data_root(candidate):
+            raise SessionError(
+                "Magazyn sesji wskazuje udział sieciowy/SMB. Mutowalne journale, "
+                "manifesty i backupy muszą być zapisywane lokalnie w "
+                "%LOCALAPPDATA%\\PanOS Toolbox."
+            )
+        self.root = candidate.resolve()
+        if is_remote_data_root(self.root):
+            raise SessionError("Rozwiązana ścieżka magazynu sesji prowadzi na SMB.")
         self.enforce_acl = enforce_acl
         self._journal_state_cache: dict[
             str, tuple[tuple[int, int], dict[str, Any]]
@@ -285,16 +302,13 @@ class SessionStore:
             self._migrate_legacy_sessions()
 
     def _migrate_legacy_sessions(self) -> None:
-        """Copy old portable/LOCALAPPDATA sessions into the stable user root."""
+        """Read old stores and copy complete sessions to local storage once."""
 
         candidates: list[Path] = [
             Path(__file__).resolve().parents[2] / "backupy" / "sessions",
         ]
-        localappdata = os.environ.get("LOCALAPPDATA")
-        if localappdata:
-            candidates.append(Path(localappdata) / "PanOSToolbox" / "sessions")
-        candidates.append(Path.home() / ".local" / "share" / "PanOSToolbox" / "sessions")
-        for source in candidates:
+        candidates.extend(root / "sessions" for root in legacy_toolbox_roots())
+        for source in dict.fromkeys(candidates):
             try:
                 source = source.expanduser().resolve()
             except OSError:
@@ -307,11 +321,23 @@ class SessionStore:
                 destination = self.root / session.name
                 if destination.exists():
                     continue
+                temporary = self.root / (
+                    f".legacy-import-{session.name}-{secrets.token_hex(4)}"
+                )
                 try:
-                    shutil.copytree(session, destination)
-                except OSError:
+                    shutil.copytree(
+                        session,
+                        temporary,
+                        ignore=lambda _directory, names: [
+                            name for name in names if name.startswith(".")
+                        ],
+                    )
+                    _harden_directory(temporary, enforce=self.enforce_acl)
+                    os.replace(temporary, destination)
+                except (OSError, SessionError):
                     # A stale/partially copied legacy session must not prevent
                     # a fresh GUI from starting; the original remains intact.
+                    shutil.rmtree(temporary, ignore_errors=True)
                     continue
 
     def _directory(self, session_id: str) -> Path:
@@ -822,8 +848,8 @@ class SessionStore:
         if self._directory(session_id) not in path.parents:
             raise SessionError("Snapshot wychodzi poza katalog sesji.")
         try:
-            return ET.fromstring(path.read_bytes())
-        except (OSError, ET.ParseError) as exc:
+            return parse_xml(path.read_bytes())
+        except (OSError, ToolboxError) as exc:
             raise IntegrityError(f"Nie można odczytać snapshotu {label}.") from exc
 
     def append_event(

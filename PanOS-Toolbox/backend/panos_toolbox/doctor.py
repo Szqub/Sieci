@@ -6,7 +6,6 @@ import os
 import shutil
 import socket
 import ssl
-import subprocess
 import sys
 import importlib.util
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import Any, Optional
 
 from .client import PanoramaReadClient
 from .profile import PanoramaProfile, load_profile, obtain_password
+from .profile_store import is_remote_data_root
 from .sessions import SessionStore
 
 
@@ -55,53 +55,21 @@ def run_doctor(
         if web_runtime_ok
         else "Brak spakowanego Flask/Werkzeug; GUI nie wystartuje.",
     )
-    ad_helper = Path(__file__).with_name("ad_group_lookup.ps1")
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
-    if not ad_helper.is_file():
-        record("active-directory", False, "Brak helpera ad_group_lookup.ps1 w paczce.")
-    elif not powershell:
+    dsquery = shutil.which("dsquery.exe") or shutil.which("dsquery")
+    dsget = shutil.which("dsget.exe") or shutil.which("dsget")
+    if not dsquery or not dsget:
         record(
             "active-directory",
             True,
-            "Brak Windows PowerShell; generator grup AD będzie niedostępny.",
+            "Brak dsquery.exe/dsget.exe z RSAT; generator grup AD będzie niedostępny.",
             state="warn",
         )
     else:
-        try:
-            probe = subprocess.run(
-                [
-                    powershell,
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "if (Get-Module -ListAvailable -Name ActiveDirectory) { exit 0 } else { exit 2 }",
-                ],
-                capture_output=True,
-                timeout=10,
-                check=False,
-                creationflags=(
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-                ),
-            )
-            available = probe.returncode == 0
-            record(
-                "active-directory",
-                True,
-                (
-                    "PowerShell i moduł ActiveDirectory (RSAT) dostępne."
-                    if available
-                    else "PowerShell dostępny, ale brak modułu ActiveDirectory (RSAT); generator grup AD będzie niedostępny."
-                ),
-                state="pass" if available else "warn",
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            record(
-                "active-directory",
-                True,
-                "Nie udało się potwierdzić modułu ActiveDirectory; generator sprawdzi go ponownie przy użyciu.",
-                state="warn",
-            )
+        record(
+            "active-directory",
+            True,
+            "Microsoft RSAT dsquery.exe/dsget.exe dostępne; walidacja AD jest read-only.",
+        )
     if static_dir is not None:
         static_index = static_dir / "index.html"
         record(
@@ -141,6 +109,16 @@ def run_doctor(
         probe.write_text("ok", encoding="ascii")
         probe.unlink()
         record("session-store", True, str(store.root))
+        remote_store = is_remote_data_root(store.root)
+        record(
+            "session-storage-local",
+            not remote_store,
+            (
+                f"Lokalny magazyn operacyjny: {store.root}"
+                if not remote_store
+                else "Magazyn operacyjny wskazuje SMB; zapis został zablokowany."
+            ),
+        )
         job_markers = sorted(store.root.glob(".panorama-job-*.lock"))
         record(
             "panorama-job-marker",
@@ -186,7 +164,7 @@ def run_doctor(
                     context = (
                         ssl.create_default_context()
                         if profile.verify_ssl
-                        else ssl._create_unverified_context()  # noqa: SLF001
+                        else ssl._create_unverified_context()  # noqa: SLF001  # nosec B323 - explicit operator choice
                     )
                     connection = context.wrap_socket(
                         connection,

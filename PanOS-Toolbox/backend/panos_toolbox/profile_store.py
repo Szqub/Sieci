@@ -25,6 +25,7 @@ from typing import Any, Mapping, Optional
 
 from .errors import InputError, SessionError
 from .models import ApiStage, json_sha256
+from .platform_tools import windows_system_tool
 from .profile import PanoramaProfile, normalize_host
 
 
@@ -36,24 +37,26 @@ class ProfileStoreError(SessionError):
     """Profile storage or encryption failed without exposing secret values."""
 
 
-def _windows_documents() -> Optional[Path]:
+class _Guid(ctypes.Structure):
+    _fields_ = [
+        ("data1", ctypes.c_ulong),
+        ("data2", ctypes.c_ushort),
+        ("data3", ctypes.c_ushort),
+        ("data4", ctypes.c_ubyte * 8),
+    ]
+
+
+def _windows_known_folder(
+    data1: int, data2: int, data3: int, data4: tuple[int, ...]
+) -> Optional[Path]:
     if os.name != "nt":
         return None
     try:
-        class _Guid(ctypes.Structure):
-            _fields_ = [
-                ("data1", ctypes.c_ulong),
-                ("data2", ctypes.c_ushort),
-                ("data3", ctypes.c_ushort),
-                ("data4", ctypes.c_ubyte * 8),
-            ]
-
-        # FOLDERID_Documents = {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
         guid = _Guid(
-            0xFDD39AD0,
-            0x238F,
-            0x46AF,
-            (ctypes.c_ubyte * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7),
+            data1,
+            data2,
+            data3,
+            (ctypes.c_ubyte * 8)(*data4),
         )
         shell32 = ctypes.windll.shell32
         shell32.SHGetKnownFolderPath.argtypes = [
@@ -73,20 +76,96 @@ def _windows_documents() -> Optional[Path]:
             return path
     except (AttributeError, OSError, TypeError, ValueError):
         pass
+    return None
+
+
+def _windows_documents() -> Optional[Path]:
+    # FOLDERID_Documents = {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
+    known = _windows_known_folder(
+        0xFDD39AD0,
+        0x238F,
+        0x46AF,
+        (0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7),
+    )
+    if known is not None:
+        return known
+    if os.name != "nt":
+        return None
     user_profile = os.environ.get("USERPROFILE")
     if user_profile:
         return Path(user_profile) / "Documents"
     return Path.home() / "Documents"
 
 
+def _windows_local_app_data() -> Optional[Path]:
+    # FOLDERID_LocalAppData = {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
+    known = _windows_known_folder(
+        0xF1B32785,
+        0x6FBA,
+        0x4FCF,
+        (0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91),
+    )
+    if known is not None:
+        return known
+    if os.name != "nt":
+        return None
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data)
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        return Path(user_profile) / "AppData" / "Local"
+    return None
+
+
+def legacy_toolbox_roots() -> tuple[Path, ...]:
+    """Return historical per-user roots, including redirected Documents."""
+
+    roots: list[Path] = []
+    documents = _windows_documents()
+    if documents is not None:
+        roots.append(documents / "PanOS Toolbox")
+    elif os.name != "nt":
+        roots.append(Path.home() / "Documents" / "PanOS Toolbox")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        roots.append(Path(local_app_data) / "PanOSToolbox")
+    roots.append(Path.home() / ".local" / "share" / "PanOSToolbox")
+    return tuple(dict.fromkeys(roots))
+
+
+def is_remote_data_root(path: Path) -> bool:
+    """Detect UNC or mapped network storage before creating mutable state."""
+
+    raw = str(path).replace("/", "\\")
+    if raw.startswith("\\\\"):
+        return True
+    if os.name != "nt":
+        return False
+    drive = path.drive
+    if not drive:
+        return False
+    try:
+        # DRIVE_REMOTE = 4. This also covers mapped SMB drive letters.
+        get_drive_type = ctypes.windll.kernel32.GetDriveTypeW
+        get_drive_type.argtypes = [ctypes.c_wchar_p]
+        get_drive_type.restype = ctypes.c_uint
+        return int(get_drive_type(f"{drive}\\")) == 4
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Unknown drive type on Windows is not a safe mutable store.
+        return True
+
+
 def default_toolbox_root() -> Path:
-    """Return the stable per-user data directory used by GUI and launchers."""
+    """Return local, durable state outside redirected Documents/SMB shares."""
 
     override = os.environ.get("PANOS_TOOLBOX_DATA_DIR")
     if override:
-        return Path(override).expanduser().resolve()
-    documents = _windows_documents() or Path.home() / "Documents"
-    return (documents / "PanOS Toolbox").resolve()
+        return Path(override).expanduser()
+    local = _windows_local_app_data()
+    if local is not None:
+        return (local / "PanOS Toolbox").resolve()
+    return (Path.home() / ".local" / "share" / "PanOS Toolbox").resolve()
 
 
 def _secure_directory(path: Path, *, enforce: bool) -> None:
@@ -103,8 +182,11 @@ def _secure_directory(path: Path, *, enforce: bool) -> None:
     principal = f"{domain}\\{username}" if domain else username
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    icacls = windows_system_tool("icacls.exe")
+    if not icacls:
+        raise ProfileStoreError("Nie znaleziono zaufanego System32\\icacls.exe.")
     completed = subprocess.run(
-        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:(OI)(CI)F"],
+        [icacls, str(path), "/inheritance:r", "/grant:r", f"{principal}:(OI)(CI)F"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -270,11 +352,66 @@ class ProfileStore:
     """Atomic profile file with encrypted password fields and private ACL."""
 
     def __init__(self, root: Optional[Path] = None, *, enforce_acl: bool = True):
-        self.root = (root or default_toolbox_root()).expanduser().resolve()
+        self._using_default_root = root is None
+        candidate = (root or default_toolbox_root()).expanduser()
+        if is_remote_data_root(candidate):
+            raise ProfileStoreError(
+                "Magazyn profili wskazuje udział sieciowy/SMB. Użyj lokalnego "
+                "%LOCALAPPDATA%\\PanOS Toolbox; Toolbox nie zapisuje mutowalnego "
+                "stanu bezpośrednio na SMB."
+            )
+        self.root = candidate.resolve()
+        if is_remote_data_root(self.root):
+            raise ProfileStoreError("Rozwiązana ścieżka magazynu profili prowadzi na SMB.")
         self.enforce_acl = enforce_acl
         _secure_directory(self.root, enforce=enforce_acl)
         self.path = self.root / "profiles.json"
+        if self._using_default_root:
+            self._migrate_legacy_profile()
         self._cipher = _SecretCipher(self.root, enforce_acl=enforce_acl)
+
+    def _migrate_legacy_profile(self) -> None:
+        """Copy one valid legacy profile store from Documents without deleting it."""
+
+        if self.path.exists():
+            return
+        for source_root in legacy_toolbox_roots():
+            try:
+                source_root = source_root.expanduser().resolve()
+            except OSError:
+                continue
+            if source_root == self.root:
+                continue
+            source = source_root / "profiles.json"
+            try:
+                if not source.is_file() or source.stat().st_size > 8 * 1024 * 1024:
+                    continue
+                data = source.read_bytes()
+                envelope = json.loads(data.decode("utf-8"))
+                records = envelope.get("payload") if isinstance(envelope, dict) else None
+                if (
+                    envelope.get("schema_version") != PROFILE_SCHEMA_VERSION
+                    or not isinstance(records, list)
+                    or envelope.get("sha256") != json_sha256({"profiles": records})
+                ):
+                    continue
+                requires_fernet_key = any(
+                    isinstance(item, dict)
+                    and str(item.get("password_ciphertext", "")).startswith("fernet:v1:")
+                    for item in records
+                )
+                source_key = source_root / "profile.key"
+                if requires_fernet_key:
+                    if (
+                        not source_key.is_file()
+                        or source_key.stat().st_size > 4096
+                    ):
+                        continue
+                    _atomic_write(self.root / "profile.key", source_key.read_bytes())
+                _atomic_write(self.path, data)
+                return
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                continue
 
     def _read(self) -> list[dict[str, Any]]:
         if not self.path.exists():

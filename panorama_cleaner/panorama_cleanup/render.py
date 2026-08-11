@@ -7,6 +7,8 @@ import unicodedata
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from .panos import safe_xml_fromstring
+
 from .models import (
     BatchPlan,
     CommandRecord,
@@ -369,7 +371,7 @@ def _entry_to_set_commands(
     """Convert XML into best-effort CLI while preserving unsafe fields in XML."""
 
     try:
-        entry = ET.fromstring(entry_xml)
+        entry = safe_xml_fromstring(entry_xml)
     except ET.ParseError as exc:  # pragma: no cover - parser produced the XML
         raise UnsafePlanError(f"Nie można odtworzyć backupu XML: {exc}") from exc
     if entry.tag != "entry":

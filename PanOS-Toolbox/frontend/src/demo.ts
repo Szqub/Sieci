@@ -31,7 +31,9 @@ const demoCommitReview: CommitReview = {
 };
 
 const demoArtifacts = [
-  { file: "commands.txt", kind: "api-operation-preview", contentType: "text/plain; charset=utf-8", sizeBytes: 2048, viewable: true, downloadable: true },
+  { file: "commands.txt", kind: "handmode-cli-active", contentType: "text/plain; charset=utf-8", sizeBytes: 2048, viewable: true, downloadable: true },
+  { file: "handmode_rollback.txt", kind: "handmode-cli-rollback", contentType: "text/plain; charset=utf-8", sizeBytes: 3072, viewable: true, downloadable: true },
+  { file: "handmode_instructions.txt", kind: "handmode-instructions", contentType: "text/plain; charset=utf-8", sizeBytes: 1024, viewable: true, downloadable: true },
   { file: "candidate_diff_demo.txt", kind: "full-running-candidate-diff", contentType: "text/plain; charset=utf-8", sizeBytes: 4096, viewable: true, downloadable: true },
   { file: "manifest.json", kind: "manifest", contentType: "application/json; charset=utf-8", sizeBytes: 8192, viewable: true, downloadable: true },
   { file: "bundle", kind: "complete-session-zip", contentType: "application/zip", viewable: false, downloadable: true },
@@ -229,6 +231,12 @@ export const demoRestorePlan: RestorePlan = {
   operations: [
     { id: "rop-1", componentId: "safe-1", order: 1, action: "set", entityType: "address", entityName: "payments-node-01", scope: "DG-PROD-EU", xpath: "/config/.../address/payments-node-01", summary: "Odtwórz obiekt z backupu sesji", inverseSummary: "Usuń odtworzony obiekt", fingerprint: "sha256:fa80…c17f" },
     { id: "rop-2", componentId: "safe-1", order: 2, action: "edit", entityType: "member", entityName: "GRP-Payments-Nodes", scope: "DG-PROD-EU", xpath: "/config/.../GRP-Payments-Nodes/static", summary: "Dodaj brakujący członek bez usuwania późniejszych", inverseSummary: "Usuń wyłącznie dodany członek", fingerprint: "sha256:c078…45bd" },
+  ],
+  artifacts: [
+    ...demoArtifacts,
+    { file: "handmode_conflict_restore_commands.txt", kind: "handmode-cli-conflict-restore-manual-review", contentType: "text/plain; charset=utf-8", sizeBytes: 1024, viewable: true, downloadable: true },
+    { file: "handmode_conflict_restore_rollback.txt", kind: "handmode-cli-conflict-restore-rollback", contentType: "text/plain; charset=utf-8", sizeBytes: 1024, viewable: true, downloadable: true },
+    { file: "handmode_conflict_restore_instructions.txt", kind: "handmode-conflict-restore-instructions", contentType: "text/plain; charset=utf-8", sizeBytes: 768, viewable: true, downloadable: true },
   ],
 };
 

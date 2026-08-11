@@ -10,12 +10,18 @@ from dataclasses import replace
 from unittest import mock
 from pathlib import Path
 
-from panos_toolbox.client import PanoramaReadClient, UrllibXMLTransport
+from panos_toolbox.client import (
+    MAX_XML_RESPONSE_BYTES,
+    PanoramaReadClient,
+    UrllibXMLTransport,
+)
 from panos_toolbox.errors import (
     CapabilityError,
     InputError,
     IntegrityError,
     OutcomeUnknownError,
+    PanoramaResponseError,
+    SessionError,
     TransportError,
     ValidationError,
 )
@@ -228,6 +234,31 @@ class ClientSerializationTests(unittest.TestCase):
             )
         self.assertEqual(opener.open.call_count, 1)
 
+    def test_transport_rejects_oversized_response_before_buffering(self):
+        profile = PanoramaProfile("pano", "admin", verify_ssl=False)
+        transport = UrllibXMLTransport(profile)
+        response = mock.MagicMock()
+        response.headers = {
+            "Content-Length": str(MAX_XML_RESPONSE_BYTES + 1),
+        }
+        response.__enter__.return_value = response
+        opener = mock.Mock()
+        opener.open.return_value = response
+        transport.opener = opener
+
+        with self.assertRaises(TransportError):
+            transport.post({"type": "op"}, headers={}, mutating=False)
+
+        response.read.assert_not_called()
+
+    def test_safe_xml_parser_rejects_dtd_and_external_entities(self):
+        payload = (
+            "<!DOCTYPE x [<!ENTITY secret SYSTEM 'file:///etc/passwd'>]>"
+            "<x>&secret;</x>"
+        )
+        with self.assertRaises(PanoramaResponseError):
+            parse_xml(payload)
+
     def test_config_commit_push_and_lock_serialization(self):
         profile = PanoramaProfile(
             "pano", "admin", verify_ssl=False, api_max_stage=ApiStage.PUSH
@@ -348,6 +379,10 @@ class ClientSerializationTests(unittest.TestCase):
 
 
 class SessionIntegrityTests(unittest.TestCase):
+    def test_remote_smb_session_root_is_rejected_before_write(self):
+        with self.assertRaisesRegex(SessionError, "SMB"):
+            SessionStore(Path(r"\\server\share\PanOS Toolbox\sessions"), enforce_acl=False)
+
     def test_derived_plan_inherits_backups_and_snapshots_without_xml_reload(self):
         profile = PanoramaProfile("pano", "admin")
         first = sample_mutation("A")
@@ -566,6 +601,7 @@ class SessionIntegrityTests(unittest.TestCase):
 
             reopened = SessionStore(root, enforce_acl=False)
             self.assertEqual(reopened.load_manifest(session_id)["journal_count"], 2)
+            self.assertFalse((root / session_id / "journal" / "000002.json").exists())
             self.assertEqual(
                 [event["event_type"] for event in reopened.load_journal(session_id)],
                 ["SESSION_CREATED", "SECOND"],
@@ -605,6 +641,43 @@ class SessionIntegrityTests(unittest.TestCase):
             log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             with self.assertRaises(IntegrityError):
                 SessionStore(root, enforce_acl=False).verify(session_id)
+
+    def test_default_store_imports_redirected_documents_sessions_locally(self):
+        profile = PanoramaProfile("pano", "admin")
+        patch = PatchSet.new(
+            kind="cleanup",
+            panorama_host="pano",
+            panorama_username="admin",
+            mutations=(sample_mutation(),),
+            targets=("192.0.2.1",),
+            affected_device_groups=(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            legacy_root = base / "Documents" / "PanOS Toolbox"
+            legacy_sessions = legacy_root / "sessions"
+            destination = base / "AppData" / "Local" / "PanOS Toolbox" / "sessions"
+            legacy = SessionStore(legacy_sessions, enforce_acl=False)
+            session_id = legacy.create(patch, profile)
+            stale_temporary = (
+                legacy_sessions / session_id / "journal" / ".000090.json.jd_1pqek"
+            )
+            stale_temporary.write_text("interrupted", encoding="utf-8")
+
+            with mock.patch(
+                "panos_toolbox.sessions.default_session_root",
+                return_value=destination,
+            ), mock.patch(
+                "panos_toolbox.sessions.legacy_toolbox_roots",
+                return_value=(legacy_root,),
+            ):
+                migrated = SessionStore(enforce_acl=False)
+
+            self.assertEqual(migrated.load_manifest(session_id)["journal_count"], 1)
+            self.assertTrue((legacy_sessions / session_id).is_dir())
+            self.assertFalse(
+                (destination / session_id / "journal" / stale_temporary.name).exists()
+            )
 
     def test_operation_lock_is_fail_fast(self):
         profile = PanoramaProfile("pano", "admin")

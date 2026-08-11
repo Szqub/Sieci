@@ -31,201 +31,80 @@ Wymagania:
 - Moduły: requests, xml.etree.ElementTree, ipaddress, getpass
 """
 
-import requests
 import getpass
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 import ipaddress
 import sys
 import re
-from urllib3.exceptions import InsecureRequestWarning
-
-# Wyłączenie ostrzeżeń o niezweryfikowanym certyfikacie SSL
-requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+from legacy_panorama_http import PanoramaHTTPSClient
 
 class PanoramaAPI:
-    """
-    Klasa do obsługi API Palo Alto Networks Panorama.
-    Udostępnia metody do uwierzytelniania oraz pobierania danych o obiektach adresowych i grupach.
-    """
+    """Compatibility wrapper using the hardened POST-only transport."""
+
     def __init__(self, panorama_ip, username, password):
-        """
-        Inicjalizacja połączenia z Panoramą.
-        
-        Args:
-            panorama_ip (str): Adres IP lub nazwa hosta Panoramy
-            username (str): Nazwa użytkownika do logowania
-            password (str): Hasło użytkownika
-        """
         self.panorama_ip = panorama_ip
         self.username = username
         self.password = password
         self.api_key = None
-        self.base_url = f"https://{self.panorama_ip}/api/"
+        self.transport = PanoramaHTTPSClient(panorama_ip)
 
     def get_api_key(self):
-        """
-        Uzyskaj klucz API Panorama poprzez uwierzytelnienie użytkownika.
-        
-        Returns:
-            bool: True jeśli klucz został pomyślnie uzyskany, False w przeciwnym razie
-        """
-        params = {
-            'type': 'keygen',
-            'user': self.username,
-            'password': self.password
-        }
-        
         try:
-            print(f"DEBUG: Próba uwierzytelnienia użytkownika {self.username} na {self.panorama_ip}")
-            response = requests.get(self.base_url, params=params, verify=False)
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {response.status_code}")
-            response.raise_for_status()
-            
-            # Zapisz odpowiedź XML do pliku dla debugowania (maskujemy klucz API)
-            debug_response = response.text.replace('<key>', '<key>MASKED-FOR-SECURITY').replace('</key>', '</key>')
-            with open('debug_keygen_response.xml', 'w') as f:
-                f.write(debug_response)
-            print("DEBUG: Zapisano odpowiedź uwierzytelniania do pliku debug_keygen_response.xml")
-            
-            root = ET.fromstring(response.text)
-            status = root.get('status')
-            print(f"DEBUG: Status uwierzytelniania: {status}")
-            
-            if status == 'success':
-                key_element = root.find('.//key')
-                if key_element is not None:
-                    self.api_key = key_element.text
-                    print("DEBUG: Pomyślnie pobrano klucz API")
-                    return True
-                else:
-                    print("BŁĄD: Brak elementu <key> w odpowiedzi")
-                    return False
-            else:
-                error_msg = root.find('.//msg')
-                if error_msg is not None:
-                    print(f"BŁĄD: Uwierzytelnianie nie powiodło się: {error_msg.text}")
-                else:
-                    print("BŁĄD: Uwierzytelnianie nie powiodło się bez szczegółowej wiadomości")
-                return False
-        except Exception as e:
-            print(f"BŁĄD: Podczas uzyskiwania klucza API: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            print(
+                "DEBUG: Próba uwierzytelnienia użytkownika {} na {}".format(
+                    self.username, self.panorama_ip
+                )
+            )
+            self.api_key = self.transport.authenticate(self.username, self.password)
+            print("DEBUG: Pomyślnie pobrano klucz API; odpowiedź keygen nie została zapisana.")
+            return True
+        except Exception as exc:
+            print("BŁĄD: Podczas uzyskiwania klucza API: {}".format(exc))
             return False
+        finally:
+            self.password = None
 
     def get_address_objects(self):
-        """
-        Pobierz wszystkie obiekty adresowe z Panoramy.
-        
-        Returns:
-            str: Dane XML z obiektami adresowymi lub None w przypadku błędu
-        """
         if not self.api_key:
             print("Brak klucza API. Najpierw należy wywołać get_api_key().")
             return None
-        
-        # Pobieranie obiektów z device-group
-        device_params = {
-            'type': 'config',
-            'action': 'get',
-            'xpath': "/config/devices/entry/device-group/entry/address",
-            'key': self.api_key
-        }
-        
-        # Pobieranie obiektów shared
-        shared_params = {
-            'type': 'config',
-            'action': 'get',
-            'xpath': "/config/shared/address",
-            'key': self.api_key
-        }
-        
         try:
             print("DEBUG: Pobieranie obiektów adresowych z device-group...")
-            device_response = requests.get(self.base_url, params=device_params, verify=False)
-            device_response.raise_for_status()
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {device_response.status_code}")
-            
+            device_xml = self.transport.get_config(
+                "/config/devices/entry/device-group/entry/address", self.api_key
+            )
             print("DEBUG: Pobieranie obiektów adresowych shared...")
-            shared_response = requests.get(self.base_url, params=shared_params, verify=False)
-            shared_response.raise_for_status()
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {shared_response.status_code}")
-            
-            # Łączymy XML z obiektami device-group i shared
-            combined_xml = f"""<response>
-                <result>
-                    <device-group-objects>
-                        {device_response.text}
-                    </device-group-objects>
-                    <shared-objects>
-                        {shared_response.text}
-                    </shared-objects>
-                </result>
-            </response>"""
-            
-            print("DEBUG: Pomyślnie połączono obiekty device-group i shared")
-            return combined_xml
-        except Exception as e:
-            print(f"BŁĄD: Podczas pobierania obiektów adresowych: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            shared_xml = self.transport.get_config(
+                "/config/shared/address", self.api_key
+            )
+            return """<response><result><device-group-objects>{}</device-group-objects>
+                <shared-objects>{}</shared-objects></result></response>""".format(
+                device_xml, shared_xml
+            )
+        except Exception as exc:
+            print("BŁĄD: Podczas pobierania obiektów adresowych: {}".format(exc))
             return None
-    
+
     def get_address_groups(self):
-        """
-        Pobierz wszystkie grupy adresowe z Panoramy.
-        
-        Returns:
-            str: Dane XML z grupami adresowymi lub None w przypadku błędu
-        """
         if not self.api_key:
             print("Brak klucza API. Najpierw należy wywołać get_api_key().")
             return None
-        
-        # Pobieranie grup z device-group
-        device_params = {
-            'type': 'config',
-            'action': 'get',
-            'xpath': "/config/devices/entry/device-group/entry/address-group",
-            'key': self.api_key
-        }
-        
-        # Pobieranie grup shared
-        shared_params = {
-            'type': 'config',
-            'action': 'get',
-            'xpath': "/config/shared/address-group",
-            'key': self.api_key
-        }
-        
         try:
             print("DEBUG: Pobieranie grup adresowych z device-group...")
-            device_response = requests.get(self.base_url, params=device_params, verify=False)
-            device_response.raise_for_status()
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {device_response.status_code}")
-            
+            device_xml = self.transport.get_config(
+                "/config/devices/entry/device-group/entry/address-group", self.api_key
+            )
             print("DEBUG: Pobieranie grup adresowych shared...")
-            shared_response = requests.get(self.base_url, params=shared_params, verify=False)
-            shared_response.raise_for_status()
-            print(f"DEBUG: Otrzymano odpowiedź HTTP {shared_response.status_code}")
-            
-            # Łączymy XML z grupami device-group i shared
-            combined_xml = f"""<response>
-                <result>
-                    <device-group-groups>
-                        {device_response.text}
-                    </device-group-groups>
-                    <shared-groups>
-                        {shared_response.text}
-                    </shared-groups>
-                </result>
-            </response>"""
-            
-            print("DEBUG: Pomyślnie połączono grupy device-group i shared")
-            return combined_xml
-        except Exception as e:
-            print(f"BŁĄD: Podczas pobierania grup adresowych: {e}")
-            print(f"DEBUG: Pełna treść błędu: {str(e)}")
+            shared_xml = self.transport.get_config(
+                "/config/shared/address-group", self.api_key
+            )
+            return """<response><result><device-group-groups>{}</device-group-groups>
+                <shared-groups>{}</shared-groups></result></response>""".format(
+                device_xml, shared_xml
+            )
+        except Exception as exc:
+            print("BŁĄD: Podczas pobierania grup adresowych: {}".format(exc))
             return None
-
 
 def parse_address_objects(xml_data):
     """

@@ -20,6 +20,27 @@ import type {
 } from "../model";
 
 const API_ROOT = "/api/v1";
+const APP_TOKEN_HEADER = "X-Toolbox-App-Token";
+const APP_TOKEN_FRAGMENT = "toolbox-token";
+const APP_TOKEN_STORAGE = "panos-toolbox.app-token.v1";
+
+function bootstrapAppToken(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const candidate = fragment.get(APP_TOKEN_FRAGMENT) ?? undefined;
+    if (candidate && /^[A-Za-z0-9_-]{40,128}$/.test(candidate)) {
+      window.sessionStorage.setItem(APP_TOKEN_STORAGE, candidate);
+      window.history.replaceState(null, document.title, window.location.pathname + window.location.search);
+      return candidate;
+    }
+    return window.sessionStorage.getItem(APP_TOKEN_STORAGE) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+let appToken: string | undefined = bootstrapAppToken();
 let sessionToken: string | undefined;
 
 export class ToolboxApiError extends Error {
@@ -70,9 +91,20 @@ interface JsonOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
 }
 
+function requireAppToken(): string {
+  if (!appToken) {
+    throw new ToolboxApiError(401, {
+      code: "AppAuthenticationRequired",
+      message: "Brak tokenu lokalnej aplikacji. Uruchom Toolbox przez start_toolbox.cmd lub start_toolbox.ps1.",
+    });
+  }
+  return appToken;
+}
+
 async function request<T>(path: string, options: JsonOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set("Accept", "application/json");
+  headers.set(APP_TOKEN_HEADER, requireAppToken());
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
   if (sessionToken) headers.set("X-Toolbox-Session", sessionToken);
 
@@ -97,6 +129,7 @@ async function request<T>(path: string, options: JsonOptions = {}): Promise<T> {
 
 async function download(path: string): Promise<Blob> {
   const headers = new Headers({ Accept: "application/octet-stream" });
+  headers.set(APP_TOKEN_HEADER, requireAppToken());
   if (sessionToken) headers.set("X-Toolbox-Session", sessionToken);
   const response = await fetch(`${API_ROOT}${path}`, { headers, credentials: "same-origin" });
   if (!response.ok) {
@@ -112,6 +145,7 @@ function artifactPath(name: string): string {
 
 async function viewText(path: string): Promise<string> {
   const headers = new Headers({ Accept: "text/plain, application/json, application/xml" });
+  headers.set(APP_TOKEN_HEADER, requireAppToken());
   if (sessionToken) headers.set("X-Toolbox-Session", sessionToken);
   const response = await fetch(`${API_ROOT}${path}`, { headers, credentials: "same-origin" });
   if (!response.ok) {
@@ -428,6 +462,12 @@ export const api = {
     });
   },
 
+  async materializeSessionHandMode(sessionId: string): Promise<{ session: ToolboxSession; warnings: string[]; message: string }> {
+    return request(`/sessions/${encodeURIComponent(sessionId)}/handmode`, {
+      method: "POST",
+    });
+  },
+
   async downloadSessionArtifact(sessionId: string, name: string): Promise<Blob> {
     return download(`/sessions/${encodeURIComponent(sessionId)}/artifacts/${artifactPath(name)}`);
   },
@@ -465,6 +505,10 @@ export const api = {
     });
   },
 };
+
+export function setAppTokenForTests(token = "test-app-token"): void {
+  appToken = token;
+}
 
 export function clearApiSessionForTests(): void {
   sessionToken = undefined;

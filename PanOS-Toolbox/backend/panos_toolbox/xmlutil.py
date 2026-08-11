@@ -8,6 +8,9 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Iterable, Optional
 
+from defusedxml import ElementTree as SafeET
+from defusedxml.common import DefusedXmlException
+
 from .errors import PanoramaResponseError, ValidationError
 
 
@@ -22,8 +25,13 @@ def parse_xml(payload: bytes | str) -> ET.Element:
     elif not payload or not payload.rstrip().endswith(">"):
         raise PanoramaResponseError("Odpowiedź XML jest pusta lub ucięta.")
     try:
-        return ET.fromstring(payload)
-    except ET.ParseError as exc:
+        return SafeET.fromstring(
+            payload,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except (ET.ParseError, DefusedXmlException) as exc:
         raise PanoramaResponseError(f"Niepoprawny XML: {exc}.") from exc
 
 

@@ -1,1 +1,8 @@
-curl -k -X GET "https://<PANORAMA-IP>/api/?type=op&cmd=<show><rule-hit-count><device-group>DG-LAN</device-group><post-rulebase><security><rules><rule-name>MY-RULE</rule-name></rules></security></post-rulebase></rule-hit-count></show>&key=<API_KEY>"
+# API key is supplied through stdin and a header, so it is not written to the URL or process arguments.
+# Remove --insecure and use --cacert <CA.pem> whenever Panorama has a trusted certificate.
+read -r -s -p "Panorama API key: " PANORAMA_API_KEY; echo
+printf 'X-PAN-KEY: %s\n' "$PANORAMA_API_KEY" | curl --header @- --insecure --silent --show-error --fail --request POST \
+  --data-urlencode 'type=op' \
+  --data-urlencode 'cmd=<show><rule-hit-count><device-group>DG-LAN</device-group><post-rulebase><security><rules><rule-name>MY-RULE</rule-name></rules></security></post-rulebase></rule-hit-count></show>' \
+  'https://<PANORAMA-IP>/api/'
+unset PANORAMA_API_KEY

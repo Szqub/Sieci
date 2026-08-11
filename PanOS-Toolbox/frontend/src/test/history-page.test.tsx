@@ -63,6 +63,7 @@ const baseProps = {
   onDownloadBundle: vi.fn(),
   onViewArtifact: vi.fn(async () => "<entry name=\"ALLOW-LEGACY\" />"),
   onDownloadArtifact: vi.fn(),
+  onMaterializeHandMode: vi.fn(),
   onReconcileExternal: vi.fn(),
 };
 
@@ -84,5 +85,12 @@ describe("offline session history", () => {
     fireEvent.click(screen.getByRole("button", { name: "Wyświetl backup" }));
     expect(await screen.findByText(/<entry name="ALLOW-LEGACY"/)).toBeInTheDocument();
     expect(baseProps.onViewArtifact).toHaveBeenCalledWith(session.id, "entities/ALLOW-LEGACY.xml");
+  });
+
+  it("pozwala wygenerować Hand Mode dla starej sesji całkowicie offline", () => {
+    const onMaterializeHandMode = vi.fn();
+    render(<HistoryPage {...baseProps} onMaterializeHandMode={onMaterializeHandMode} />);
+    fireEvent.click(screen.getByRole("button", { name: "Wygeneruj Hand Mode offline" }));
+    expect(onMaterializeHandMode).toHaveBeenCalledWith(session);
   });
 });

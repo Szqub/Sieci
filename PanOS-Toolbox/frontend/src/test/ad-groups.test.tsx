@@ -28,6 +28,10 @@ const result: AdGroupGenerationResult = {
   ],
   blocks: [{ index: 1, filter: "(memberof=CN=GG-VPN,DC=example)", sourceGroups: ["GG-VPN"] }],
   clipboardText: "(memberof=CN=GG-VPN,DC=example)",
+  cliGroups: [{ index: 1, filter: "(memberof=CN=GG-VPN,DC=example)", sourceGroups: ["GG-VPN"], panoramaGroupName: "AD__VPN_USERS", cliCommand: "set template \"TPL-NET\" config vsys \"vsys1\" group-mapping \"LDAP_GM1\" custom-group \"AD__VPN_USERS\" ldap-filter \"(memberof=CN=GG-VPN,DC=example)\"", rollbackCliCommand: "delete template \"TPL-NET\" config vsys \"vsys1\" group-mapping \"LDAP_GM1\" custom-group \"AD__VPN_USERS\"" }],
+  cliText: "set template \"TPL-NET\" config vsys \"vsys1\" group-mapping \"LDAP_GM1\" custom-group \"AD__VPN_USERS\" ldap-filter \"(memberof=CN=GG-VPN,DC=example)\"\n",
+  rollbackCliText: "delete template \"TPL-NET\" config vsys \"vsys1\" group-mapping \"LDAP_GM1\" custom-group \"AD__VPN_USERS\"\n",
+  handModeReady: true,
   warnings: ["Pusta grupa"],
 };
 
@@ -42,9 +46,11 @@ describe("AD group generator", () => {
 
   it("pokazuje walidację i gotowy filtr", () => {
     render(<AdGroupsPage draft={draft} onDraftChange={vi.fn()} result={result} busy={false} error={null} onGenerate={vi.fn()} />);
-    expect(screen.getByText("AD__VPN_USERS")).toBeInTheDocument();
+    expect(screen.getAllByText("AD__VPN_USERS").length).toBeGreaterThan(0);
     expect(screen.getByText("Poprawna")).toBeInTheDocument();
     expect(screen.getByText("Pusta")).toBeInTheDocument();
     expect(screen.getByText("(memberof=CN=GG-VPN,DC=example)")).toBeInTheDocument();
+    expect(screen.getByText("Hand Mode — Custom LDAP Group CLI")).toBeInTheDocument();
+    expect(screen.getByText(/set template/)).toBeInTheDocument();
   });
 });

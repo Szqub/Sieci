@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   CloudUpload,
+  ClipboardCopy,
   Download,
   Eye,
   FileArchive,
@@ -21,6 +22,7 @@ import {
   Search,
   ServerCog,
   ShieldCheck,
+  Terminal,
   Undo2,
   X,
 } from "lucide-react";
@@ -109,6 +111,8 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
   const [confirmScopeOverride, setConfirmScopeOverride] = useState(false);
   const [scopeOverrideAcknowledged, setScopeOverrideAcknowledged] = useState(false);
   const [artifactViewer, setArtifactViewer] = useState<{ file: string; content: string; loading: boolean; error?: string } | null>(null);
+  const [copiedArtifact, setCopiedArtifact] = useState<string | null>(null);
+  const [confirmExcludedCopy, setConfirmExcludedCopy] = useState<string | null>(null);
   useEffect(() => { setSelectedTargets(new Set()); setSelectedDependencies(new Map()); }, [plan?.sessionId]);
   useEffect(() => { setObjectQuery(""); }, [plan?.sessionId]);
   const latestSession = executionJob?.session ?? executionSession;
@@ -143,6 +147,15 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
     } catch (viewerError) {
       setArtifactViewer({ file, content: "", loading: false, error: viewerError instanceof Error ? viewerError.message : "Nie można wyświetlić pliku." });
     }
+  };
+
+  const copyArtifact = async (file: string) => {
+    const content = artifactViewer?.file === file && !artifactViewer.loading && !artifactViewer.error
+      ? artifactViewer.content
+      : await onViewArtifact(file);
+    await navigator.clipboard.writeText(content);
+    setCopiedArtifact(file);
+    window.setTimeout(() => setCopiedArtifact((current) => current === file ? null : current), 1800);
   };
 
   const stages = useMemo(() => [
@@ -194,6 +207,12 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
     if (right.file === "bundle") return -1;
     return `${left.kind}/${left.file}`.localeCompare(`${right.kind}/${right.file}`, "pl");
   }), [artifacts]);
+  const activeHandMode = artifacts.find((artifact) => artifact.kind === "handmode-cli-active");
+  const rollbackHandMode = artifacts.find((artifact) => artifact.kind === "handmode-cli-rollback") ?? artifacts.find((artifact) => artifact.file === "handmode_rollback.txt");
+  const excludedHandMode = artifacts.find((artifact) => artifact.kind === "handmode-cli-excluded-manual-review") ?? artifacts.find((artifact) => artifact.file === "handmode_excluded_commands.txt");
+  const excludedRollback = artifacts.find((artifact) => artifact.kind === "handmode-cli-excluded-rollback") ?? artifacts.find((artifact) => artifact.file === "handmode_excluded_rollback.txt");
+  const handModeInstructions = artifacts.find((artifact) => artifact.kind === "handmode-instructions") ?? artifacts.find((artifact) => artifact.file === "handmode_instructions.txt");
+  const handModeBlocked = plan.operations.length > 0 && (!activeHandMode || activeHandMode.sizeBytes === 0);
   const canApplyCandidate = state === "PLANNED" && plan.operations.length > 0;
   const candidateReadyForCommit = state === "CANDIDATE_APPLIED" || state === "PARTIAL" || state === "RESTORED";
   const canCommit = candidateReadyForCommit && !blockingGuard && Boolean(commitReview?.commitReady && commitReview.scopeGuard.passed);
@@ -270,6 +289,27 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
           })}</tbody>
         </table></div>
         {selectedDependencies.size > 0 && <div className="dependency-selection-bar"><span><strong>{selectedDependencies.size}</strong> zależności + {selectedTargetRows.length} wskazanych celów</span><Button variant="primary" onClick={() => onPlanDependencies([...selectedDependencies.values()], selectedTargetRows)} icon={<ArrowRight size={16} />}>Nowy batch z zależnościami</Button></div>}
+      </Card>
+
+      <Card className="handmode-card">
+        <div className="handmode-card__header">
+          <span className="handmode-card__icon"><Terminal size={22} /></span>
+          <div><span className="eyebrow">Manual execution / PAN-OS CLI</span><h2>Hand Mode — komendy dla człowieka</h2><p>To ta sama kolejność i ten sam zakres co PatchSet API. Pliki zawierają wyłącznie komendy trybu <code>configure (#)</code>; nie uruchamiają commit ani push.</p></div>
+          <StatusPill tone={handModeBlocked ? "danger" : plan.operations.length ? "success" : "info"}>{handModeBlocked ? "CLI BLOCK" : plan.operations.length ? "CLI READY" : "PUSTY PLAN"}</StatusPill>
+        </div>
+        <div className="handmode-command-grid">
+          <section>
+            <div><strong>Aktywny plan</strong><small><code>commands.txt</code> · do wklejenia po przejrzeniu</small></div>
+            <div>{activeHandMode && <><Button icon={<Eye size={15} />} onClick={() => void openArtifact(activeHandMode.file)}>Wyświetl</Button><Button variant="primary" icon={<ClipboardCopy size={15} />} disabled={handModeBlocked} onClick={() => void copyArtifact(activeHandMode.file)}>{copiedArtifact === activeHandMode.file ? "Skopiowano" : "Kopiuj wszystko"}</Button><Button icon={<Download size={15} />} onClick={() => onDownload(activeHandMode.file)}>Pobierz TXT</Button></>}{rollbackHandMode && <Button variant="ghost" icon={<RotateCcw size={15} />} onClick={() => void openArtifact(rollbackHandMode.file)}>Rollback</Button>}</div>
+          </section>
+          {handModeInstructions && <section className="handmode-instructions"><div><strong>Instrukcja i status renderera</strong><small>READY/BLOCK, ostrzeżenia XML i zasady ręcznego wykonania</small></div><div><Button variant="ghost" icon={<Eye size={15} />} onClick={() => void openArtifact(handModeInstructions.file)}>Wyświetl instrukcję</Button><Button variant="ghost" icon={<Download size={15} />} onClick={() => onDownload(handModeInstructions.file)}>Pobierz</Button></div></section>}
+        </div>
+        {handModeBlocked && <Callout severity="danger" title="Hand Mode zablokowany"><p>Renderer nie potrafił bezpiecznie odwzorować co najmniej jednej operacji XML API. <code>commands.txt</code> jest celowo pusty; otwórz instrukcję, aby zobaczyć dokładny powód. Nie wygenerowano częściowego zestawu.</p></Callout>}
+        {excludedHandMode && <div className="handmode-excluded">
+          <AlertOctagon size={20} />
+          <span><strong>Osobny zestaw: elementy wykluczone z planu</strong><small>Nie są częścią aktywnego PatchSetu ani automatycznego reconcile. Mogły zostać wyłączone przez Last Hit, DEFAULT, operatora lub wspólną zależność.</small></span>
+          <div><Button variant="danger" icon={<Eye size={15} />} onClick={() => void openArtifact(excludedHandMode.file)}>Wyświetl wykluczone</Button><Button variant="danger" icon={<ClipboardCopy size={15} />} onClick={() => setConfirmExcludedCopy(excludedHandMode.file)}>Kopiuj wykluczone…</Button><Button icon={<Download size={15} />} onClick={() => onDownload(excludedHandMode.file)}>Pobierz</Button>{excludedRollback && <Button variant="ghost" icon={<RotateCcw size={15} />} onClick={() => void openArtifact(excludedRollback.file)}>Rollback wykluczonych</Button>}</div>
+        </div>}
       </Card>
 
       <section className="execution-section execute-only">
@@ -352,7 +392,13 @@ export function PlanPage({ focus = "plan", plan, executionSession, executionJob,
         <div><Button onClick={() => setConfirmScopeOverride(false)}>Anuluj</Button><Button variant="danger" disabled={!scopeOverrideAcknowledged || !writeEnabled} onClick={() => { const digest = blockingGuard.findingDigest; setConfirmScopeOverride(false); setScopeOverrideAcknowledged(false); onCommit(digest); }}>Ignoruj dokładnie tę blokadę i uruchom commit</Button></div>
       </div></div>}
 
-      {artifactViewer && <div className="artifact-viewer-backdrop"><div className="artifact-viewer" role="dialog" aria-modal="true" aria-label={`Podgląd ${artifactViewer.file}`}><header><div><FileText size={19} /><span><strong>{artifactViewer.file}</strong><small>Podgląd tylko do odczytu · pełna zawartość pliku sesji</small></span></div><div><Button variant="ghost" icon={<Download size={14} />} onClick={() => onDownload(artifactViewer.file)}>Pobierz</Button><button onClick={() => setArtifactViewer(null)} aria-label="Zamknij podgląd"><X size={19} /></button></div></header>{artifactViewer.loading ? <div className="artifact-viewer-loading"><ServerCog className="spin" size={22} /><span>Pobieranie pliku do podglądu…</span></div> : artifactViewer.error ? <Callout severity="danger" title="Nie można wyświetlić pliku"><p>{artifactViewer.error}</p></Callout> : <pre>{artifactViewer.content}</pre>}</div></div>}
+      {confirmExcludedCopy && <div className="write-confirm-backdrop"><div className="write-confirm write-confirm--critical" role="dialog" aria-modal="true" aria-labelledby="excluded-handmode-title">
+        <div><AlertOctagon size={22} /><strong id="excluded-handmode-title">Kopiujesz komendy spoza aktywnego planu</strong></div>
+        <p>Te komendy celowo usunięto z wykonywalnego PatchSetu. Mogą dotknąć świeżej polityki, DEFAULT albo zależności poza zakresem. Ich wykonanie nie zostanie automatycznie rozpoznane jako część tej sesji.</p>
+        <div><Button onClick={() => setConfirmExcludedCopy(null)}>Anuluj</Button><Button variant="danger" onClick={() => { const file = confirmExcludedCopy; setConfirmExcludedCopy(null); void copyArtifact(file); }}>Rozumiem — kopiuj wykluczone</Button></div>
+      </div></div>}
+
+      {artifactViewer && <div className="artifact-viewer-backdrop"><div className="artifact-viewer" role="dialog" aria-modal="true" aria-label={`Podgląd ${artifactViewer.file}`}><header><div><FileText size={19} /><span><strong>{artifactViewer.file}</strong><small>Podgląd tylko do odczytu · pełna zawartość pliku sesji</small></span></div><div>{!artifactViewer.loading && !artifactViewer.error && <Button variant="ghost" icon={<ClipboardCopy size={14} />} onClick={() => artifactViewer.file === excludedHandMode?.file ? setConfirmExcludedCopy(artifactViewer.file) : void copyArtifact(artifactViewer.file)}>{copiedArtifact === artifactViewer.file ? "Skopiowano" : "Kopiuj"}</Button>}<Button variant="ghost" icon={<Download size={14} />} onClick={() => onDownload(artifactViewer.file)}>Pobierz</Button><button onClick={() => setArtifactViewer(null)} aria-label="Zamknij podgląd"><X size={19} /></button></div></header>{artifactViewer.loading ? <div className="artifact-viewer-loading"><ServerCog className="spin" size={22} /><span>Pobieranie pliku do podglądu…</span></div> : artifactViewer.error ? <Callout severity="danger" title="Nie można wyświetlić pliku"><p>{artifactViewer.error}</p></Callout> : <pre>{artifactViewer.content}</pre>}</div></div>}
     </div>
   );
 }

@@ -22,7 +22,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from .client import PanoramaReadClient
 from .errors import InputError
 from .models import Mutation, MutationAction, MutationOperation, PatchSet
-from .xmlutil import parent_xpath, xpath_literal
+from .xmlutil import parent_xpath, parse_xml, xpath_literal
 
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -436,7 +436,7 @@ def build_policy_creation_plan(
         if group_name:
             group_path = _entry_xpath(flow.device_group, "address-group", group_name)
             group_xml = _xml_entry(group_name, ())
-            group_entry = ET.fromstring(group_xml)
+            group_entry = parse_xml(group_xml)
             static = ET.SubElement(group_entry, "static")
             ET.SubElement(static, "member").text = destination_name
             group_xml = ET.tostring(group_entry, encoding="unicode")
@@ -445,7 +445,7 @@ def build_policy_creation_plan(
         if protocol and port:
             service_path = _entry_xpath(flow.device_group, "service", service_name)
             service_xml = _xml_entry(service_name, ())
-            service_entry = ET.fromstring(service_xml)
+            service_entry = parse_xml(service_xml)
             protocol_root = ET.SubElement(service_entry, "protocol")
             protocol_node = ET.SubElement(protocol_root, protocol)
             ET.SubElement(protocol_node, "port").text = port

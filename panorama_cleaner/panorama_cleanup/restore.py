@@ -22,6 +22,7 @@ from .panos import (
     _xpath_literal,
     is_supported_address_literal,
     resolution_chain,
+    safe_xml_fromstring,
 )
 from .render import _entry_to_set_commands, quote_cli
 
@@ -220,7 +221,7 @@ def load_cleanup_runs(manifest_paths: Sequence[Path]) -> Tuple[CleanupRun, ...]:
                 )
             try:
                 xml = raw.decode("utf-8")
-                entry = ET.fromstring(xml)
+                entry = safe_xml_fromstring(xml)
             except (UnicodeError, ET.ParseError) as exc:
                 raise InputError(f"Niepoprawny backup XML: {backup_path}") from exc
             if entry.tag != "entry" or entry.get("name") != entity.name:
@@ -655,7 +656,7 @@ def build_emergency_restore(
         if current_states[entity] == "ZGODNY_Z_BACKUPEM":
             continue
         version = earliest[entity]
-        entry = ET.fromstring(version.xml)
+        entry = safe_xml_fromstring(version.xml)
         extra_attributes = sorted(set(entry.attrib) - {"name"})
         if extra_attributes:
             cli_warnings.append(
@@ -884,7 +885,7 @@ def _command_entity_map(run: CleanupRun) -> Dict[Tuple[str, str], RestoreEntity]
 
 
 def _backup_address_references(entity: RestoreEntity, xml: str) -> Tuple[str, ...]:
-    entry = ET.fromstring(xml)
+    entry = safe_xml_fromstring(xml)
     if entity.entity_type == "static-group":
         return tuple(
             member.text.strip()
@@ -1116,7 +1117,7 @@ def _apply_cleanup_records(
             f"Address {entity.text} nie ma komendy address-delete."
         )
 
-    entry = ET.fromstring(backup_xml)
+    entry = safe_xml_fromstring(backup_xml)
     for record in records:
         tokens = _parse_cleanup_cli(str(record.get("command") or ""))
         category = record.get("category")
@@ -1247,7 +1248,7 @@ def _canonical_entry(xml: str) -> Tuple[Any, ...]:
             tuple(walk(child) for child in list(node)),
         )
 
-    return walk(ET.fromstring(xml))
+    return walk(safe_xml_fromstring(xml))
 
 
 def _restore_group_order(
@@ -1447,7 +1448,7 @@ def _build_bundle_xml(
             rulebase = _ensure_child(scope, entity.rulebase)
             policy = _ensure_child(rulebase, entity.policy_type)
             container = _ensure_child(policy, "rules")
-        container.append(ET.fromstring(backups[entity].xml))
+        container.append(safe_xml_fromstring(backups[entity].xml))
     try:
         ET.indent(root, space="  ")
     except AttributeError:  # pragma: no cover - Python < 3.9

@@ -423,6 +423,12 @@ export interface AdFilterBlock {
   sourceGroups: string[];
 }
 
+export interface AdGroupCliBlock extends AdFilterBlock {
+  panoramaGroupName: string;
+  cliCommand: string;
+  rollbackCliCommand: string;
+}
+
 export interface AdGroupGenerationResult {
   generatedAt: string;
   outputGroupName: string;
@@ -437,6 +443,10 @@ export interface AdGroupGenerationResult {
   groups: AdGroupValidation[];
   blocks: AdFilterBlock[];
   clipboardText: string;
+  cliGroups: AdGroupCliBlock[];
+  cliText: string;
+  rollbackCliText: string;
+  handModeReady: boolean;
   warnings: string[];
 }
 
@@ -570,6 +580,7 @@ export interface RestorePlan {
   entities: RestoreEntity[];
   warnings: string[];
   operations: PatchOperation[];
+  artifacts: SessionArtifact[];
 }
 
 export interface WriteOptions {

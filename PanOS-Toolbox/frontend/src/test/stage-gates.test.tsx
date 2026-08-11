@@ -33,6 +33,24 @@ describe("staged execution gates", () => {
     expect(screen.getByRole("button", { name: "Commit" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Validate & Push" })).toBeDisabled();
     expect(screen.queryByText(/Tryb wykonania/)).not.toBeInTheDocument();
+    expect(screen.getByText("Hand Mode — komendy dla człowieka")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Kopiuj wszystko" })).toBeEnabled();
+  });
+
+  it("trzyma wykluczone komendy w osobnym zestawie z dodatkowym ostrzeżeniem", () => {
+    const excludedArtifact = {
+      file: "handmode_excluded_commands.txt",
+      kind: "handmode-cli-excluded-manual-review",
+      contentType: "text/plain; charset=utf-8",
+      sizeBytes: 4096,
+      viewable: true,
+      downloadable: true,
+    };
+    render(<PlanPage {...baseProps} plan={{ ...demoCleanupPlan, artifacts: [...(demoCleanupPlan.artifacts ?? []), excludedArtifact] }} executionSession={null} />);
+    expect(screen.getByText("Osobny zestaw: elementy wykluczone z planu")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Kopiuj wykluczone…" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent(/spoza aktywnego planu/i);
+    expect(baseProps.onViewArtifact).not.toHaveBeenCalledWith("handmode_excluded_commands.txt");
   });
 
   it("wydziela wskazany cel do osobnego planu", () => {

@@ -372,6 +372,35 @@ def _ping_one(
     )
 
 
+MAX_XML_RESPONSE_BYTES = 512 * 1024 * 1024
+
+
+def _read_limited_response(response: requests.Response) -> bytes:
+    declared = response.headers.get("Content-Length")
+    if declared:
+        try:
+            declared_size = int(declared)
+        except (TypeError, ValueError):
+            declared_size = -1
+        if declared_size > MAX_XML_RESPONSE_BYTES:
+            raise TransportError(
+                "Odpowiedź Panorama XML API przekracza bezpieczny limit 512 MiB."
+            )
+
+    chunks: List[bytes] = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=1024 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > MAX_XML_RESPONSE_BYTES:
+            raise TransportError(
+                "Odpowiedź Panorama XML API przekracza bezpieczny limit 512 MiB."
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class PanoramaXMLAPI:
     """Read-only XML API client; the API key exists in memory only."""
 
@@ -448,6 +477,7 @@ class PanoramaXMLAPI:
     def _post(self, data: Dict[str, str], *, authenticated: bool) -> bytes:
         if authenticated and not self._authenticated:
             raise TransportError("Klient XML API nie jest uwierzytelniony.")
+        response: Optional[requests.Response] = None
         try:
             response = self.session.post(
                 self.base_url,
@@ -455,6 +485,7 @@ class PanoramaXMLAPI:
                 verify=self.verify,
                 timeout=self.timeout,
                 allow_redirects=False,
+                stream=True,
             )
             if 300 <= response.status_code < 400:
                 raise TransportError(
@@ -462,7 +493,7 @@ class PanoramaXMLAPI:
                     "przekazać hasła ani klucza API do innego endpointu."
                 )
             response.raise_for_status()
-            return response.content
+            return _read_limited_response(response)
         except requests.exceptions.SSLError as exc:
             raise TransportError(
                 "Weryfikacja TLS Panoramy nie powiodła się. Użyj --ca-bundle "
@@ -476,6 +507,9 @@ class PanoramaXMLAPI:
             raise TransportError(
                 f"Błąd lokalnego transportu HTTPS/XML API: {type(exc).__name__}"
             ) from exc
+        finally:
+            if response is not None:
+                response.close()
 
     def close(self) -> None:
         self.session.headers.pop("X-PAN-KEY", None)

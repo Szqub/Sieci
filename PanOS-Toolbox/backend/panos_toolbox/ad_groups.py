@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
-import json
+import locale
 import os
-import shutil
+import re
 import subprocess
+import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from .errors import DependencyError, InputError
+from .handmode import quote_cli
+from .platform_tools import windows_system_tool
 
 
 MAX_GROUPS = 500
 FILTER_CHUNK_SIZE = 6
 PANORAMA_PREFIX = "AD__"
 _ALLOWED_STATUSES = {"valid", "empty", "not-found", "error"}
+_DN_PREFIX = re.compile(r"^(?:CN|OU|DC|O|C|L|ST|UID)=", re.IGNORECASE)
 
 
 def _clean_text(value: object, label: str, *, maximum: int = 255) -> str:
@@ -92,60 +95,215 @@ def build_filter_blocks(valid_groups: Sequence[dict[str, Any]]) -> list[dict[str
     return blocks
 
 
-def _powershell_executable() -> str:
-    for candidate in ("powershell.exe", "powershell"):
-        resolved = shutil.which(candidate)
-        if resolved:
-            return resolved
-    raise DependencyError(
-        "Nie znaleziono Windows PowerShell. Walidacja AD wymaga PowerShell oraz modułu ActiveDirectory (RSAT)."
+def _custom_group_name(base: str, index: int, total: int) -> str:
+    """Give every LDAP block a distinct PAN-OS Custom Group entry name."""
+
+    if total == 1:
+        return base
+    suffix = f"__{index:02d}"
+    return base[: 255 - len(suffix)] + suffix
+
+
+def build_custom_group_cli(
+    blocks: Sequence[dict[str, Any]],
+    *,
+    output_name: str,
+    template_name: str,
+    vsys: str,
+    mapping_name: str,
+) -> list[dict[str, Any]]:
+    """Build command-only Hand Mode entries for Panorama template CLI.
+
+    PAN-OS stores one LDAP filter per Custom Group entry.  More than one
+    six-DN block therefore receives a deterministic numbered entry instead of
+    repeatedly overwriting the same ``ldap-filter`` leaf.
+    """
+
+    if not template_name:
+        return []
+    prefix = [
+        "template",
+        quote_cli(template_name, context="Device Template"),
+        "config",
+        "vsys",
+        quote_cli(vsys, context="VSYS"),
+        "group-mapping",
+        quote_cli(mapping_name, context="Group Mapping"),
+        "custom-group",
+    ]
+    result: list[dict[str, Any]] = []
+    total = len(blocks)
+    for block in blocks:
+        index = int(block["index"])
+        name = _custom_group_name(output_name, index, total)
+        entry_path = [*prefix, quote_cli(name, context="Custom Group")]
+        command = " ".join(
+            [
+                "set",
+                *entry_path,
+                "ldap-filter",
+                quote_cli(str(block["filter"]), context="LDAP filter"),
+            ]
+        )
+        rollback = " ".join(["delete", *entry_path])
+        result.append(
+            {
+                **dict(block),
+                "panoramaGroupName": name,
+                "cliCommand": command,
+                "rollbackCliCommand": rollback,
+            }
+        )
+    return result
+
+
+def _directory_service_tools() -> tuple[str, str]:
+    """Return Microsoft RSAT tools only from protected Windows system paths."""
+
+    dsquery = windows_system_tool("dsquery.exe")
+    dsget = windows_system_tool("dsget.exe")
+    if not dsquery or not dsget:
+        raise DependencyError(
+            "Nie znaleziono dsquery.exe/dsget.exe. Walidacja AD wymaga zatwierdzonych "
+            "narzędzi RSAT Active Directory Domain Services."
+        )
+    return dsquery, dsget
+
+
+def _decode_directory_output(payload: bytes) -> str:
+    if not payload:
+        return ""
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return payload.decode("utf-16", errors="replace")
+    if b"\x00" in payload[:32]:
+        return payload.decode("utf-16-le", errors="replace")
+    return payload.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+def _directory_dns(payload: str) -> list[str]:
+    """Extract only directory object DNs, ignoring localized tool status text."""
+
+    result: list[str] = []
+    for raw_line in payload.splitlines():
+        value = raw_line.strip().lstrip("\ufeff")
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1].replace('""', '"').strip()
+        if value and _DN_PREFIX.match(value):
+            result.append(value)
+    return result
+
+
+def _run_directory_command(
+    executable: str, arguments: Sequence[str], *, timeout_seconds: float
+) -> tuple[int, str]:
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    completed = subprocess.run(
+        [executable, *arguments],
+        capture_output=True,
+        timeout=max(0.1, timeout_seconds),
+        check=False,
+        creationflags=creation_flags,
     )
+    return completed.returncode, _decode_directory_output(completed.stdout)
 
 
 def lookup_ad_groups(group_names: Sequence[str], *, timeout_seconds: int = 90) -> list[dict[str, Any]]:
-    script = Path(__file__).with_name("ad_group_lookup.ps1")
-    if not script.is_file():
-        raise DependencyError("Paczka nie zawiera helpera walidacji AD.")
-    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-    try:
-        completed = subprocess.run(
-            [
-                _powershell_executable(),
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script),
-            ],
-            input=json.dumps({"groups": list(group_names)}, ensure_ascii=False),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-            creationflags=creation_flags,
+    """Validate exact group names through Microsoft-signed RSAT executables.
+
+    The implementation deliberately does not invoke PowerShell, change an
+    execution policy, pass credentials, or use a shell.  Both tools use the
+    current Windows identity and every query is restricted to one exact SAM
+    account name supplied by the operator.
+    """
+
+    if not 1 <= timeout_seconds <= 600:
+        raise ValueError("timeout_seconds musi być w zakresie 1..600")
+    names = list(group_names)
+    if any("*" in name or "?" in name for name in names):
+        raise InputError(
+            "Walidacja AD przyjmuje dokładne nazwy grup; znaki wieloznaczne * i ? są zabronione."
         )
+    dsquery, dsget = _directory_service_tools()
+    deadline = time.monotonic() + timeout_seconds
+    results: list[dict[str, Any]] = []
+
+    def remaining() -> float:
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise subprocess.TimeoutExpired("RSAT AD lookup", timeout_seconds)
+        return value
+
+    try:
+        for name in names:
+            query_code, query_output = _run_directory_command(
+                dsquery,
+                ("group", "-samid", name, "-o", "dn", "-limit", "2", "-uco"),
+                timeout_seconds=remaining(),
+            )
+            distinguished_names = _directory_dns(query_output)
+            if query_code != 0:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "error",
+                        "memberCount": 0,
+                        "distinguishedName": None,
+                    }
+                )
+                continue
+            if not distinguished_names:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "not-found",
+                        "memberCount": 0,
+                        "distinguishedName": None,
+                    }
+                )
+                continue
+            if len(distinguished_names) != 1:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "error",
+                        "memberCount": 0,
+                        "distinguishedName": None,
+                    }
+                )
+                continue
+
+            distinguished_name = distinguished_names[0]
+            members_code, members_output = _run_directory_command(
+                dsget,
+                ("group", distinguished_name, "-members", "-uco"),
+                timeout_seconds=remaining(),
+            )
+            if members_code != 0:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "error",
+                        "memberCount": 0,
+                        "distinguishedName": None,
+                    }
+                )
+                continue
+            member_count = len(_directory_dns(members_output))
+            results.append(
+                {
+                    "name": name,
+                    "status": "valid" if member_count else "empty",
+                    "memberCount": member_count,
+                    "distinguishedName": distinguished_name,
+                }
+            )
     except subprocess.TimeoutExpired as exc:
-        raise DependencyError("Walidacja AD przekroczyła limit 90 sekund.") from exc
+        raise DependencyError(
+            f"Walidacja AD przekroczyła limit {timeout_seconds} sekund."
+        ) from exc
     except OSError as exc:
         raise DependencyError("Nie udało się uruchomić lokalnej walidacji AD.") from exc
-
-    if completed.returncode != 0:
-        raise DependencyError("PowerShell zakończył walidację AD błędem.")
-    try:
-        payload = json.loads(completed.stdout.strip())
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise DependencyError("Walidator AD zwrócił niepoprawną odpowiedź.") from exc
-    if not isinstance(payload, dict) or payload.get("ok") is not True:
-        message = payload.get("message") if isinstance(payload, dict) else None
-        raise DependencyError(str(message or "Moduł ActiveDirectory nie jest dostępny."))
-    items = payload.get("groups")
-    if not isinstance(items, list):
-        raise DependencyError("Walidator AD nie zwrócił listy grup.")
-    return items
+    return results
 
 
 def generate_ad_group_definition(
@@ -202,6 +360,24 @@ def generate_ad_group_definition(
     valid = [item for item in results if item["status"] == "valid"]
     blocks = build_filter_blocks(valid)
     warnings = [item["detail"] + f" ({item['name']})" for item in results if item["status"] != "valid"]
+    cli_groups = build_custom_group_cli(
+        blocks,
+        output_name=final_name,
+        template_name=template,
+        vsys=target_vsys,
+        mapping_name=mapping,
+    )
+    if blocks and not template:
+        warnings.append(
+            "Hand Mode CLI ma status BLOCK: podaj dokładny Device Template; "
+            "Toolbox nie wygeneruje komendy z placeholderem."
+        )
+    if len(cli_groups) > 1:
+        warnings.append(
+            f"Filtr wymaga {len(cli_groups)} wpisów Custom Group; nadano im "
+            f"nazwy {cli_groups[0]['panoramaGroupName']} … "
+            f"{cli_groups[-1]['panoramaGroupName']}, aby kolejne set nie nadpisywały ldap-filter."
+        )
     target_parts = ["Device Templates"]
     if template:
         target_parts.append(template)
@@ -222,5 +398,13 @@ def generate_ad_group_definition(
         "groups": results,
         "blocks": blocks,
         "clipboardText": "\n\n".join(block["filter"] for block in blocks),
+        "cliGroups": cli_groups,
+        "cliText": "\n".join(item["cliCommand"] for item in cli_groups)
+        + ("\n" if cli_groups else ""),
+        "rollbackCliText": "\n".join(
+            reversed([item["rollbackCliCommand"] for item in cli_groups])
+        )
+        + ("\n" if cli_groups else ""),
+        "handModeReady": bool(cli_groups),
         "warnings": warnings,
     }

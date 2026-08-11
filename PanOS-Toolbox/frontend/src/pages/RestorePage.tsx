@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertOctagon,
   AlertTriangle,
   ArrowDown,
   CheckCircle2,
   CloudUpload,
+  ClipboardCopy,
   Download,
+  Eye,
   FileArchive,
+  FileText,
   GitMerge,
   History,
   PackageCheck,
@@ -15,8 +19,10 @@ import {
   ServerCog,
   ShieldCheck,
   ShieldX,
+  Terminal,
+  X,
 } from "lucide-react";
-import type { ExecutionJob, RestorePlan, ToolboxSession } from "../model";
+import type { ExecutionJob, RestorePlan, SessionArtifact, ToolboxSession } from "../model";
 import { formatDate, shortId } from "../model";
 import { ExecutionProgress } from "../components/ExecutionProgress";
 import { Button, Callout, Card, CardHeader, EmptyState, PageHeader, StatCard, StatusPill } from "../components/Primitives";
@@ -36,14 +42,20 @@ interface RestorePageProps {
   onCommit: () => void;
   onPush: () => void;
   onDownloadConflicts: () => void;
+  onViewArtifact: (artifact: string) => Promise<string>;
+  onDownloadArtifact: (artifact: string) => void;
   onOpenConnection: () => void;
   onOpenWarnings: () => void;
 }
 
-export function RestorePage({ query, onQueryChange, plan, executionSession, executionJob, writeEnabled, connected, busy, error, onCreatePlan, onApplyCandidate, onCommit, onPush, onDownloadConflicts, onOpenConnection, onOpenWarnings }: RestorePageProps) {
+export function RestorePage({ query, onQueryChange, plan, executionSession, executionJob, writeEnabled, connected, busy, error, onCreatePlan, onApplyCandidate, onCommit, onPush, onDownloadConflicts, onViewArtifact, onDownloadArtifact, onOpenConnection, onOpenWarnings }: RestorePageProps) {
   const sessionQuery = (value: string) => !value.includes("\n") && /^(session-|cleanup-)/.test(value.trim());
   const [mode, setMode] = useState<"target" | "session">(() => sessionQuery(query) ? "session" : "target");
   const [confirmAction, setConfirmAction] = useState<"commit" | "push" | null>(null);
+  const [artifactViewer, setArtifactViewer] = useState<{ file: string; content: string; loading: boolean; error?: string } | null>(null);
+  const [copiedArtifact, setCopiedArtifact] = useState<string | null>(null);
+  const [confirmConflictCopy, setConfirmConflictCopy] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   useEffect(() => { setMode(sessionQuery(query) ? "session" : "target"); }, [query]);
 
   const state = executionSession?.state ?? plan?.state ?? "PLANNED";
@@ -51,6 +63,45 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, exec
   const conflicts = useMemo(() => plan?.entities.filter((entity) => entity.outcome === "conflict") ?? [], [plan]);
   const candidateDone = ["RESTORED", "PARTIAL", "COMMITTING", "COMMITTED", "PUSHING", "PUSHED"].includes(state);
   const commitDone = ["COMMITTED", "PUSHING", "PUSHED"].includes(state);
+  const artifacts = useMemo(() => {
+    const catalog = new Map<string, SessionArtifact>();
+    for (const artifact of plan?.artifacts ?? []) catalog.set(artifact.file, artifact);
+    for (const artifact of executionSession?.artifacts ?? []) catalog.set(artifact.file, artifact);
+    for (const artifact of executionJob?.session?.artifacts ?? []) catalog.set(artifact.file, artifact);
+    return [...catalog.values()];
+  }, [executionJob?.session?.artifacts, executionSession?.artifacts, plan?.artifacts]);
+  const activeHandMode = artifacts.find((artifact) => artifact.kind === "handmode-cli-active");
+  const rollbackHandMode = artifacts.find((artifact) => artifact.kind === "handmode-cli-rollback") ?? artifacts.find((artifact) => artifact.file === "handmode_rollback.txt");
+  const handModeInstructions = artifacts.find((artifact) => artifact.kind === "handmode-instructions") ?? artifacts.find((artifact) => artifact.file === "handmode_instructions.txt");
+  const conflictHandMode = artifacts.find((artifact) => artifact.kind === "handmode-cli-conflict-restore-manual-review") ?? artifacts.find((artifact) => artifact.file === "handmode_conflict_restore_commands.txt");
+  const conflictRollback = artifacts.find((artifact) => artifact.kind === "handmode-cli-conflict-restore-rollback") ?? artifacts.find((artifact) => artifact.file === "handmode_conflict_restore_rollback.txt");
+  const conflictInstructions = artifacts.find((artifact) => artifact.kind === "handmode-conflict-restore-instructions") ?? artifacts.find((artifact) => artifact.file === "handmode_conflict_restore_instructions.txt");
+  const handModeBlocked = Boolean(plan && plan.operations.length > 0 && (!activeHandMode || activeHandMode.sizeBytes === 0));
+
+  const openArtifact = async (file: string) => {
+    setArtifactViewer({ file, content: "", loading: true });
+    try {
+      const content = await onViewArtifact(file);
+      setArtifactViewer({ file, content, loading: false });
+    } catch (viewerError) {
+      setArtifactViewer({ file, content: "", loading: false, error: viewerError instanceof Error ? viewerError.message : "Nie można wyświetlić pliku." });
+    }
+  };
+
+  const copyArtifact = async (file: string) => {
+    setCopyError(null);
+    try {
+      const content = artifactViewer?.file === file && !artifactViewer.loading && !artifactViewer.error
+        ? artifactViewer.content
+        : await onViewArtifact(file);
+      if (!navigator.clipboard?.writeText) throw new Error("Przeglądarka nie udostępnia schowka. Użyj Wyświetl i skopiuj z podglądu albo Pobierz TXT.");
+      await navigator.clipboard.writeText(content);
+      setCopiedArtifact(file);
+      window.setTimeout(() => setCopiedArtifact((current) => current === file ? null : current), 1800);
+    } catch (clipboardError) {
+      setCopyError(clipboardError instanceof Error ? clipboardError.message : "Nie udało się skopiować komend.");
+    }
+  };
 
   return (
     <div className="page-stack restore-page">
@@ -97,6 +148,28 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, exec
 
           {plan.warnings.length > 0 && <div className="notice-actions"><button type="button" className="inline-notice-link" onClick={onOpenWarnings}><AlertTriangle size={15} /><span><strong>{plan.warnings.length} uwag z Restore</strong><small>Konflikty i szczegóły są w panelu Uwagi</small></span></button><Button icon={<Download size={15} />} onClick={onDownloadConflicts} loading={busy === "download"}>Pakiet ręczny</Button></div>}
 
+          <Card className="handmode-card">
+            <div className="handmode-card__header">
+              <span className="handmode-card__icon"><Terminal size={22} /></span>
+              <div><span className="eyebrow">Emergency Restore / PAN-OS CLI</span><h2>Hand Mode — ręczne odtworzenie</h2><p>Bezpieczny subset jest zgodny z inverse PatchSetem Restore. Pliki zawierają tylko komendy trybu <code>configure (#)</code>; commit i push wykonujesz osobno.</p></div>
+              <StatusPill tone={handModeBlocked ? "danger" : plan.operations.length ? "success" : "info"}>{handModeBlocked ? "CLI BLOCK" : plan.operations.length ? "CLI READY" : "BRAK SAFE MUTATIONS"}</StatusPill>
+            </div>
+            {copyError && <Callout severity="danger" title="Nie udało się skopiować"><p>{copyError}</p></Callout>}
+            <div className="handmode-command-grid">
+              <section>
+                <div><strong>Bezpieczny Restore</strong><small><code>commands.txt</code> · tylko komponenty dopuszczone przez merge trójstronny</small></div>
+                <div>{activeHandMode && <><Button icon={<Eye size={15} />} onClick={() => void openArtifact(activeHandMode.file)}>Wyświetl</Button><Button variant="primary" icon={<ClipboardCopy size={15} />} disabled={handModeBlocked} onClick={() => void copyArtifact(activeHandMode.file)}>{copiedArtifact === activeHandMode.file ? "Skopiowano" : "Kopiuj wszystko"}</Button><Button icon={<Download size={15} />} onClick={() => onDownloadArtifact(activeHandMode.file)}>Pobierz TXT</Button></>}{rollbackHandMode && <Button variant="ghost" icon={<RotateCcw size={15} />} onClick={() => void openArtifact(rollbackHandMode.file)}>Cofnięcie Restore</Button>}</div>
+              </section>
+              {handModeInstructions && <section className="handmode-instructions"><div><strong>Instrukcja i status renderera</strong><small>READY/BLOCK, liczba komend, ostrzeżenia XML i kolejność wykonania</small></div><div><Button variant="ghost" icon={<Eye size={15} />} onClick={() => void openArtifact(handModeInstructions.file)}>Wyświetl instrukcję</Button><Button variant="ghost" icon={<Download size={15} />} onClick={() => onDownloadArtifact(handModeInstructions.file)}>Pobierz</Button></div></section>}
+            </div>
+            {handModeBlocked && <Callout severity="danger" title="Hand Mode Restore zablokowany"><p>Co najmniej jedna operacja nie ma bezpiecznego odpowiednika CLI. <code>commands.txt</code> jest celowo pusty, więc nie da się skopiować niepełnego restore. Dokładny powód znajduje się w instrukcji.</p></Callout>}
+            {conflictHandMode && <div className="handmode-excluded">
+              <AlertOctagon size={20} />
+              <span><strong>Osobny zestaw: komponenty konfliktowe</strong><small>Three-way merge odrzucił je z bezpiecznego Restore. Nie łącz tego pliku z <code>commands.txt</code> bez sprawdzenia aktualnego configu, <code>manual_conflicts.json</code> i pełnego diffu.</small></span>
+              <div><Button variant="danger" icon={<Eye size={15} />} onClick={() => void openArtifact(conflictHandMode.file)}>Wyświetl konflikty</Button><Button variant="danger" icon={<ClipboardCopy size={15} />} disabled={conflictHandMode.sizeBytes === 0} onClick={() => setConfirmConflictCopy(conflictHandMode.file)}>Kopiuj konflikty…</Button><Button icon={<Download size={15} />} onClick={() => onDownloadArtifact(conflictHandMode.file)}>Pobierz</Button>{conflictRollback && <Button variant="ghost" icon={<RotateCcw size={15} />} onClick={() => void openArtifact(conflictRollback.file)}>Rollback konfliktów</Button>}{conflictInstructions && <Button variant="ghost" icon={<FileText size={15} />} onClick={() => void openArtifact(conflictInstructions.file)}>Instrukcja konfliktów</Button>}</div>
+            </div>}
+          </Card>
+
           <Card>
             <CardHeader title="Encje w closure zależności" description="Konflikt pomija cały zależny komponent; pozostałe komponenty mogą być przywrócone." action={<StatusPill tone="info">3-way verified</StatusPill>} />
             <div className="restore-components">
@@ -136,6 +209,15 @@ export function RestorePage({ query, onQueryChange, plan, executionSession, exec
 
           <div className="restore-policy"><ShieldCheck size={20} /><div><strong>Pełny backup jest tylko źródłem prawdy</strong><p>Toolbox nie wywoła automatycznego load config, nawet podczas Emergency Restore. Każdy zapis jest ścieżkowym patchem z operacją odwrotną.</p></div><AlertTriangle size={19} /></div>
           {confirmAction && <div className="write-confirm-backdrop"><div className={`write-confirm ${confirmAction === "push" ? "write-confirm--critical" : ""}`} role="dialog" aria-modal="true"><div><AlertTriangle size={22} /><strong>{confirmAction === "commit" ? "Potwierdź commit Restore" : "UWAGA: potwierdź push Restore"}</strong></div><p>{confirmAction === "commit" ? "Bezpieczny subset Restore zostanie utrwalony partial commitem. Push nie uruchomi się automatycznie." : `Odtworzone zmiany zostaną wysłane do: ${plan.affectedDeviceGroups.join(", ") || "shared"}.`}</p><div><Button onClick={() => setConfirmAction(null)}>Anuluj</Button><Button variant={confirmAction === "push" ? "danger" : "primary"} onClick={() => { const action = confirmAction; setConfirmAction(null); if (action === "commit") onCommit(); else onPush(); }}>{confirmAction === "commit" ? "Uruchom commit" : "Wykonaj PUSH"}</Button></div></div></div>}
+          {confirmConflictCopy && <div className="write-confirm-backdrop"><div className="write-confirm write-confirm--critical" role="dialog" aria-modal="true" aria-labelledby="conflict-handmode-title">
+            <div><AlertOctagon size={22} /><strong id="conflict-handmode-title">Kopiujesz konfliktowy Restore</strong></div>
+            <p>Te komendy zostały jawnie odrzucone z bezpiecznego merge. Mogą nadpisać późniejszą zmianę operatora albo odtworzyć nieaktualną zależność. Najpierw porównaj je z aktualnym configiem i pakietem konfliktów.</p>
+            <div><Button onClick={() => setConfirmConflictCopy(null)}>Anuluj</Button><Button variant="danger" onClick={() => { const file = confirmConflictCopy; setConfirmConflictCopy(null); void copyArtifact(file); }}>Rozumiem — kopiuj konfliktowy Restore</Button></div>
+          </div></div>}
+          {artifactViewer && <div className="artifact-viewer-backdrop"><div className="artifact-viewer" role="dialog" aria-modal="true" aria-label={`Podgląd ${artifactViewer.file}`}>
+            <header><div><FileText size={19} /><span><strong>{artifactViewer.file}</strong><small>Pełny plik sesji · tylko do odczytu</small></span></div><div>{!artifactViewer.loading && !artifactViewer.error && <Button variant="ghost" icon={<ClipboardCopy size={14} />} onClick={() => artifactViewer.file === conflictHandMode?.file ? setConfirmConflictCopy(artifactViewer.file) : void copyArtifact(artifactViewer.file)}>{copiedArtifact === artifactViewer.file ? "Skopiowano" : "Kopiuj"}</Button>}<Button variant="ghost" icon={<Download size={14} />} onClick={() => onDownloadArtifact(artifactViewer.file)}>Pobierz</Button><button onClick={() => setArtifactViewer(null)} aria-label="Zamknij podgląd"><X size={19} /></button></div></header>
+            {artifactViewer.loading ? <div className="artifact-viewer-loading"><ServerCog className="spin" size={22} /><span>Pobieranie pliku do podglądu…</span></div> : artifactViewer.error ? <Callout severity="danger" title="Nie można wyświetlić pliku"><p>{artifactViewer.error}</p></Callout> : <pre>{artifactViewer.content}</pre>}
+          </div></div>}
         </>
       )}
     </div>

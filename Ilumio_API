@@ -4,8 +4,9 @@ cat <<'EOF' > illumio_probe.sh
 set -euo pipefail
 
 # ====== KONFIG ======
-BASE="https://illumio-tst:8443"
-ORG="1"
+: "${BASE:?Ustaw BASE, np. https://pce.example.net:8443}"
+: "${ORG:=1}"
+: "${CA_BUNDLE:=}"  # opcjonalny firmowy CA bundle
 
 # Uzupełnij przed uruchomieniem:
 : "${KEY:=}"    # API Key ID
@@ -21,20 +22,39 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # ====== AUTH/CURL ======
-declare -a AUTH_CURL
+curl_config_escape() {
+  local value="$1"
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "Poświadczenie zawiera niedozwolony znak nowej linii." >&2
+    exit 3
+  fi
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
 if [[ -n "${AUTH_HEADER:-}" ]]; then
-  AUTH_CURL=(-H "Authorization: ${AUTH_HEADER}")
+  AUTH_CONFIG="header = \"Authorization: $(curl_config_escape "$AUTH_HEADER")\""
 else
   if [[ -z "$KEY" || -z "$TOKEN" ]]; then
     echo "Ustaw KEY i TOKEN (eksportuj zmienne) albo AUTH_HEADER (Bearer)." >&2
     exit 3
   fi
-  AUTH_CURL=(-u "$KEY:$TOKEN")
+  AUTH_CONFIG="user = \"$(curl_config_escape "$KEY:$TOKEN")\""
 fi
 
-CURL=(curl -k -sS "${AUTH_CURL[@]}" -H "Accept: application/json")
+declare -a CURL_TLS
+CURL_TLS=()
+if [[ -n "$CA_BUNDLE" ]]; then
+  CURL_TLS=(--cacert "$CA_BUNDLE")
+fi
 
-get() { "${CURL[@]}" "$BASE$1"; }
+get() {
+  # Sekret trafia do curl przez stdin, nigdy przez argv widoczne w process list.
+  printf '%s\n' "$AUTH_CONFIG" 'header = "Accept: application/json"' |
+    curl --config - --silent --show-error --fail \
+      --proto '=https' --tlsv1.2 "${CURL_TLS[@]}" --url "$BASE$1"
+}
 
 println() { printf "%b\n" "$*"; }
 
@@ -108,7 +128,10 @@ EOF
 chmod +x illumio_probe.sh
 
 # === URUCHOMIENIE ===
-# Podstaw swoje dane (API Key ID/Secret):
-# KEY="..." TOKEN="..." ./illumio_probe.sh
+# Wczytaj sekret interaktywnie, aby nie trafił do historii poleceń:
+# read -r -p "API Key ID: " KEY
+# read -r -s -p "API Key Secret: " TOKEN; echo
+# export KEY TOKEN; ./illumio_probe.sh; unset KEY TOKEN
 echo 'Przykład uruchomienia:'
-echo 'KEY="API_KEY_ID" TOKEN="API_KEY_SECRET" ./illumio_probe.sh'
+echo 'read -r -p "API Key ID: " KEY; read -r -s -p "API Key Secret: " TOKEN; echo'
+echo 'export KEY TOKEN; ./illumio_probe.sh; unset KEY TOKEN'

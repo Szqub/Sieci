@@ -1,36 +1,86 @@
+[CmdletBinding()]
 param(
+    [switch]$Doctor,
     [ValidateRange(1, 65535)]
     [int]$Port = 8765
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
-$entrypoint = Join-Path $PSScriptRoot "panos-toolbox.py"
-if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
-    throw "Brak entrypointu: $entrypoint"
-}
-$vendorFlask = Join-Path $PSScriptRoot "backend\vendor\flask\__init__.py"
-$vendorWerkzeug = Join-Path $PSScriptRoot "backend\vendor\werkzeug\__init__.py"
-$staticIndex = Join-Path $PSScriptRoot "backend\panos_toolbox\static\index.html"
-foreach ($required in @($vendorFlask, $vendorWerkzeug, $staticIndex)) {
+
+$toolboxRoot = $PSScriptRoot
+$entryPoint = Join-Path $toolboxRoot "panos-toolbox.py"
+$requiredFiles = @(
+    (Join-Path $toolboxRoot "backend\vendor\flask\__init__.py"),
+    (Join-Path $toolboxRoot "backend\vendor\werkzeug\__init__.py"),
+    (Join-Path $toolboxRoot "backend\panos_toolbox\static\index.html"),
+    $entryPoint
+)
+foreach ($required in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw (
-            "To nie jest kompletna paczka portable. Brakuje: $required. " +
-            "Pobierz ZIP z https://github.com/Szqub/Sieci/releases/latest, " +
-            "wybierz 'Wyodrębnij wszystkie' i nie instaluj Flask przez pip."
-        )
+        throw "Paczka jest niekompletna albo uruchomiona wewnątrz ZIP. Brak: $required"
     }
 }
 
-Write-Host "PanOS Toolbox: http://127.0.0.1:$Port/"
-Write-Host "Trwale dane: Dokumenty\PanOS Toolbox\sessions oraz profiles.json"
-Write-Host "Zatrzymanie: Ctrl+C"
-if (Get-Command py -ErrorAction SilentlyContinue) {
-    & py -3 -I -S $entrypoint serve --port $Port
+function Resolve-ToolboxPython {
+    if ($env:PANOS_TOOLBOX_PYTHON) {
+        $configured = [System.IO.Path]::GetFullPath($env:PANOS_TOOLBOX_PYTHON)
+        if (-not (Test-Path -LiteralPath $configured -PathType Leaf)) {
+            throw "PANOS_TOOLBOX_PYTHON nie wskazuje istniejącego pliku: $configured"
+        }
+        if ([System.IO.Path]::GetExtension($configured) -ne ".exe") {
+            throw "PANOS_TOOLBOX_PYTHON musi wskazywać python.exe albo py.exe."
+        }
+        return $configured
+    }
+
+    $candidates = @(
+        (Join-Path $env:SystemRoot "py.exe"),
+        (Join-Path $env:LocalAppData "Programs\Python\Launcher\py.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    $roots = @(
+        (Join-Path $env:LocalAppData "Programs\Python"),
+        $env:ProgramFiles
+    )
+    foreach ($root in $roots) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) {
+            continue
+        }
+        $python = Get-ChildItem -LiteralPath $root -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "python.exe" } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+        if ($python) {
+            return $python
+        }
+    }
+    throw "Nie znaleziono zatwierdzonego Python 3. Ustaw PANOS_TOOLBOX_PYTHON na pełną ścieżkę python.exe."
 }
-elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    & python -I -S $entrypoint serve --port $Port
+
+$python = Resolve-ToolboxPython
+$pythonArguments = @()
+if ([System.IO.Path]::GetFileName($python) -ieq "py.exe") {
+    $pythonArguments += "-3"
+}
+$pythonArguments += @("-I", "-B", "-S", $entryPoint)
+if ($Doctor) {
+    $pythonArguments += "doctor"
 }
 else {
-    throw "Nie znaleziono Python 3 w PATH (py ani python)."
+    $pythonArguments += @("serve", "--port", [string]$Port)
 }
+
+Write-Host "PanOS Toolbox użyje: $python"
+if (-not $Doctor) {
+    Write-Host "Bezpieczny link sesji zostanie otwarty automatycznie przez backend."
+    Write-Host "Trwałe dane lokalne: $env:LOCALAPPDATA\PanOS Toolbox"
+}
+& $python @pythonArguments
 exit $LASTEXITCODE

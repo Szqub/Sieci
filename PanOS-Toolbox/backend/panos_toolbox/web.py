@@ -7,6 +7,7 @@ import json
 import secrets
 import threading
 import time
+import webbrowser
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +34,11 @@ from .errors import (
     OutcomeUnknownError,
     ToolboxError,
 )
-from .models import ApiStage, PatchSet, SessionState
+from .handmode import (
+    write_handmode_artifacts,
+    write_restore_conflict_handmode_artifacts,
+)
+from .models import ApiStage, Mutation, PatchSet, SessionState
 from .lookup import lookup_exact
 from .policy_requests import build_policy_creation_plan
 from .profile import PanoramaProfile, load_profile, normalize_host
@@ -677,15 +682,35 @@ def _create_cleanup_child_plan(
             }
 
     store.update(child_id, enrich_child)
-    operation_lines = [
-        json.dumps(operation, ensure_ascii=False, sort_keys=True)
-        for operation in _wire_operations(child_patch)
-    ]
-    store.write_artifact(
+    excluded_mutations: tuple[Any, ...] = ()
+    excluded_source_session_id: Optional[str] = None
+    if excluded_components:
+        # Repeated exclusions form a child-session chain.  Mutation and
+        # component IDs stay stable, so the root plan is the authoritative
+        # source for a cumulative, separately labelled manual command set.
+        root_id = parent_id
+        seen_parents: set[str] = set()
+        while root_id not in seen_parents:
+            seen_parents.add(root_id)
+            root_manifest = store.load_manifest(root_id, verify=False)
+            ancestor = root_manifest.get("parent_session_id")
+            if not isinstance(ancestor, str) or not ancestor:
+                break
+            root_id = ancestor
+        root_patch = store.load_patchset(root_id)
+        excluded_component_set = set(excluded_components)
+        excluded_mutations = tuple(
+            mutation
+            for mutation in root_patch.mutations
+            if mutation.component_id in excluded_component_set
+        )
+        excluded_source_session_id = root_id
+    write_handmode_artifacts(
+        store,
         child_id,
-        "commands.txt",
-        "\n".join(operation_lines) + ("\n" if operation_lines else ""),
-        kind="api-operation-preview",
+        child_patch,
+        excluded_mutations=excluded_mutations,
+        excluded_source_session_id=excluded_source_session_id,
     )
     store.write_artifact(
         child_id,
@@ -758,7 +783,88 @@ def _wire_restore_plan(store: SessionStore, result: dict[str, Any]) -> dict[str,
         "entities": entities,
         "warnings": manifest.get("warnings") or [],
         "operations": _wire_operations(patch),
+        "artifacts": store.artifact_catalog(session_id, manifest=manifest),
     }
+
+
+def _materialize_session_handmode(
+    store: SessionStore, session_id: str
+) -> tuple[str, ...]:
+    """Append Hand Mode artifacts to a legacy session without changing old files."""
+
+    manifest = store.load_manifest(session_id)
+    patch = store.load_patchset(session_id)
+    excluded_components = {
+        str(item) for item in manifest.get("excluded_component_ids") or ()
+    }
+    excluded_mutations: tuple[Mutation, ...] = ()
+    excluded_source_session_id: Optional[str] = None
+    if excluded_components:
+        root_id = session_id
+        seen_parents: set[str] = set()
+        while root_id not in seen_parents:
+            seen_parents.add(root_id)
+            root_manifest = store.load_manifest(root_id)
+            ancestor = root_manifest.get("parent_session_id")
+            if not isinstance(ancestor, str) or not ancestor:
+                break
+            root_id = ancestor
+        root_patch = store.load_patchset(root_id)
+        excluded_mutations = tuple(
+            mutation
+            for mutation in root_patch.mutations
+            if mutation.component_id in excluded_components
+        )
+        excluded_source_session_id = root_id
+
+    write_handmode_artifacts(
+        store,
+        session_id,
+        patch,
+        excluded_mutations=excluded_mutations,
+        excluded_source_session_id=excluded_source_session_id,
+    )
+
+    warnings: list[str] = []
+    if patch.kind == "restore":
+        refreshed = store.load_manifest(session_id)
+        artifact_by_kind = {
+            str(record.get("kind")): str(record.get("file"))
+            for record in refreshed.get("artifacts") or ()
+            if record.get("kind") and record.get("file")
+        }
+        if "handmode-cli-conflict-restore-manual-review" not in artifact_by_kind:
+            conflicts_file = artifact_by_kind.get("manual-conflicts")
+            if conflicts_file:
+                try:
+                    conflicts_path = store.resolve_download(session_id, conflicts_file)
+                    payload = json.loads(conflicts_path.read_text(encoding="utf-8"))
+                    records = payload.get("mutations") or []
+                    # manual_conflicts.json stores the reverse traversal used by
+                    # the report.  The renderer accepts original cleanup order.
+                    conflict_mutations = tuple(
+                        Mutation.from_dict(item["mutation"])
+                        for item in reversed(records)
+                    )
+                    if conflict_mutations:
+                        write_restore_conflict_handmode_artifacts(
+                            store,
+                            session_id,
+                            conflict_mutations,
+                            source_session_ids=patch.source_session_ids
+                            or ((patch.source_session_id,) if patch.source_session_id else ()),
+                        )
+                except (OSError, ValueError, KeyError, TypeError, ToolboxError) as exc:
+                    warnings.append(
+                        "Nie udało się odtworzyć konfliktowego zestawu CLI ze "
+                        f"starszego raportu: {exc}. Bezpieczny Hand Mode jest dostępny."
+                    )
+            elif manifest.get("conflicts"):
+                warnings.append(
+                    "Starsza sesja Restore nie zawiera strukturalnego manual_conflicts.json; "
+                    "wygenerowano wyłącznie bezpieczny subset Hand Mode."
+                )
+    return tuple(warnings)
 
 
 class ConnectionRegistry:
@@ -899,9 +1005,11 @@ def _contract() -> dict[str, Any]:
         "basePath": "/api/v1",
         "writeStages": [stage.value for stage in ApiStage],
         "authentication": {
+            "appTokenHeader": "X-Toolbox-App-Token",
+            "appTokenPersistence": "memory-only server token and browser sessionStorage",
             "connectionTokenHeader": "X-Toolbox-Session",
             "persistence": "encrypted-profiles-and-memory-session-token",
-            "profileStorage": "per-user Documents/PanOS Toolbox/profiles.json",
+            "profileStorage": "per-user LocalAppData/PanOS Toolbox/profiles.json",
         },
         "paths": {
             "POST /connections": "keygen and create memory-only connection",
@@ -930,6 +1038,7 @@ def _contract() -> dict[str, Any]:
             "GET /history": "offline searchable session, mutation and backup catalog",
             "GET /sessions": "offline integrity-checked session history",
             "GET /sessions/{id}": "offline integrity-checked manifest",
+            "POST /sessions/{id}/handmode": "append paste-ready CLI artifacts to a legacy local session without Panorama",
             "POST /sessions/{id}/reconcile-external": "verify CLI/API post-state and admit restore history",
             "GET /sessions/{id}/artifacts/{path}": "inline preview or download of every registered session file",
             "GET /sessions/{id}/artifacts/bundle": "download complete session backup ZIP",
@@ -943,9 +1052,13 @@ def create_app(
     store: Optional[SessionStore] = None,
     profile_store: Optional[ProfileStore] = None,
     profile_ceiling: Optional[PanoramaProfile] = None,
+    app_token: Optional[str] = None,
+    test_client_auto_auth: bool = False,
 ):
     try:
         from flask import Flask, Response, jsonify, request, send_file, send_from_directory
+        from flask.testing import FlaskClient
+        from werkzeug.datastructures import Headers
         from werkzeug.exceptions import HTTPException
     except ImportError as exc:  # pragma: no cover - packaging diagnostic
         raise RuntimeError(
@@ -957,6 +1070,18 @@ def create_app(
     frontend = (static_dir or Path(__file__).resolve().parent / "static").resolve()
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+    effective_app_token = app_token or secrets.token_urlsafe(32)
+    app.config["TOOLBOX_APP_TOKEN"] = effective_app_token
+    if test_client_auto_auth:
+        class AuthenticatedToolboxTestClient(FlaskClient):
+            def open(self, *args, **kwargs):  # noqa: ANN002, ANN003 - Flask test API
+                headers = Headers(kwargs.get("headers"))
+                if "X-Toolbox-App-Token" not in headers:
+                    headers["X-Toolbox-App-Token"] = effective_app_token
+                kwargs["headers"] = headers
+                return super().open(*args, **kwargs)
+
+        app.test_client_class = AuthenticatedToolboxTestClient
     session_store = store or SessionStore()
     profiles = profile_store or ProfileStore(
         session_store.root.parent if store is not None else None,
@@ -982,6 +1107,18 @@ def create_app(
                     "message": "Host header spoza localhost został odrzucony.",
                 }
             ), 400
+        if request.path.startswith("/api/"):
+            supplied_app_token = request.headers.get("X-Toolbox-App-Token", "")
+            if not secrets.compare_digest(supplied_app_token, effective_app_token):
+                return jsonify(
+                    {
+                        "code": "AppAuthenticationRequired",
+                        "message": (
+                            "Brak poprawnego tokenu lokalnej aplikacji. Uruchom Toolbox "
+                            "ponownie przez start_toolbox.cmd lub start_toolbox.ps1 i użyj otwartego linku sesji."
+                        ),
+                    }
+                ), 401
         if request.path.startswith("/api/") and request.method not in {"GET", "HEAD"}:
             origin = request.headers.get("Origin")
             if not origin:
@@ -1338,7 +1475,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.7.3", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.8.1", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")
@@ -1587,16 +1724,7 @@ def create_app(
             manifest["request_kind"] = "policy-create"
 
         session_store.update(session_id, enrich)
-        session_store.write_artifact(
-            session_id,
-            "commands.txt",
-            "\n".join(
-                json.dumps(operation, ensure_ascii=False, sort_keys=True)
-                for operation in _wire_operations(result.patchset)
-            )
-            + ("\n" if result.patchset.mutations else ""),
-            kind="api-operation-preview",
-        )
+        write_handmode_artifacts(session_store, session_id, result.patchset)
         session_store.write_artifact(
             session_id,
             "raport_szczegolowy.txt",
@@ -1874,6 +2002,22 @@ def create_app(
     @app.get("/api/v1/sessions/<session_id>")
     def session_get(session_id: str):
         return jsonify(_wire_session(session_store, session_id))
+
+    @app.post("/api/v1/sessions/<session_id>/handmode")
+    def session_handmode(session_id: str):
+        # Purely local, append-only migration.  It never reads Panorama and
+        # preserves a legacy commands.txt under its original hash/name.
+        warnings = _materialize_session_handmode(session_store, session_id)
+        return jsonify(
+            {
+                "session": _wire_session(session_store, session_id),
+                "warnings": list(warnings),
+                "message": (
+                    "Hand Mode wygenerowany lokalnie z zapisanego PatchSetu; "
+                    "nie pobrano configu i nie wykonano operacji w Panoramie."
+                ),
+            }
+        )
 
     @app.get("/api/v1/history")
     def history_get():
@@ -2466,12 +2610,35 @@ def run_server(
             f"UWAGA: brak {profile_path}; GUI zostaje wymuszone w read-only.",
             flush=True,
         )
+    app_token = secrets.token_urlsafe(32)
     app = create_app(
         static_dir=static_dir,
         store=SessionStore(session_dir),
         profile_ceiling=profile_ceiling,
+        app_token=app_token,
     )
     server = make_server("127.0.0.1", port, app, threaded=True)
     actual_port = server.server_port
-    print(f"PanOS Toolbox: http://127.0.0.1:{actual_port}/", flush=True)
+    launch_url = (
+        f"http://127.0.0.1:{actual_port}/"
+        f"#toolbox-token={app_token}"
+    )
+    print(f"PanOS Toolbox - bezpieczny link tej sesji: {launch_url}", flush=True)
+
+    def open_browser() -> None:
+        try:
+            if not webbrowser.open_new_tab(launch_url):
+                print(
+                    "Nie udało się automatycznie otworzyć przeglądarki; użyj linku powyżej.",
+                    flush=True,
+                )
+        except (OSError, webbrowser.Error):
+            print(
+                "Nie udało się automatycznie otworzyć przeglądarki; użyj linku powyżej.",
+                flush=True,
+            )
+
+    browser_timer = threading.Timer(0.25, open_browser)
+    browser_timer.daemon = True
+    browser_timer.start()
     server.serve_forever()

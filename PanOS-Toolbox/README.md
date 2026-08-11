@@ -17,6 +17,30 @@ Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
 następnego automatycznie. Narzędzie nigdy automatycznie nie ładuje pełnego
 backupu konfiguracji.
 
+## Najważniejsze w v0.8.1
+
+- **Hand Mode** generuje prawdziwe, gotowe do wklejenia komendy PAN-OS CLI dla
+  cleanupu, tworzenia obiektów/polityk, Restore oraz Custom LDAP Group;
+- aktywny plan, rollback, elementy wykluczone i konfliktowy Restore mają
+  oddzielne pliki, przyciski kopiowania/pobierania oraz jawne ostrzeżenia;
+- plik komend nigdy nie zawiera JSON, operacji XML API, `configure`, `commit`
+  ani `push`; jedna nieobsługiwana operacja blokuje cały plik zamiast
+  publikować niepełną listę;
+- Historia potrafi offline dopisać Hand Mode do starej sesji z zachowanego
+  `patchset.json`, bez logowania, ponownego pobierania configu i nadpisywania
+  starego `commands.txt`;
+- generator Custom LDAP Group tworzy również komendy template/vsys oraz ich
+  rollback; dla kilku bloków filtra używa osobnych nazw `AD__NAZWA__01`,
+  `AD__NAZWA__02`, aby nie nadpisywać pojedynczego pola LDAP Filter.
+- lokalny backend generuje przy każdym starcie osobny token aplikacji; wszystkie
+  endpointy `/api/` wymagają go dodatkowo obok tokenu połączenia z Panoramą;
+- odpowiedzi XML są parsowane bez DTD/encji z limitem 512 MiB, poświadczenia
+  legacy nie trafiają już do URL ani plików debug, a narzędzia systemowe są
+  rozwiązywane wyłącznie z zaufanych katalogów Windows;
+- paczka portable zawiera audytowane startery `start_toolbox.cmd` oraz zgodny z
+  Windows PowerShell 5.1 `start_toolbox.ps1`, hash-lock zależności i manifest
+  integralności.
+
 ## Najważniejsze w v0.7.3
 
 - drugi i kolejne batche używają pełnych snapshotów z pamięci wyłącznie po
@@ -81,48 +105,94 @@ Pobierz asset ZIP z [najnowszego GitHub Release](https://github.com/Szqub/Sieci/
 Checkout utworzony przez `git clone` jest kodem źródłowym i celowo nie zawiera
 `backend/vendor`; na maszynie docelowej uruchamiaj wyłącznie paczkę portable.
 
+Jeżeli firmowe **Pobrane** lub **Dokumenty** są przekierowane na SMB, wybierz w
+oknie zapisu zatwierdzony katalog lokalny, na przykład
+`%LOCALAPPDATA%\PanOS Toolbox\downloads`, i również tam rozpakuj ZIP. Zapis
+bezpośrednio do przekierowanego katalogu może wygenerować `SMB MOVE` już po
+stronie przeglądarki (`.crdownload`/plik tymczasowy → finalny ZIP), zanim kod
+Toolboxa zostanie uruchomiony.
+
 Najprościej: wybierz w Eksploratorze **Wyodrębnij wszystkie**, wejdź do katalogu
-`PanOS-Toolbox` i uruchom dwuklikiem `start_toolbox.cmd`. Launcher sprawdza
-kompletność paczki i uruchamia Pythona z `-I -S`, więc globalny Flask nie jest
-używany. Historia i backupy są zapisywane trwale w profilu użytkownika:
-`Dokumenty\PanOS Toolbox\sessions`; pozostają po zamknięciu aplikacji i nie
-zależą od miejsca rozpakowania ZIP-a. Ten sam folder zawiera zaszyfrowane
-profile połączeń w `profiles.json`.
+`PanOS-Toolbox` i uruchom dwuklikiem `start_toolbox.cmd`. Jeżeli polityka stacji
+preferuje Windows PowerShell 5.1, uruchom `start_toolbox.ps1` przez systemowy
+`powershell.exe`; skrypt nie zmienia Execution Policy. Oba startery sprawdzają
+kompletność paczki i uruchamiają Pythona z `-I -B -S`, więc globalny Flask nie jest
+używany. Historia i backupy są zapisywane trwale w lokalnym profilu użytkownika:
+`%LOCALAPPDATA%\PanOS Toolbox\sessions`; pozostają po zamknięciu aplikacji i nie
+zależą od miejsca rozpakowania ZIP-a. Ten sam lokalny folder zawiera
+zaszyfrowane profile połączeń w `profiles.json`.
 
 ```powershell
-Expand-Archive .\PanOS-Toolbox-YYYYMMDD-HHMMSS.zip -DestinationPath .\PanOS-Toolbox
-Set-Location .\PanOS-Toolbox
-.\start_toolbox.ps1 -Port 8765
+$appRoot = Join-Path $env:LOCALAPPDATA "PanOS Toolbox\app"
+Expand-Archive .\PanOS-Toolbox-YYYYMMDD-HHMMSS.zip -DestinationPath $appRoot
+Set-Location (Join-Path $appRoot "PanOS-Toolbox")
+.\start_toolbox.cmd
 ```
 
-Alternatywny launcher CMD oraz jego diagnostyka:
+Dostępne launchery i diagnostyka:
 
 ```powershell
 .\start_toolbox.cmd
 .\start_toolbox.cmd doctor
-.\start_toolbox.cmd 9000
+powershell.exe -NoLogo -NoProfile -File .\start_toolbox.ps1
+powershell.exe -NoLogo -NoProfile -File .\start_toolbox.ps1 -Doctor
+powershell.exe -NoLogo -NoProfile -File .\start_toolbox.ps1 -Port 9000
 ```
 
-Następnie otwórz `http://127.0.0.1:8765/`. Serwera nie uruchamiaj z bindem
+Backend automatycznie otwiera przeglądarkę z jednorazowym linkiem zawierającym
+token lokalnej aplikacji. Jeżeli przeglądarka się nie otworzy, skopiuj dokładny
+`bezpieczny link tej sesji` wyświetlony w konsoli; samo wejście na goły adres
+`http://127.0.0.1:8765/` nie uwierzytelni wywołań API. Serwera nie uruchamiaj z bindem
 `0.0.0.0` ani na interfejsie sieciowym.
+
+### Dystrybucja zgodna z kontrolami bezpieczeństwa
+
+Nie zmieniaj rozszerzenia ZIP-a, nie umieszczaj paczki w archiwum chronionym
+hasłem i nie próbuj omijać NDR/EDR. Release jest budowany fail-closed: nie
+zawiera własnych plików PE (`.exe`, `.dll`, `.pyd`, `MZ`). Zawiera wyłącznie
+dwa jawnie allowlistowane launchery: czytelny `start_toolbox.cmd` oraz
+`start_toolbox.ps1` zgodny z Windows PowerShell 5.1. Oba uruchamiają
+zatwierdzonego firmowego Pythona z `-I -B -S`; PS1 nie omija Execution Policy. Flaga `-B` oraz
+entrypoint wyłączają zapis `__pycache__`, dzięki czemu katalog rozpakowanej
+paczki może pozostać tylko do odczytu również wtedy, gdy leży na SMB.
+
+Wewnątrz paczki znajdują się `RELEASE-MANIFEST.json` oraz `SHA256SUMS.txt` z
+rozmiarem i SHA-256 każdego pliku, SHA commita oraz jawnym polem
+`sourceTreeDirty`. Obok ZIP-a build tworzy plik
+`PanOS-Toolbox-....zip.sha256`. Jeżeli ochrona nadal blokuje transfer, przekaż
+zespołowi bezpieczeństwa URL wydania, SHA-256 ZIP-a i manifest do jawnej
+allowlisty. Kolejna zmiana formatu lub rozszerzenia nie jest właściwym
+obejściem polityki.
+
+Mutowalny magazyn sesji nie może wskazywać UNC, mapowanego dysku SMB ani
+przekierowanego folderu Dokumenty. Atomowe zapisy integralnościowe używają
+lokalnego rename, który na udziale byłby widoczny dla NDR jako `SMB MOVE`.
+Toolbox blokuje taki magazyn i domyślnie używa `LocalAppData`. Przy pierwszym
+uruchomieniu kopiuje kompletne wcześniejsze sesje i profile z
+`Dokumenty\PanOS Toolbox` do lokalnego magazynu, wyłącznie je odczytując i nie
+usuwając źródła.
 
 Host, użytkownik i hasło wpisujesz w GUI. Zaznaczenie **Zapamiętaj profil**
 zapisuje host, login, ustawienia SSL i hasło zaszyfrowane przez Windows DPAPI
 w profilu bieżącego użytkownika. Ponowne połączenie może użyć profilu bez
 ponownego wpisywania hasła; zmiana hasła następuje po wpisaniu nowego hasła i
-ponownym zapisaniu profilu. Lokalny GUI używa jednego, nietrwałego grantu WRITE; nadal wymaga zgodności
+ponownym zapisaniu profilu. Lokalny GUI używa jednego, nietrwałego grantu WRITE; każde wywołanie API wymaga
+dodatkowo losowego tokenu aplikacji wygenerowanego przy starcie. Token trafia do
+fragmentu URL, jest usuwany z paska adresu i pozostaje tylko w pamięci backendu
+oraz `sessionStorage` tej karty. GUI nadal wymaga zgodności
 hosta, aktywnego connection tokenu, poprawnego Origin i jawnego potwierdzenia
 przełącznika zapisu. Połączenie wykonuje keygen, odczyt `show system info` i
 `change-summary` — nie pobiera wtedy pełnego configu. Wyświetlana wersja PAN-OS
 pochodzi bezpośrednio z `sw-version`, a nie z atrybutu pliku konfiguracji.
 
 Nie instaluj Flask ani innych modułów globalnie. Paczka release ma przypięty
-Flask i jego zależności w `backend/vendor`; tryb `-I -S` w poleceniu Doctor
+Flask i jego zależności w `backend/vendor`; tryb `-I -B -S` w poleceniu Doctor
 potwierdza, że Toolbox nie korzysta z przypadkowych pakietów użytkownika.
 
 `ip.txt` i `panorama_host.txt` nie są wymagane przez GUI. Pozostają wyłącznie
 opcjonalnymi wejściami kompatybilności dla CLI; połączenie, profil, historia i
-backupy działają z katalogu użytkownika `Dokumenty\PanOS Toolbox`.
+backupy działają z lokalnego katalogu użytkownika
+`%LOCALAPPDATA%\PanOS Toolbox`.
 
 ## Cele cleanupu w GUI
 
@@ -280,33 +350,51 @@ obiekt byłoby wolniejsze i zwiększałoby ryzyko częściowego stanu.
 
 Sekcja **Grupy AD** przenosi do GUI workflow ze skryptu
 `pa_ad_group_generator.ps1`. Nie wymaga połączenia z Panorama. Przyjmuje dużą
-listę nazw grup AD, nazwę wynikową, Device Template (opcjonalnie), nazwę Group
-Mapping i VSYS. Domyślne miejsce docelowe to `LDAP_GM1` oraz `vsys1`.
+listę nazw grup AD, nazwę wynikową, Device Template, nazwę Group Mapping i
+VSYS. Device Template jest wymagany do wygenerowania bezpiecznych komend Hand
+Mode; bez niego nadal można przejrzeć wynik walidacji/filtry, ale status CLI
+będzie `BLOCK`. Domyślne miejsce docelowe to `LDAP_GM1` oraz `vsys1`.
 
-Toolbox wykonuje lokalnie `Get-ADGroup -Properties Members` dla każdej
-unikalnej nazwy. Do wyniku trafiają wyłącznie grupy, które istnieją i mają co
-najmniej jednego bezpośredniego członka. Brakujące, puste oraz grupy z błędem
-odczytu są pokazane osobno i pomijane. Distinguished Name jest zamieniany na
-filtr `(memberof=...)`; filtry są grupowane operatorem OR po maksymalnie sześć
-wpisów, tak jak w dotychczasowym skrypcie. Znaki specjalne wartości filtra są
-escapowane zgodnie z RFC 4515.
+Toolbox wykonuje lokalnie dokładne, read-only zapytania `dsquery group` i
+`dsget group -members` dla każdej unikalnej nazwy `sAMAccountName`. Są to
+narzędzia Microsoft dostarczane z RSAT; Toolbox nie uruchamia PowerShella, nie
+zmienia Execution Policy, nie używa shella i nie przekazuje poświadczeń w
+parametrach procesu. Znaki wieloznaczne `*` i `?` są odrzucane, aby lista wejścia
+nie mogła zmienić się w szeroką enumerację katalogu.
+
+Do wyniku trafiają wyłącznie grupy, które istnieją i mają co najmniej jednego
+bezpośredniego członka. Brakujące, puste oraz grupy z błędem odczytu są pokazane
+osobno i pomijane. Distinguished Name jest zamieniany na filtr
+`(memberof=...)`; filtry są grupowane operatorem OR po maksymalnie sześć wpisów,
+tak jak w dotychczasowym skrypcie. Znaki specjalne wartości filtra są escapowane
+zgodnie z RFC 4515.
 
 Nazwa wynikowa zawsze otrzymuje kanoniczny prefiks `AD__`. Wpisanie `VPN_USERS`
 da `AD__VPN_USERS`; istniejący prefiks nie zostanie zdublowany. GUI pokazuje
-gotowe bloki i pozwala kopiować każdy osobno albo wszystkie naraz.
+gotowe bloki oraz prawdziwe komendy `set template ... config vsys ...
+group-mapping ... custom-group ... ldap-filter ...`. Pozwala kopiować/pobierać
+cały zestaw i osobny rollback. Commit ani push nie są dodawane.
 
-Walidacja wymaga Windows PowerShell i modułu `ActiveDirectory` z RSAT na stacji
-uruchamiającej Toolbox. Paczka nie instaluje RSAT ani żadnego modułu globalnie.
-Generator jest read-only: nie tworzy ani nie modyfikuje grup w AD i nie zapisuje
-konfiguracji Panoramy. Bloki należy wkleić ręcznie w:
+Walidacja wymaga `dsquery.exe` i `dsget.exe` z RSAT Active Directory Domain
+Services na stacji uruchamiającej Toolbox. Paczka nie instaluje RSAT ani żadnego
+modułu globalnie. Generator korzysta z bieżącej tożsamości Windows i jest
+read-only: nie tworzy ani nie modyfikuje grup w AD i nie zapisuje konfiguracji
+Panoramy. Składnia narzędzi jest opisana w dokumentacji Microsoft:
+[dsquery group](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/cc754525(v=ws.11))
+oraz
+[dsget group](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/cc731202(v=ws.11)).
+Docelowe miejsce w GUI Panorama to:
 
 ```text
 Device Templates > [template] > User Identification > Group Mapping Settings
 > LDAP_GM1 > Custom Group (VSYS: vsys1)
 ```
 
-Automatyczny zapis tej sekcji przez XML API zostanie dodany dopiero po
-potwierdzeniu dokładnego XPath i semantyki commit/push dla używanego template.
+Semantykę pojedynczego pola LDAP Filter oraz limity Group Mapping należy
+sprawdzić według oficjalnego opisu
+[Group Mapping Settings](https://docs.paloaltonetworks.com/ngfw/help/11-1/user-identification/device-user-identification-group-mapping-settings).
+Automatyczny zapis tej sekcji przez XML API pozostaje wyłączony; obecna
+funkcja generuje wyłącznie ręczny Hand Mode i rollback.
 
 Test read-only API (keygen, running, candidate) jest opcjonalny:
 
@@ -383,7 +471,8 @@ python .\panos-toolbox.py session push --session SESSION_ID --enable-api-write -
 ```
 
 Po `cleanup plan` skopiuj `session_id` z wyniku. Przed `apply`, `commit` i
-`push` przejrzyj `commands.txt`, `raport_szczegolowy.txt`, ostrzeżenia Last Hit
+`push` przejrzyj `commands.txt`, `handmode_instructions.txt`,
+`raport_szczegolowy.txt`, ostrzeżenia Last Hit
 oraz wyliczony zakres device groups. Nazwy przekazane przez `--object`,
 `--group` i `--policy` są dokładne i każdą opcję można powtarzać.
 
@@ -415,6 +504,56 @@ grupa lub polityka” odtwarza najpierw encję, a potem jej wcześniejsze człon
 Kontekst każdej zastosowanej sesji pochodzi z jej integralnego `pre_candidate`,
 nie z późniejszego running. Pełna lista sesji źródłowych trafia do manifestu i
 raportu restore.
+
+## Hand Mode — ręczne wykonanie w PAN-OS CLI
+
+Hand Mode jest projekcją tego samego, zapisanego PatchSetu, który wykonuje
+ścieżka XML API. Nie jest drugim plannerem. Zachowuje kolejność mutacji,
+atomowe komponenty zależności, pozycje polityk (`move`) i operacje odwrotne.
+Obsługuje usuwanie oraz tworzenie adresów, grup, członków grup, usług,
+polityk i bezpiecznego Restore.
+
+Najważniejsze pliki sesji:
+
+- `commands.txt` — tylko aktywny plan; w starej sesji z zajętą nazwą nowy
+  renderer zapisze `handmode_commands.txt` i zachowa oryginał bez zmian;
+- `handmode_rollback.txt` — operacje odwrotne w bezpiecznej kolejności;
+- `handmode_instructions.txt` — status `READY` albo `BLOCK`, liczba komend i
+  ostrzeżenia o odwzorowaniu XML;
+- `handmode_excluded_commands.txt` — osobny, czerwony zestaw elementów
+  wykluczonych przez operatora, Last Hit, ochronę `DEFAULT` albo zależność;
+- `handmode_conflict_restore_commands.txt` — osobny, czerwony zestaw Restore
+  odrzucony przez merge trójstronny.
+
+Pliki z elementami wykluczonymi lub konfliktowymi **nie należą do aktywnego
+planu**. GUI wymaga dodatkowego potwierdzenia przed ich skopiowaniem. Nie łącz
+ich z `commands.txt` bez kontroli aktualnego configu i raportu sesji.
+
+Ręczne wykonanie:
+
+```text
+> set cli scripting-mode on
+> configure
+# [wklej całą zawartość commands.txt]
+# show | compare
+```
+
+Po `show | compare` operator sam podejmuje osobną decyzję o commit oraz push
+zgodnie z procedurą firmy. Pliki Hand Mode celowo nie zawierają tych komend.
+Jeżeli CLI odrzuci choć jedną linię, przerwij, zachowaj komunikat i nie
+commituj częściowego wyniku przed porównaniem candidate. Rollback również
+należy wkleić w `configure` i sprawdzić przez `show | compare`.
+
+Na ekranie **Backup i restore** starsza sesja ma przycisk **Wygeneruj Hand Mode
+offline**. Operacja czyta wyłącznie integralny lokalny `patchset.json`, dopisuje
+nowe artefakty append-only i nie kontaktuje się z Panoramą. Po ręcznym
+wykonaniu użyj **Zweryfikuj wykonanie CLI/API**, aby live postcondition
+rozstrzygnął, czy sesja może być źródłem Restore.
+
+Składnia renderera jest oparta na oficjalnej hierarchii
+[PAN-OS CLI](https://docs.paloaltonetworks.com/ngfw/pan-os-cli-quick-start/cli-command-hierarchy/pan-os-11-2-configure-cli-command-hierarchy).
+Przed użyciem produkcyjnym trzeba zaliczyć checklistę `LAB_VALIDATION.md` na
+konkretnej wersji Panorama 10.2 używanej w firmie.
 
 ## Zasady bezpieczeństwa wykonania
 
@@ -467,15 +606,17 @@ sesję jako `CANDIDATE_APPLIED` albo `COMMITTED`, udostępniając ją dla Restor
 Paczka portable uruchamiana launcherem zapisuje sesje w:
 
 ```text
-<Dokumenty użytkownika>\PanOS Toolbox\sessions\session-...
+%LOCALAPPDATA%\PanOS Toolbox\sessions\session-...
 ```
 
 Jawne uruchomienie CLI bez `--session-dir` używa tego samego katalogu. Dane
 sesji są chronione ACL-em użytkownika, mają sumy SHA256 i nie są automatycznie
-kasowane. Ekran **Backup i restore** działa także bez połączenia, hosta, loginu
-i hasła do Panoramy. Buduje lokalny indeks ze wszystkich zachowanych
-manifestów, PatchSetów i hash-chain journali. Wyszukiwanie jest natychmiastowe
-po pierwszym odczycie i obejmuje między innymi:
+kasowane. Toolbox odrzuca `--session-dir` oraz `PANOS_TOOLBOX_DATA_DIR`
+wskazujące UNC albo mapowany dysk sieciowy; bezpośredni zapis aktywnego
+journalu na SMB nie jest obsługiwany. Ekran **Backup i restore** działa także
+bez połączenia, hosta, loginu i hasła do Panoramy. Buduje lokalny indeks ze
+wszystkich zachowanych manifestów, PatchSetów i hash-chain journali.
+Wyszukiwanie jest natychmiastowe po pierwszym odczycie i obejmuje między innymi:
 
 - IP i prefiks, nazwę polityki, obiektu, grupy oraz usługę;
 - device group, shared, pre/post-rulebase i typ polityki;
@@ -498,9 +639,10 @@ running/candidate i niczego nie zapisuje bez osobnego WRITE oraz potwierdzeń.
 
 GUI pozwala też pobrać integralnie zweryfikowany ZIP całej sesji albo otworzyć
 Restore konkretnego celu. Sesja
-przy pierwszym uruchomieniu próbuje skopiować stare sesje z `backupy\sessions`
-obok poprzedniej paczki oraz z wcześniejszego `LOCALAPPDATA`; źródło pozostaje
-niezmienione.
+przy pierwszym uruchomieniu próbuje skopiować stare sesje z
+`Dokumenty\PanOS Toolbox\sessions`, `backupy\sessions` obok poprzedniej paczki
+oraz z wcześniejszego `LOCALAPPDATA`; źródło pozostaje niezmienione. Pliki
+tymczasowe po przerwanych zapisach nie są importowane.
 Sesja zawiera między innymi:
 
 - `plan_running.xml`, `plan_candidate.xml`;
@@ -508,13 +650,15 @@ Sesja zawiera między innymi:
 - `patchset.json` z forward/inverse operations i zależnościami;
 - backupy encji `nazwa_DDMMYY_HH_MM_mutation-id.xml`;
 - `manifest.json`, append-only journal, job IDs, ryzyka i konflikty;
-- `commands.txt`, `raport_krotki.txt`, `raport_szczegolowy.txt` oraz — po
+- `commands.txt`/`handmode_commands.txt`, `handmode_rollback.txt`,
+  `handmode_instructions.txt`, `raport_krotki.txt`, `raport_szczegolowy.txt` oraz — po
   zapisie — `raport_wykonania_candidate.txt`;
 - po Candidate: `pre_commit_review_*.json`, czytelny
   `pre_commit_review_*.txt`, pełny `candidate_diff_*.txt` i
   `scope_guard_*.txt`; każdy plik można wyświetlić lub pobrać osobno z GUI;
-- dla konfliktowego restore: ręczny pakiet `manual_conflicts.json` i
-  `manual_conflicts.xml`.
+- dla konfliktowego restore: ręczny pakiet `manual_conflicts.json`,
+  `manual_conflicts.xml`, osobne komendy
+  `handmode_conflict_restore_commands.txt` i ich rollback.
 
 Po przerwaniu procesu (także `Ctrl+C`) w czasie candidate apply, commit lub push
 Toolbox przechodzi w `OUTCOME_UNKNOWN`, zachowuje config locki i ukryty marker
@@ -534,7 +678,9 @@ Copy-Item -Recurse -Force .\dist\* ..\backend\panos_toolbox\static\
 
 Do wdrożenia użyj `build_release.ps1`; skrypt przypina i pakuje zależności
 Pythona, uruchamia testy oraz doctor rozpakowanego stagingu. Wynikowa paczka
-nie wymaga Node.js ani instalowania modułów na maszynie docelowej.
+nie wymaga Node.js ani instalowania modułów na maszynie docelowej. Build usuwa
+nieużywane launchery konsolowe tworzone przez `pip`, odrzuca wszystkie natywne
+PE oraz nieallowlistowane skrypty, a następnie generuje manifest oraz sumy SHA-256.
 
 ## Walidacja laboratoryjna
 

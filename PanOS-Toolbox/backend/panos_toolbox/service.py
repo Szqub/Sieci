@@ -26,6 +26,10 @@ from .client import PanoramaReadClient, PanoramaWriteClient
 from .diffing import compare_configs
 from .engine import ApplyResult, apply_candidate, commit_session, push_session
 from .errors import InputError, SessionError, ToolboxError
+from .handmode import (
+    write_handmode_artifacts,
+    write_restore_conflict_handmode_artifacts,
+)
 from .models import ApiStage, PatchSet, SessionState
 from .profile import PanoramaProfile, issue_write_lease
 from .restore import (
@@ -41,6 +45,7 @@ from .xmlutil import (
     device_group_from_xpath,
     find_xpath,
     parent_xpath,
+    parse_xml,
     xpath_literal,
 )
 
@@ -427,7 +432,7 @@ def _cleanup_inventory(
                 if key is None:
                     continue
                 rule = result.model.rules[key]
-                entry = ET.fromstring(rule.xml)
+                entry = parse_xml(rule.xml)
                 outbound = []
                 for reference in result.model.rule_references.get(key, ()):
                     outbound.append(
@@ -839,29 +844,11 @@ def plan_cleanup_session(
 
     store.update(session_id, enrich)
 
-    commands_text = ""
     commands_by_ip: dict[str, list[str]] = {}
-    if result is not None:
-        try:
-            from panorama_cleanup.render import render_plan  # type: ignore[import-not-found]
-
-            rendered = render_plan(result.model, result.plan)
-            commands_text = "\n".join(record.command for record in rendered.commands)
-            if commands_text:
-                commands_text += "\n"
-            for record in rendered.commands:
-                for cause in record.causes:
-                    commands_by_ip.setdefault(cause, []).append(record.command)
-        except Exception as exc:
-            # CLI preview is secondary. The structured PatchSet remains valid
-            # and executable; record why a pasteable preview was unavailable.
-            store.write_artifact(
-                session_id,
-                "commands_preview_warning.txt",
-                f"Nie wygenerowano pomocniczego CLI preview: {type(exc).__name__}: {exc}\n",
-                kind="warning",
-            )
-    store.write_artifact(session_id, "commands.txt", commands_text, kind="cli-preview")
+    handmode = write_handmode_artifacts(store, session_id, patch)
+    for record in handmode.active.records:
+        for cause in record.causes:
+            commands_by_ip.setdefault(cause, []).append(record.command)
     short_report, detailed_report = _planned_reports(
         all_targets, pings, patch, inventory, commands_by_ip
     )
@@ -992,7 +979,7 @@ def _historical_dependency_graph(
             else:
                 assert rule is not None
                 location = rule.key.location
-                entry = ET.fromstring(rule.xml)
+                entry = parse_xml(rule.xml)
                 values: list[str] = []
                 for container in entry.iter():
                     if container.tag not in ADDRESS_MEMBER_CONTAINERS:
@@ -1588,7 +1575,14 @@ def plan_restore_session(
         if selected.component_by_qualified_id[record.qualified_id]
         in conflicted_components
     ]))
+    write_handmode_artifacts(store, session_id, result.patchset)
     if manual_records:
+        write_restore_conflict_handmode_artifacts(
+            store,
+            session_id,
+            (record.mutation for record in reversed(manual_records)),
+            source_session_ids=selected.source_session_ids,
+        )
         store.write_artifact(
             session_id,
             "manual_conflicts.json",

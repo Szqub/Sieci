@@ -17,6 +17,7 @@ from .xmlutil import (
     find_xpath,
     fingerprint_xpath,
     parent_xpath,
+    parse_xml,
     rule_order_context_sha256,
 )
 
@@ -118,7 +119,7 @@ def mutation_owner_xpath(mutation: Mutation) -> str:
 def _policy_name(mutation: Mutation) -> str:
     if mutation.before_xml:
         try:
-            name = ET.fromstring(mutation.before_xml).get("name")
+            name = parse_xml(mutation.before_xml).get("name")
         except ET.ParseError:
             name = None
         if name:
@@ -305,7 +306,7 @@ def select_history(
 
 def _fragment_nodes(element: str) -> list[ET.Element]:
     try:
-        wrapper = ET.fromstring(f"<fragment>{element}</fragment>")
+        wrapper = parse_xml(f"<fragment>{element}</fragment>")
     except ET.ParseError as exc:
         raise ValidationError(f"Simulator restore otrzymał błędny XML: {exc}.") from exc
     return list(wrapper)

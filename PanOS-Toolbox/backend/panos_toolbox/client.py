@@ -23,7 +23,7 @@ from .errors import (
 )
 from .models import ApiStage, MutationAction, MutationOperation
 from .profile import PanoramaProfile, WriteLease
-from .xmlutil import parse_api_response, raw_sha256
+from .xmlutil import parse_api_response, parse_xml, raw_sha256
 
 
 class XMLTransport(Protocol):
@@ -39,6 +39,33 @@ class XMLTransport(Protocol):
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         return None
+
+
+MAX_XML_RESPONSE_BYTES = 512 * 1024 * 1024
+
+
+def _bounded_response_body(response: Any, *, mutating: bool) -> bytes:
+    declared = response.headers.get("Content-Length")
+    if declared:
+        try:
+            declared_size = int(declared)
+        except (TypeError, ValueError):
+            declared_size = -1
+        if declared_size > MAX_XML_RESPONSE_BYTES:
+            message = (
+                "Odpowiedź Panorama XML API przekracza bezpieczny limit 512 MiB."
+            )
+            if mutating:
+                raise OutcomeUnknownError(f"{message} Wynik operacji jest nieznany.")
+            raise TransportError(message)
+
+    payload = response.read(MAX_XML_RESPONSE_BYTES + 1)
+    if len(payload) > MAX_XML_RESPONSE_BYTES:
+        message = "Odpowiedź Panorama XML API przekracza bezpieczny limit 512 MiB."
+        if mutating:
+            raise OutcomeUnknownError(f"{message} Wynik operacji jest nieznany.")
+        raise TransportError(message)
+    return payload
 
 
 class UrllibXMLTransport:
@@ -61,7 +88,7 @@ class UrllibXMLTransport:
         if profile.use_ssl and profile.verify_ssl:
             context = ssl.create_default_context(cafile=ca_bundle)
         elif profile.use_ssl:
-            context = ssl._create_unverified_context()  # noqa: SLF001 - explicit operator choice
+            context = ssl._create_unverified_context()  # noqa: SLF001  # nosec B323 - explicit operator choice
         else:
             context = None
         handlers = [_NoRedirect()]
@@ -80,7 +107,7 @@ class UrllibXMLTransport:
             self.profile.base_url,
             data=urllib.parse.urlencode(params).encode("utf-8"),
             headers={
-                "User-Agent": "ByteTech-PanOS-Toolbox/0.7.3",
+                "User-Agent": "ByteTech-PanOS-Toolbox/0.8.1",
                 "Content-Type": "application/x-www-form-urlencoded",
                 **headers,
             },
@@ -88,7 +115,7 @@ class UrllibXMLTransport:
         )
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
-                return response.read()
+                return _bounded_response_body(response, mutating=mutating)
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 raise TransportError(
@@ -324,7 +351,7 @@ class PanoramaReadClient:
     def system_info(self) -> ET.Element:
         """Read the real appliance software version, model and system mode."""
 
-        return self.run_op_show(ET.fromstring("<show><system><info /></system></show>"))
+        return self.run_op_show(parse_xml("<show><system><info /></system></show>"))
 
     def run_op_show(self, command: ET.Element) -> ET.Element:
         self.assert_authenticated()
@@ -335,14 +362,14 @@ class PanoramaReadClient:
         )
 
     def change_summary(self) -> ET.Element:
-        command = ET.fromstring("<show><config><list><change-summary /></list></config></show>")
+        command = parse_xml("<show><config><list><change-summary /></list></config></show>")
         return self.run_op_show(command)
 
     def show_config_locks(self) -> ET.Element:
-        return self.run_op_show(ET.fromstring("<show><config-locks /></show>"))
+        return self.run_op_show(parse_xml("<show><config-locks /></show>"))
 
     def show_commit_locks(self) -> ET.Element:
-        return self.run_op_show(ET.fromstring("<show><commit-locks /></show>"))
+        return self.run_op_show(parse_xml("<show><commit-locks /></show>"))
 
     def enable_write(self, lease: WriteLease) -> "PanoramaWriteClient":
         lease.assert_valid(self.profile, ApiStage.CANDIDATE)
@@ -407,7 +434,7 @@ class PanoramaWriteClient:
 
     def validate_candidate(self) -> Optional[str]:
         self._assert(ApiStage.CANDIDATE)
-        command = ET.fromstring("<validate><full /></validate>")
+        command = parse_xml("<validate><full /></validate>")
         root = self.reader._post(
             {"type": "op", "cmd": ET.tostring(command, encoding="unicode")}
         )
@@ -427,7 +454,7 @@ class PanoramaWriteClient:
 
     def acquire_config_lock(self, device_group: Optional[str], comment: str) -> ET.Element:
         self._assert(ApiStage.CANDIDATE)
-        command = ET.fromstring("<request><config-lock><add /></config-lock></request>")
+        command = parse_xml("<request><config-lock><add /></config-lock></request>")
         add = command.find(".//add")
         assert add is not None
         ET.SubElement(add, "comment").text = comment
@@ -443,7 +470,7 @@ class PanoramaWriteClient:
         # Releasing an owned lock is a safety cleanup step and must remain
         # possible if a long validation/commit outlives the short lease.
         self._assert_recovery(ApiStage.CANDIDATE)
-        command = ET.fromstring("<request><config-lock><remove /></config-lock></request>")
+        command = parse_xml("<request><config-lock><remove /></config-lock></request>")
         remove = command.find(".//remove")
         assert remove is not None
         params = {"type": "op", "cmd": ET.tostring(command, encoding="unicode")}
