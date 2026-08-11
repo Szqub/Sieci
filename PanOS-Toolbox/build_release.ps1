@@ -4,7 +4,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$env:PYTHONUTF8 = "1"
 $requiredPathExt = @(".COM", ".EXE", ".BAT", ".CMD")
 $pathExt = @($env:PATHEXT -split ";" | Where-Object { $_ })
 foreach ($extension in $requiredPathExt) {
@@ -331,6 +330,8 @@ Copy-Item -LiteralPath $requirementsLock -Destination (Join-Path $packageRoot "b
 
 $doctorStore = Join-Path $staging "doctor-sessions"
 Invoke-BuildPython -Arguments @(
+    "-X",
+    "utf8",
     "-I",
     "-S",
     (Join-Path $packageRoot "panos-toolbox.py"),
@@ -386,7 +387,7 @@ $pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
 if ($pyLauncher) {
     $serverExecutable = $pyLauncher.Source
     $serverArguments = @(
-        "-3.12", "-I", "-S", $serverEntrypoint,
+        "-3.12", "-X", "utf8", "-I", "-S", $serverEntrypoint,
         "serve", "--port", [string]$verifyPort,
         "--session-dir", $serverSessions
     )
@@ -398,7 +399,7 @@ else {
     }
     $serverExecutable = $python.Source
     $serverArguments = @(
-        "-I", "-S", $serverEntrypoint,
+        "-X", "utf8", "-I", "-S", $serverEntrypoint,
         "serve", "--port", [string]$verifyPort,
         "--session-dir", $serverSessions
     )
