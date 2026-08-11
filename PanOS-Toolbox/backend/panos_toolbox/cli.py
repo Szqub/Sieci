@@ -33,7 +33,7 @@ def _add_connection(parser: argparse.ArgumentParser) -> None:
 def _add_store(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--session-dir",
-        help="Niestandardowy katalog sesji (domyślnie %LOCALAPPDATA%\\PanOS Toolbox\\sessions).",
+        help="Niestandardowy katalog sesji (domyślnie %%LOCALAPPDATA%%\\PanOS Toolbox\\sessions).",
     )
 
 

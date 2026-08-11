@@ -435,6 +435,14 @@ Info Dst
 
 
 class WebBoundaryTests(unittest.TestCase):
+    def test_cli_help_supports_windows_environment_placeholder(self):
+        with mock.patch("sys.stdout") as stdout:
+            with self.assertRaises(SystemExit) as stopped:
+                build_parser().parse_args(["cleanup", "plan", "--help"])
+        self.assertEqual(stopped.exception.code, 0)
+        rendered = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn("%LOCALAPPDATA%", rendered)
+
     def test_gui_serve_does_not_require_legacy_hostname_file(self):
         args = build_parser().parse_args(["serve"])
         self.assertIsNone(args.host_file)
