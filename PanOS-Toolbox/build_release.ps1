@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$env:PYTHONUTF8 = "1"
 $requiredPathExt = @(".COM", ".EXE", ".BAT", ".CMD")
 $pathExt = @($env:PATHEXT -split ";" | Where-Object { $_ })
 foreach ($extension in $requiredPathExt) {

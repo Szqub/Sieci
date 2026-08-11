@@ -69,7 +69,7 @@ $pythonArguments = @()
 if ([System.IO.Path]::GetFileName($python) -ieq "py.exe") {
     $pythonArguments += "-3"
 }
-$pythonArguments += @("-I", "-B", "-S", $entryPoint)
+$pythonArguments += @("-X", "utf8", "-I", "-B", "-S", $entryPoint)
 if ($Doctor) {
     $pythonArguments += "doctor"
 }

@@ -164,7 +164,7 @@ def run_doctor(
                     context = (
                         ssl.create_default_context()
                         if profile.verify_ssl
-                        else ssl._create_unverified_context()  # noqa: SLF001  # nosec B323 - explicit operator choice
+                        else ssl._create_unverified_context()  # noqa: SLF001  # explicit operator choice  # nosec B323
                     )
                     connection = context.wrap_socket(
                         connection,

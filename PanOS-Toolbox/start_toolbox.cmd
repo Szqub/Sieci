@@ -48,12 +48,12 @@ echo PanOS Toolbox uruchamia lokalny serwer 127.0.0.1.
 echo Bezpieczny link sesji zostanie otwarty automatycznie i wyswietlony ponizej.
 echo Trwale dane lokalne: %LOCALAPPDATA%\PanOS Toolbox\sessions oraz profiles.json
 echo Zatrzymanie: Ctrl+C albo zamkniecie tego okna.
-"%TOOLBOX_PYTHON%" %TOOLBOX_PYTHON_ARGS% -I -B -S "%~dp0panos-toolbox.py" serve
+"%TOOLBOX_PYTHON%" %TOOLBOX_PYTHON_ARGS% -X utf8 -I -B -S "%~dp0panos-toolbox.py" serve
 exit /b %errorlevel%
 
 :run_doctor
 echo Sprawdzanie kompletnosci paczki PanOS Toolbox...
-"%TOOLBOX_PYTHON%" %TOOLBOX_PYTHON_ARGS% -I -B -S "%~dp0panos-toolbox.py" doctor
+"%TOOLBOX_PYTHON%" %TOOLBOX_PYTHON_ARGS% -X utf8 -I -B -S "%~dp0panos-toolbox.py" doctor
 exit /b %errorlevel%
 
 :invalid_arguments

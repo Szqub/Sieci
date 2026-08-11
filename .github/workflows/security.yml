@@ -28,11 +28,11 @@ jobs:
       - name: Audit Python dependencies
         run: |
           pip-audit -r requirements.txt --progress-spinner off
-          pip-audit -r requirements.txt -r PanOS-Toolbox/backend/requirements.txt --progress-spinner off
+          pip-audit -r PanOS-Toolbox/backend/requirements.txt --progress-spinner off
           pip-audit -r panorama_cleaner/requirements.txt --progress-spinner off
       - name: Run Bandit
         run: |
-          bandit -q -r requirements.txt -r PanOS-Toolbox/backend/panos_toolbox panorama_cleaner/panorama_cleanup \
+          bandit -q -r PanOS-Toolbox/backend/panos_toolbox panorama_cleaner/panorama_cleanup \
             Panorama_rules_checker.py Panorama_Rule_Finder panorama_group_checker_update \
             Panorama_group_checker_v2 legacy_panorama_http.py -ll \
             -x PanOS-Toolbox/backend/panos_toolbox/static

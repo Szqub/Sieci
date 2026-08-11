@@ -454,7 +454,7 @@ def normalize_host_literal(value: str) -> Optional[str]:
         return None
     if "/" in stripped:
         base_text, mask_text = stripped.split("/", 1)
-        if mask_text.strip() == "0.0.0.0":  # nosec B104 - wildcard mask, not bind
+        if mask_text.strip() == "0.0.0.0":  # wildcard mask, not bind  # nosec B104
             try:
                 return str(ipaddress.IPv4Address(base_text.strip()))
             except ValueError:

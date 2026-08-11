@@ -88,7 +88,7 @@ class UrllibXMLTransport:
         if profile.use_ssl and profile.verify_ssl:
             context = ssl.create_default_context(cafile=ca_bundle)
         elif profile.use_ssl:
-            context = ssl._create_unverified_context()  # noqa: SLF001  # nosec B323 - explicit operator choice
+            context = ssl._create_unverified_context()  # noqa: SLF001  # explicit operator choice  # nosec B323
         else:
             context = None
         handlers = [_NoRedirect()]
