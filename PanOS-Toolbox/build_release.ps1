@@ -369,6 +369,45 @@ if ($psLauncherProcess.ExitCode -ne 0) {
     throw "Packaged start_toolbox.ps1 doctor failed with exit code $($psLauncherProcess.ExitCode)."
 }
 
+# Windows application-control policies can force downloaded scripts into
+# ConstrainedLanguage even when Windows PowerShell 5.1 itself is available.
+# Reproduce that boundary explicitly so unsupported .NET method calls cannot
+# reach a release again.
+$previousClmLauncher = $env:PANOS_TOOLBOX_CLM_LAUNCHER
+try {
+    $env:PANOS_TOOLBOX_CLM_LAUNCHER = $psLauncher
+    $clmHarness = Join-Path $staging "verify-constrained-language.ps1"
+    @'
+$ErrorActionPreference = "Stop"
+$ExecutionContext.SessionState.LanguageMode = "ConstrainedLanguage"
+if ($ExecutionContext.SessionState.LanguageMode -ne "ConstrainedLanguage") {
+    exit 97
+}
+& $env:PANOS_TOOLBOX_CLM_LAUNCHER -Doctor
+if (-not (Test-Path Variable:LASTEXITCODE)) {
+    exit 98
+}
+exit $LASTEXITCODE
+'@ | Set-Content -LiteralPath $clmHarness -Encoding UTF8
+    $clmStdout = Join-Path $staging "launcher-clm-doctor.stdout.log"
+    $clmStderr = Join-Path $staging "launcher-clm-doctor.stderr.log"
+    $clmProcess = Start-Process -FilePath $windowsPowerShell `
+        -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-File", $clmHarness) `
+        -WorkingDirectory $packageRoot -RedirectStandardOutput $clmStdout `
+        -RedirectStandardError $clmStderr -WindowStyle Hidden -Wait -PassThru
+    $clmExitCode = $clmProcess.ExitCode
+}
+finally {
+    $env:PANOS_TOOLBOX_CLM_LAUNCHER = $previousClmLauncher
+}
+if ($clmExitCode -ne 0) {
+    $clmError = if (Test-Path -LiteralPath $clmStderr) {
+        Get-Content -LiteralPath $clmStderr -Raw -ErrorAction SilentlyContinue
+    }
+    else { "" }
+    throw "Packaged start_toolbox.ps1 failed in ConstrainedLanguage with exit code $clmExitCode. $clmError"
+}
+
 # Start the unpacked package with only its vendored runtime and verify a real
 # loopback HTTP response. This catches launchers that pass Doctor but cannot
 # import Flask while creating the web application.

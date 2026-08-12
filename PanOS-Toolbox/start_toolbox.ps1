@@ -24,11 +24,11 @@ foreach ($required in $requiredFiles) {
 
 function Resolve-ToolboxPython {
     if ($env:PANOS_TOOLBOX_PYTHON) {
-        $configured = [System.IO.Path]::GetFullPath($env:PANOS_TOOLBOX_PYTHON)
-        if (-not (Test-Path -LiteralPath $configured -PathType Leaf)) {
-            throw "PANOS_TOOLBOX_PYTHON nie wskazuje istniejącego pliku: $configured"
+        if (-not (Test-Path -LiteralPath $env:PANOS_TOOLBOX_PYTHON -PathType Leaf)) {
+            throw "PANOS_TOOLBOX_PYTHON nie wskazuje istniejącego pliku: $env:PANOS_TOOLBOX_PYTHON"
         }
-        if ([System.IO.Path]::GetExtension($configured) -ne ".exe") {
+        $configured = Convert-Path -LiteralPath $env:PANOS_TOOLBOX_PYTHON
+        if ($configured -notmatch "(?i)\.exe$") {
             throw "PANOS_TOOLBOX_PYTHON musi wskazywać python.exe albo py.exe."
         }
         return $configured
@@ -66,7 +66,7 @@ function Resolve-ToolboxPython {
 
 $python = Resolve-ToolboxPython
 $pythonArguments = @()
-if ([System.IO.Path]::GetFileName($python) -ieq "py.exe") {
+if ((Split-Path -Path $python -Leaf) -ieq "py.exe") {
     $pythonArguments += "-3"
 }
 $pythonArguments += @("-X", "utf8", "-I", "-B", "-S", $entryPoint)

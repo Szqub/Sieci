@@ -1475,7 +1475,7 @@ def create_app(
     @app.get("/api/v1/health")
     def health():
         return jsonify(
-            {"ok": True, "status": "ok", "version": "0.8.1", "bind": "127.0.0.1", "api": "v1"}
+            {"ok": True, "status": "ok", "version": "0.8.2", "bind": "127.0.0.1", "api": "v1"}
         )
 
     @app.get("/api/v1/meta")

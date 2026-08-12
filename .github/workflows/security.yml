@@ -70,7 +70,7 @@ jobs:
         run: npm run build
 
   portable-windows:
-    name: Portable package on Windows PowerShell 5.1
+    name: Portable package on Windows PowerShell 5.1 + ConstrainedLanguage
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -86,6 +86,6 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: PanOS-Toolbox/frontend/package-lock.json
-      - name: Build and smoke-test portable package
+      - name: Build and smoke-test portable package including ConstrainedLanguage
         shell: powershell
         run: .\PanOS-Toolbox\build_release.ps1 -SkipTests

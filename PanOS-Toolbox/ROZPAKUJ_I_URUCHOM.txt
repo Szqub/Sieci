@@ -49,7 +49,8 @@ Nie uruchamiaj plikow bezposrednio z podgladu ZIP i nie wykonuj pip install.
 
 Nie zmieniaj rozszerzenia ZIP-a i nie pakuj go ponownie z haslem. Paczka nie
 zawiera wlasnych EXE/DLL/PYD. Zawiera tylko dwa audytowane startery:
-start_toolbox.cmd i start_toolbox.ps1; PS1 nie zmienia Execution Policy.
+start_toolbox.cmd i start_toolbox.ps1; PS1 nie zmienia Execution Policy i jest
+testowany w Windows PowerShell 5.1 z wymuszonym ConstrainedLanguage.
 Integralnosc sprawdzisz
 w RELEASE-MANIFEST.json i SHA256SUMS.txt. Jezeli NDR/EDR nadal blokuje plik,
 przekaz zespolowi bezpieczenstwa URL wydania oraz SHA-256 z pliku

@@ -107,7 +107,7 @@ class UrllibXMLTransport:
             self.profile.base_url,
             data=urllib.parse.urlencode(params).encode("utf-8"),
             headers={
-                "User-Agent": "ByteTech-PanOS-Toolbox/0.8.1",
+                "User-Agent": "ByteTech-PanOS-Toolbox/0.8.2",
                 "Content-Type": "application/x-www-form-urlencoded",
                 **headers,
             },

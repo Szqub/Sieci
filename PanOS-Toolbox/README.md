@@ -17,6 +17,16 @@ Candidate, commit i push są osobnymi etapami. Żaden etap nie uruchamia
 następnego automatycznie. Narzędzie nigdy automatycznie nie ładuje pełnego
 backupu konfiguracji.
 
+## Najważniejsze w v0.8.2
+
+- `start_toolbox.ps1` działa w wymuszonym przez AppLocker/WDAC trybie Windows
+  PowerShell `ConstrainedLanguage`; release gate odtwarza ten tryb przed
+  opublikowaniem paczki;
+- starter nie używa metod .NET blokowanych przez politykę organizacji, nie
+  zmienia `ExecutionPolicy` i zachowuje obsługę `-Doctor` oraz `-Port`;
+- `start_toolbox.cmd` pozostaje podstawowym starterem bez zależności od języka
+  skryptowego PowerShell.
+
 ## Najważniejsze w v0.8.1
 
 - **Hand Mode** generuje prawdziwe, gotowe do wklejenia komendy PAN-OS CLI dla
@@ -151,7 +161,8 @@ Nie zmieniaj rozszerzenia ZIP-a, nie umieszczaj paczki w archiwum chronionym
 hasłem i nie próbuj omijać NDR/EDR. Release jest budowany fail-closed: nie
 zawiera własnych plików PE (`.exe`, `.dll`, `.pyd`, `MZ`). Zawiera wyłącznie
 dwa jawnie allowlistowane launchery: czytelny `start_toolbox.cmd` oraz
-`start_toolbox.ps1` zgodny z Windows PowerShell 5.1. Oba uruchamiają
+`start_toolbox.ps1` zgodny z Windows PowerShell 5.1, również w trybie
+`ConstrainedLanguage`. Oba uruchamiają
 zatwierdzonego firmowego Pythona z `-I -B -S`; PS1 nie omija Execution Policy. Flaga `-B` oraz
 entrypoint wyłączają zapis `__pycache__`, dzięki czemu katalog rozpakowanej
 paczki może pozostać tylko do odczytu również wtedy, gdy leży na SMB.
